@@ -378,7 +378,7 @@ class GaussianNullModel:
 
     def score_covariance_cached(self, genotype, *, variant_tile_size=4096,
                                 panel_variant_size=None, memory_limit_gib=40,
-                                matmul_mode=None, profile=False):
+                                matmul_mode=None, profile=False, compute_score=True):
         """Return score, covariance and a bounded TF32 cache report.
 
         The host input is an already oriented/imputed FP32 [samples, variants]
@@ -389,8 +389,10 @@ class GaussianNullModel:
         covariate projection tiles remain 512. ``panel_variant_size`` is None
         or a positive multiple of ``variant_tile_size``. ``memory_limit_gib``
         bounds live allocated storage, including the resident model, and must
-        be at most 40. ``profile`` adds CUDA stream timings with one final
+        respect live physical memory. ``profile`` adds CUDA stream timings with one final
         synchronization; stage intervals overlap and are not pure kernel time.
+        ``compute_score=False`` returns None for score when it was already
+        computed by the caller, preserving every covariance product/layout.
 
         Callers choose this backend explicitly. Gaussian covariance routes
         share constant-precision normalization; Single remains unchanged.
@@ -402,7 +404,7 @@ class GaussianNullModel:
             self, genotype, variant_tile_size=variant_tile_size,
             panel_variant_size=panel_variant_size,
             memory_limit_gib=memory_limit_gib, matmul_mode=mode,
-            symmetry="average", profile=profile)
+            symmetry="average", profile=profile, compute_score=compute_score)
 
     def score_covariance(self, genotype, *, reduction="blas", max_workspace_bytes=256 * 1024**2, matmul_mode=None):
         """U=G' scaled.residuals, V=G' Sigma_i G-X projection.

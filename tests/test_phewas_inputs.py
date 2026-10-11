@@ -34,7 +34,7 @@ def inputs(tmp_path, *, binary_bad=False, duplicate=False):
                      ["binary", "binomial", "extra_profile", "age;extra"],
                      ["continuous", "gaussian", "base_profile", "age"]])
     return dict(phenotypes=p, covariates=c, profiles=profiles, sample_ids=ids,
-                output=tmp_path / "prepared", chunk_rows=2)
+                output=tmp_path / "prepared", chunk_rows=2, rm_nan=False)
 
 
 def test_cache_order_float_roundtrip_and_individual_profiles(tmp_path):

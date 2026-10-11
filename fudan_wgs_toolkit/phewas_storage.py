@@ -4,6 +4,7 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
 import csv
+import errno
 import gzip
 import hashlib
 import io
@@ -368,13 +369,38 @@ class ModelRepository:
     applies. Entries held by nested acquire contexts cannot be evicted.
     """
     def __init__(self, entries, *, workspace_bytes=8*2**30,
-                 binary_normal_cache='derived_fp64'):
+                 binary_normal_cache='derived_fp64', cache_limit_bytes=None,
+                 sample_axis_storage='mmap', sample_axis_mmap_limit=None,
+                 trait_indices=None):
         self._validate_bytes(workspace_bytes, 'workspace_bytes')
+        if cache_limit_bytes is not None:
+            self._validate_bytes(cache_limit_bytes, 'cache_limit_bytes')
+        if sample_axis_storage not in ('mmap', 'bytes'):
+            raise ValueError('sample_axis_storage must be mmap or bytes')
+        if sample_axis_mmap_limit is not None:
+            self._validate_bytes(sample_axis_mmap_limit, 'sample_axis_mmap_limit')
         if binary_normal_cache not in ('derived_fp64', 'stored_native'):
             raise ValueError('binary_normal_cache must be derived_fp64 or stored_native')
         self.entries = list(entries)
+        self._inventory_model_count = len(self.entries)
+        self._explicit_trait_indices = trait_indices is not None
+        selected = list(range(len(self.entries))) if trait_indices is None else list(trait_indices)
+        if (any(isinstance(i, bool) or not isinstance(i, (int, np.integer))
+                or i < 0 or i >= len(self.entries) for i in selected)
+                or len(set(selected)) != len(selected)):
+            raise ValueError('trait_indices must be distinct global model inventory indices')
+        self._assigned_trait_indices = tuple(int(i) for i in selected)
         self.workspace_bytes = workspace_bytes
         self.binary_normal_cache = binary_normal_cache
+        self.cache_limit_bytes = cache_limit_bytes
+        self._cache_limits = {}
+        self._cache_lru = OrderedDict()
+        self._entry_storages = {}
+        self._storage_owners = {}
+        self._cache_bytes_by_device = {}
+        self._cache_metrics = dict(cache_budget_evictions=0, cache_budget_active_overflows=0,
+                                  cache_storage_bytes_highwater=0, file_descriptor_evictions=0,
+                                  file_descriptor_retries=0)
         self._closed = False
         self._workspace_reservations = []
         self._memory_policies = {}
@@ -389,33 +415,60 @@ class ModelRepository:
         self.spa_source_loads = self.spa_source_hits = 0
         self.loads = self.hits = self.evictions = 0
         self._descriptors = []
-        # Keep immutable sample axes in RAM rather than one open mmap per
-        # phenotype. Exactly identical axes share storage; distinct complete
-        # case sets retain their own order. Thousands of traits therefore do
-        # not consume thousands of file descriptors before association starts.
+        self._descriptors_by_index = {}
+        # Readonly mappings share the authenticated file pages across workers.
+        # Leave descriptor headroom for readers/output: axes beyond that safe
+        # budget fall back to immutable bytes without changing the process FD
+        # limit. Exactly identical ordered axes always share one backing.
         self._sample_axes = {}
-        for i, entry in enumerate(self.entries):
+        self.sample_axis_storage = sample_axis_storage
+        mmap_budget = self._sample_axis_mapping_budget()
+        if sample_axis_mmap_limit is not None:
+            mmap_budget = min(mmap_budget, sample_axis_mmap_limit)
+        self._sample_axis_mmap_budget = mmap_budget
+        mapped_axes = 0
+        for i in self._assigned_trait_indices:
+            entry = self.entries[i]
             path = Path(entry['path'])
             verify_file(path/'model.private.json', entry['sha256'])
             model_meta = json.loads((path/'model.private.json').read_text())
             verify_file(path/'sample_rows.npy', model_meta['sample_rows_sha256'])
             axis_key = model_meta['sample_rows_sha256']
             if axis_key not in self._sample_axes:
-                rows = np.load(path/'sample_rows.npy', allow_pickle=False)
+                mapped = sample_axis_storage == 'mmap' and mapped_axes < mmap_budget
+                rows = np.load(path/'sample_rows.npy', mmap_mode='r' if mapped else None,
+                               allow_pickle=False)
                 if rows.ndim != 1 or rows.dtype != np.dtype(np.int64):
                     raise ValueError('fitted sample rows must be a one-dimensional int64 axis')
-                # A reversible readonly flag cannot prove immutable ownership.
-                # Bytes-backed rows are safe aliases in descriptor grouping and
-                # the shared broker, without retaining an open mmap per trait.
-                self._sample_axes[axis_key] = np.frombuffer(rows.tobytes(), dtype=np.int64)
+                self._sample_axes[axis_key] = (rows if mapped else
+                                              np.frombuffer(rows.tobytes(), dtype=np.int64))
+                mapped_axes += int(mapped)
             rows = self._sample_axes[axis_key]
             if len(rows) != model_meta['n']:
                 raise ValueError('fitted sample axis length differs from model metadata')
-            self._descriptors.append(dict(trait_index=i, n=len(rows), family=entry['family'],
-                ordered_rows=rows, projection_key=None, spa_available=(path/'spa').exists()))
+            descriptor = dict(trait_index=i, n=len(rows), family=entry['family'],
+                              sample_rows_sha256=axis_key,
+                ordered_rows=rows, projection_key=None, spa_available=(path/'spa').exists())
+            self._descriptors.append(descriptor)
+            self._descriptors_by_index[i] = descriptor
     def descriptors(self):
         self._check_open()
         return self._descriptors
+
+    def _descriptor(self, index):
+        if isinstance(index, bool) or not isinstance(index, (int, np.integer)) or index < 0:
+            raise ValueError('trait index must be a global nonnegative integer')
+        index = int(index)
+        descriptor = self._descriptors_by_index.get(index)
+        if descriptor is not None:
+            return descriptor
+        # Injected small contract banks historically replace _descriptors.
+        # Production subsets always use the explicit global-index mapping.
+        if not self._explicit_trait_indices and index < len(self._descriptors):
+            descriptor = self._descriptors[index]
+            if descriptor.get('trait_index', index) == index:
+                return descriptor
+        raise ValueError('trait index is not assigned to this model bank')
 
     def _check_open(self):
         if self._closed:
@@ -438,14 +491,174 @@ class ModelRepository:
         self.tensor_cache.clear()
         self._sample_axes.clear()
         self._descriptors.clear()
+        self._descriptors_by_index.clear()
         self.entries.clear()
         self.pinned.clear()
         self.spa_pinned.clear()
+        self._cache_lru.clear()
+        self._entry_storages.clear()
+        self._storage_owners.clear()
+        self._cache_bytes_by_device.clear()
         self._closed = True
     @staticmethod
     def _validate_bytes(value, name):
         if type(value) is not int or value < 0:
             raise ValueError(name+' must be a nonnegative integer')
+
+    @staticmethod
+    def _file_descriptor_headroom():
+        try:
+            import resource
+            soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft == resource.RLIM_INFINITY:
+                return None
+            opened = len(os.listdir('/proc/self/fd'))
+            return max(0, int(soft)-opened)
+        except (ImportError, OSError, ValueError):
+            return None
+
+    @classmethod
+    def _sample_axis_mapping_budget(cls):
+        available = cls._file_descriptor_headroom()
+        # Ordinary model sample IDs and portable metadata also retain maps.
+        # Reserve half the available descriptors for those later consumers.
+        return 4096 if available is None else max(0, (available-64)//2)
+
+    def _admit_file_descriptors(self, device):
+        while True:
+            available = self._file_descriptor_headroom()
+            if available is None or available >= 8:
+                return
+            if not self._evict_one(device=torch.device(device), namespace='normal'):
+                raise OSError(errno.EMFILE, 'model loading cannot admit file descriptors; '
+                              'active model and external mappings are retained')
+            self._cache_metrics['file_descriptor_evictions'] += 1
+
+    def _load_with_file_descriptor_admission(self, device, loader):
+        while True:
+            self._admit_file_descriptors(device)
+            try:
+                return loader()
+            except OSError as error:
+                if (error.errno != errno.EMFILE or
+                        not self._evict_one(device=torch.device(device), namespace='normal')):
+                    raise
+                # A concurrent reader can consume descriptors after admission.
+                # Each retry retires a distinct cold entry; it cannot spin once
+                # all candidates are pinned or owned externally. Leave the
+                # except scope before retrying so partial loads are released.
+                self._cache_metrics['file_descriptor_retries'] += 1
+                self._cache_metrics['file_descriptor_evictions'] += 1
+
+    def _load_normal_model(self, index, device):
+        return self._load_with_file_descriptor_admission(device, lambda:
+            load_model_store(self.entries[index]['path'], device=device, tensor_cache=self.tensor_cache))
+
+    @staticmethod
+    def _owned_storages(value):
+        visited, storages = set(), {}
+        def visit(current):
+            if isinstance(current, torch.Tensor):
+                if current.layout == torch.strided:
+                    backing = current.untyped_storage()
+                    key = (str(current.device), backing.data_ptr())
+                    storages[key] = max(storages.get(key, 0), backing.nbytes())
+                elif current.layout == torch.sparse_coo:
+                    visit(current._indices()); visit(current._values())
+                else:
+                    visit(current.values())
+                    for name in ('crow_indices', 'col_indices', 'ccol_indices', 'row_indices'):
+                        try:
+                            visit(getattr(current, name)())
+                        except (AttributeError, RuntimeError):
+                            pass
+                return
+            if id(current) in visited:
+                return
+            visited.add(id(current))
+            if isinstance(current, dict):
+                for item in current.values():
+                    visit(item)
+            elif isinstance(current, (tuple, list)):
+                for item in current:
+                    visit(item)
+            elif hasattr(current, '_tensors'):
+                visit(current._tensors)
+            elif hasattr(current, '__dict__') and not isinstance(current, np.ndarray):
+                visit(vars(current))
+        visit(value)
+        return storages
+
+    def _refresh_entry(self, namespace, key):
+        token = (namespace, *key)
+        bank = self.models if namespace == 'normal' else self.spa_sources
+        new = self._owned_storages(bank[key])
+        for storage in self._entry_storages.get(token, {}):
+            owners = self._storage_owners[storage]
+            before = max(owners.values())
+            owners.pop(token, None)
+            self._cache_bytes_by_device[storage[0]] -= before-(max(owners.values()) if owners else 0)
+            if not owners:
+                self._storage_owners.pop(storage)
+        self._entry_storages[token] = new
+        for storage, size in new.items():
+            owners = self._storage_owners.setdefault(storage, {})
+            before = max(owners.values(), default=0)
+            owners[token] = size
+            self._cache_bytes_by_device[storage[0]] = self._cache_bytes_by_device.get(storage[0], 0)+max(owners.values())-before
+        self._cache_metrics['cache_storage_bytes_highwater'] = max(
+            self._cache_metrics['cache_storage_bytes_highwater'],
+            sum(self._cache_bytes_by_device.values()))
+
+    def _touch_entry(self, namespace, key):
+        token = (namespace, *key)
+        self._refresh_entry(namespace, key)
+        self._cache_lru[token] = None
+        self._cache_lru.move_to_end(token)
+
+    def _retire_entry(self, token):
+        namespace, index, device = token
+        bank = self.models if namespace == 'normal' else self.spa_sources
+        bank.pop((index, device), None)
+        self._cache_lru.pop(token, None)
+        for storage in self._entry_storages.pop(token, {}):
+            owners = self._storage_owners[storage]
+            before = max(owners.values())
+            owners.pop(token, None)
+            self._cache_bytes_by_device[storage[0]] -= before-(max(owners.values()) if owners else 0)
+            if not owners:
+                self._storage_owners.pop(storage)
+        self.evictions += 1
+
+    def _synchronize_bank_index(self):
+        # Ordinary acquisition updates the ledger directly. The length check
+        # avoids walking the full thousand-trait bank on each workspace guard;
+        # it also permits diagnostic/test callers to insert compatible entries.
+        if len(self._cache_lru) == len(self.models)+len(self.spa_sources):
+            return
+        for namespace, bank in (('normal', self.models), ('spa', self.spa_sources)):
+            for key in bank:
+                if (namespace, *key) not in self._cache_lru:
+                    self._touch_entry(namespace, key)
+        for token in list(self._cache_lru):
+            bank = self.models if token[0] == 'normal' else self.spa_sources
+            if token[1:] not in bank:
+                self._retire_entry(token)
+
+    def _cache_bytes(self, device=None):
+        self._synchronize_bank_index()
+        return (sum(self._cache_bytes_by_device.values()) if device is None else
+                self._cache_bytes_by_device.get(str(torch.device(device)), 0))
+
+    def _trim_cache(self, device, *, protect=()):
+        limit = self._cache_limits.get(torch.device(device), self.cache_limit_bytes)
+        if limit is None:
+            return
+        while self._cache_bytes(device) > limit:
+            if not self._evict_one(device=torch.device(device), protect=protect):
+                self._cache_metrics['cache_budget_active_overflows'] += 1
+                return
+            self._cache_metrics['cache_budget_evictions'] += 1
 
     def _workspace_for(self, device):
         current = [r for r in self._workspace_reservations if r.device == device]
@@ -457,7 +670,8 @@ class ModelRepository:
         return required, reserve, current
 
     @contextmanager
-    def memory_policy(self, device, *, limit_bytes=None, reserve_bytes=256*2**20):
+    def memory_policy(self, device, *, limit_bytes=None, reserve_bytes=256*2**20,
+                      cache_limit_bytes=None, cache_live_fraction=None):
         """Use the caller's process cap and live reserve during this run.
 
         None retains admission against current physical/live CUDA capacity.
@@ -469,16 +683,42 @@ class ModelRepository:
             if not limit_bytes:
                 raise ValueError('limit_bytes must be positive or None')
         self._validate_bytes(reserve_bytes, 'reserve_bytes')
+        if cache_limit_bytes is not None:
+            self._validate_bytes(cache_limit_bytes, 'cache_limit_bytes')
+        if (cache_live_fraction is not None and (isinstance(cache_live_fraction, bool)
+                or not isinstance(cache_live_fraction, (int, float))
+                or not np.isfinite(cache_live_fraction) or not 0 < cache_live_fraction <= 1)):
+            raise ValueError('cache_live_fraction must be in (0,1] or None')
         device = torch.device(device)
         previous = self._memory_policies.get(device)
+        previous_cache_limit = self._cache_limits.get(device)
         self._memory_policies[device] = (limit_bytes, reserve_bytes)
+        cache_budget = self.cache_limit_bytes if cache_limit_bytes is None else cache_limit_bytes
+        if cache_live_fraction is not None and device.type == 'cuda':
+            free, total = torch.cuda.mem_get_info(device)
+            allocated = torch.cuda.memory_allocated(device)
+            unused = max(0, torch.cuda.memory_reserved(device)-allocated)
+            cap = int(total) if limit_bytes is None else min(int(total), limit_bytes)
+            # Own cached storage already consumes allocated memory. Restore
+            # those bytes only to the cache sizing basis, never to admission.
+            basis = max(0, min(int(free)+unused-reserve_bytes,
+                               cap-allocated-reserve_bytes))+self._cache_bytes(device)
+            live_budget = int(basis*cache_live_fraction)
+            cache_budget = live_budget if cache_budget is None else min(cache_budget, live_budget)
+        if cache_budget is not None:
+            self._cache_limits[device] = cache_budget
         try:
+            self._trim_cache(device)
             yield
         finally:
             if previous is None:
                 self._memory_policies.pop(device)
             else:
                 self._memory_policies[device] = previous
+            if previous_cache_limit is None:
+                self._cache_limits.pop(device, None)
+            else:
+                self._cache_limits[device] = previous_cache_limit
 
     def _admit(self, device, *, extra_bytes=0, fitted_bytes=0, phase='fitted_state', protect=()):
         """Evict owned, unpinned state until physical/live CUDA space admits NEW bytes.
@@ -488,6 +728,7 @@ class ModelRepository:
         to ``extra_bytes`` again. No external process or precision is changed.
         """
         device = torch.device(device)
+        self._trim_cache(device, protect=protect)
         if device.type != 'cuda':
             return
         self._validate_bytes(extra_bytes, 'extra_bytes')
@@ -512,7 +753,6 @@ class ModelRepository:
                 return
             if self._evict_one(device=device, protect=protect):
                 metrics['workspace_evictions'] += 1
-                torch.cuda.empty_cache()
                 continue
             if not released:
                 # CSR and fitted-state caches have independent owners. Their
@@ -550,19 +790,19 @@ class ModelRepository:
             self._workspace_reservations.remove(reservation)
             reservation.closed = True
 
-    def _evict_one(self, *, device=None, protect=()):
+    def _evict_one(self, *, device=None, protect=(), namespace=None):
         protected = set(protect)
-        for key in list(self.models):
-            if (key not in protected and not self.pinned.get(key, 0)
-                    and (device is None or torch.device(key[1]) == device)):
-                self.models.pop(key)
-                self.evictions += 1
-                return True
-        for key in list(self.spa_sources):
-            if (key not in protected and not self.spa_pinned.get(key, 0)
-                    and (device is None or torch.device(key[1]) == device)):
-                self.spa_sources.pop(key)
-                self.evictions += 1
+        self._synchronize_bank_index()
+        for token in list(self._cache_lru):
+            entry_namespace, index, source_device = token
+            key = (index, source_device)
+            pins = self.pinned if entry_namespace == 'normal' else self.spa_pinned
+            # Internal callers bind the namespace exactly. Older direct
+            # callers using bare (index,device) conservatively protect both.
+            if (token not in protected and key not in protected and not pins.get(key, 0)
+                    and (namespace is None or namespace == entry_namespace)
+                    and (device is None or torch.device(source_device) == torch.device(device))):
+                self._retire_entry(token)
                 return True
         return False
     @contextmanager
@@ -573,7 +813,7 @@ class ModelRepository:
         contexts = ExitStack()
         try:
             for i in indices:
-                family = self._descriptors[i]['family']
+                family = self._descriptor(i)['family']
                 if family == 'binomial' and self.binary_normal_cache == 'derived_fp64':
                     source = contexts.enter_context(self._acquire_binary_source(int(i), device))
                     self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source),
@@ -596,8 +836,7 @@ class ModelRepository:
                                 if name in meta['arrays'])
                             estimated += 2*sparse
                         self._admit(device, fitted_bytes=estimated)
-                    self.models[key] = load_model_store(self.entries[i]['path'], device=device,
-                                                       tensor_cache=self.tensor_cache)
+                    self.models[key] = self._load_normal_model(i, device)
                     if family == 'binomial':
                         model = self.models[key]
                         if model.use_spa:
@@ -611,20 +850,29 @@ class ModelRepository:
                     self.hits += 1
                     # Protect this hit before admission; it must not be its
                     # own eviction victim or become a KeyError after a hit.
-                    self._admit(device, protect=(key,))
+                    self._admit(device, protect=(('normal', *key),))
                 self.models.move_to_end(key)
                 self.pinned[key] = self.pinned.get(key, 0)+1
                 keys.append(key)
+                self._touch_entry('normal', key)
+                self._trim_cache(device)
                 models.append(self.models[key])
             yield models
         finally:
-            contexts.close()
-            for key in keys:
-                self.pinned[key] -= 1
+            try:
+                contexts.close()
+            finally:
+                # Release every pin before bookkeeping so an exceptional
+                # nested SPA context cannot leave unrelated normal pins live.
+                for key in keys:
+                    self.pinned[key] -= 1
+                for key in keys:
+                    self._refresh_entry('normal', key)
+                self._trim_cache(device)
     @contextmanager
     def _acquire_binary_source(self, index, device):
         self._check_open()
-        if not self._descriptors[index]['spa_available']:
+        if not self._descriptor(index)['spa_available']:
             raise ValueError('binary SPA sidecar is missing')
         key = (int(index), str(device))
         if key not in self.spa_sources:
@@ -633,18 +881,23 @@ class ModelRepository:
             if torch.device(device).type == 'cuda':
                 self._admit(device, fitted_bytes=estimated, phase='binary_fitted_source')
             from .binary_null import ImmutableFittedBinarySource
-            self.spa_sources[key] = ImmutableFittedBinarySource(**load_spa_source(
-                self.entries[index]['path'], device=device, tensor_cache=self.tensor_cache))
+            self.spa_sources[key] = self._load_with_file_descriptor_admission(device, lambda:
+                ImmutableFittedBinarySource(**load_spa_source(self.entries[index]['path'],
+                    device=device, tensor_cache=self.tensor_cache)))
             self.spa_source_loads += 1
         else:
             self.spa_source_hits += 1
-            self._admit(device, phase='binary_fitted_source_hit', protect=(key,))
+            self._admit(device, phase='binary_fitted_source_hit', protect=(('spa', *key),))
         self.spa_sources.move_to_end(key)
         self.spa_pinned[key] = self.spa_pinned.get(key, 0)+1
         try:
+            self._touch_entry('spa', key)
+            self._trim_cache(device)
             yield self.spa_sources[key]
         finally:
             self.spa_pinned[key] -= 1
+            self._refresh_entry('spa', key)
+            self._trim_cache(device)
     @contextmanager
     def acquire_spa(self, index, device):
         with self._acquire_binary_source(int(index), device) as source:
@@ -703,7 +956,11 @@ class ModelRepository:
             resident_storage_scope='owned bank endpoint; unique physical tensor storage, including lazy projections')
 
     def summary(self):
+        mapped = [rows for rows in self._sample_axes.values() if isinstance(rows, np.memmap)]
+        anonymous = [rows for rows in self._sample_axes.values() if not isinstance(rows, np.memmap)]
         return dict(model_loads=self.loads, bank_hits=self.hits, evictions=self.evictions,
+                    global_inventory_model_count=self._inventory_model_count,
+                    assigned_model_count=len(self._assigned_trait_indices),
                     resident_models=len(self.models), workspace_bytes=self.workspace_bytes,
                     spa_source_loads=self.spa_source_loads, spa_source_hits=self.spa_source_hits,
                     resident_spa_sources=len(self.spa_sources), spa_projection_reconstructed_on_gpu=True,
@@ -713,13 +970,22 @@ class ModelRepository:
                         if self.binary_normal_cache == 'derived_fp64' else 'authenticated_stored_native'),
                     binary_spa_state_provenance='authenticated_original_fp64_source',
                     unique_sample_axes=len(self._sample_axes),
-                    sample_axis_ram_bytes=sum(rows.nbytes for rows in self._sample_axes.values()),
-                    sample_axis_open_mmaps=0,
-                    sample_axis_immutable_backing='bytes',
+                    sample_axis_ram_bytes=sum(rows.nbytes for rows in anonymous),
+                    sample_axis_mapped_logical_bytes=sum(rows.nbytes for rows in mapped),
+                    sample_axis_open_mmaps=len(mapped),
+                    sample_axis_immutable_backing=('readonly_mmap_with_immutable_bytes_fallback'
+                        if self.sample_axis_storage == 'mmap' else 'bytes'),
+                    sample_axis_mmap_budget=self._sample_axis_mmap_budget,
+                    sample_axis_mapping_bytes_are_resident_memory=False,
+                    fitted_cache_limit_bytes=self.cache_limit_bytes,
+                    fitted_cache_limits_by_device={str(device): value for device, value in self._cache_limits.items()},
+                    fitted_cache_unique_storage_bytes=self._cache_bytes(),
+                    fitted_cache_eviction_policy='global_normal_and_spa_lru_with_active_pins',
                     live_deduplicated_design_tensors=len(self.tensor_cache),
                     active_workspace_reservations=len(self._workspace_reservations),
                     closed=self._closed,
                     **self.resident_storage_summary(),
+                    **self._cache_metrics,
                     **{key: dict(value) if isinstance(value, dict) else value
                        for key, value in self._workspace_metrics.items()})
 
@@ -742,6 +1008,7 @@ def _rows(value):
 
 class StreamingCSVWriter:
     """Complete CSV.gz shards and atomic receipts; no significance filtering."""
+    _SCHEMA_CACHE_LIMIT = 128
     def __init__(self, directory, *, worker_id='0', max_rows_per_shard=1_000_000,
                  max_open_streams=48, minimum_free_bytes=20*2**30):
         self.directory = Path(directory)
@@ -751,6 +1018,19 @@ class StreamingCSVWriter:
         self.minimum_free_bytes = minimum_free_bytes
         self.streams, self.sequence, self.receipts = OrderedDict(), {}, []
         self.row_counts, self.write_seconds = {}, 0.
+        # Only immutable column names/order and their signatures live here.
+        # Never retain source rows or their array/tensor data owners.
+        self._schema_cache = OrderedDict()
+    def _schema(self, row):
+        columns = tuple(row)
+        signature = self._schema_cache.get(columns)
+        if signature is None:
+            signature = hashlib.sha256(json.dumps(list(columns)).encode()).hexdigest()[:12]
+            self._schema_cache[columns] = signature
+            if len(self._schema_cache) > self._SCHEMA_CACHE_LIMIT:
+                self._schema_cache.popitem(last=False)
+        self._schema_cache.move_to_end(columns)
+        return columns, signature
     def _close(self, key):
         value = self.streams.pop(key)
         value['stream'].close()
@@ -759,7 +1039,7 @@ class StreamingCSVWriter:
         partial.replace(final)
         receipt = dict(kind=key[0], chromosome=key[1], rows=value['rows'],
             csv_file=str(final.relative_to(self.directory)), sha256=digest_file(final),
-            compressed_bytes=final.stat().st_size, columns=value['columns'],
+            compressed_bytes=final.stat().st_size, columns=list(value['columns']),
             first_job=value['first_job'], last_job=value['last_job'])
         atomic_json(final.with_name(final.name+'.receipt.json'), receipt)
         self.receipts.append(receipt)
@@ -767,8 +1047,7 @@ class StreamingCSVWriter:
         started = time.perf_counter()
         for source_row in _rows(result):
             row = dict(trait_index=int(trait_index), **source_row)
-            columns = list(row)
-            signature = hashlib.sha256(json.dumps(columns).encode()).hexdigest()[:12]
+            columns, signature = self._schema(row)
             key = (kind, str(chromosome), signature)
             if key in self.streams and (self.streams[key]['columns'] != columns or
                                        self.streams[key]['rows'] >= self.max_rows):

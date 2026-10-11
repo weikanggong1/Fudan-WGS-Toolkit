@@ -206,10 +206,19 @@ def test_shared_single_score_and_mature_variance_use_one_cohort_genotype(cpu_pro
         mac_cutoff=1, prepared_state=(prepared, ordinal))
     assert final_ordinal == ordinal
     for records, (score, variance) in zip(actual, expected):
-        np.testing.assert_allclose([row['Score'] for row in records], score.numpy(), rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose([row['Score'] for row in records], score.numpy(), rtol=5e-6, atol=5e-6)
         np.testing.assert_array_equal([row['Score_se'] for row in records], variance.double().sqrt().numpy())
+        from fudan_wgs_toolkit.pipeline import _individual_log_probabilities
+        expected_logp = _individual_log_probabilities(score, variance).numpy()/np.log(10.)
+        actual_logp = np.asarray([row['pvalue_log10'] for row in records])
+        np.testing.assert_array_equal(np.isfinite(actual_logp), np.isfinite(expected_logp))
+        finite = np.isfinite(expected_logp)
+        assert np.all(np.abs(actual_logp[finite]-expected_logp[finite]) < .001)
     metrics = single.execution_metadata()
-    assert metrics['phenotype_score_gemm_calls'] == 1
+    assert metrics['phenotype_score_gemm_calls'] == 0
+    assert metrics['phenotype_score_batches'] == 1
+    assert (metrics['phenotype_score_fp32_vector_calls'],
+            metrics['phenotype_score_fp32_simt_gemm_calls']) in ((2, 0), (0, 1))
     assert metrics['original_variance_calls'] == 2
     assert metrics['result_transfer_batches'] == 1
     assert metrics['dense_genotype_h2d_bytes'] == metrics['dense_genotype_d2h_bytes'] == 0
@@ -370,7 +379,7 @@ def test_gene_job_reuses_cohort_preparation_across_tiles_and_writes_every_trait(
     monkeypatch.setattr(runtime, '_prepare_shared_gene', prepare)
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_select_mask_chunks', lambda self, *args: {'ncRNA': np.arange(m)})
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_long_mask_products',
-                        lambda self, model, host: model.score_covariance(torch.from_numpy(host)))
+                        lambda self, model, host, **kwargs: model.score_covariance(torch.from_numpy(host)))
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_evaluate_prepared',
                         lambda self, payload, model: dict(num_variant=len(payload['maf']), cMAC=payload['cmac'],
                                                          **{'WGS-O': .25}))

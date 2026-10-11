@@ -13,6 +13,7 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import sys
 from pathlib import Path
 import time
 import traceback
@@ -241,13 +242,14 @@ def _fit_models(plan, phenotypes, covariates, population, kinship, options, devi
     lookup = {key: i for i, key in enumerate(sample_keys(population))}
     cohort = _cohort_pairs(Path(plan['input_binding']['prepared_directory']), plan['dataset'], population)
     for index, name in enumerate(phenotypes.names):
-        ids, y, x, names, counts = run.aligned_phenotype(phenotypes, covariates, cohort, name,
-            covariate_names=plan['covariate_selection'].get(name), reduce_redundant=True)
-        rows = np.asarray([lookup[key] for key in ids], dtype=np.int64)
         family = plan['families'][name]
+        ids, y, x, names, counts = run.aligned_phenotype(phenotypes, covariates, cohort, name,
+            covariate_names=plan['covariate_selection'].get(name), reduce_redundant=True,
+            rm_nan=plan.get('rm_nan', False), family=family)
+        rows = np.asarray([lookup[key] for key in ids], dtype=np.int64)
         expected = dict(input_manifest_sha256=plan['scientific_binding_sha256'],
             source_implementation_sha256=plan['source_implementation_sha256'], trait_index=index,
-            family=family, sample_rows_sha256=_array_hash(rows), sample_ids_sha256=_array_hash(ids),
+            family=family, rm_nan=plan.get('rm_nan', False), sample_rows_sha256=_array_hash(rows), sample_ids_sha256=_array_hash(ids),
             phenotype_sha256=_array_hash(y), design_sha256=_array_hash(x), covariate_names=list(names),
             covariate_design=counts['covariate_design'])
         target = output/'models'/f'trait_{index:04d}'
@@ -367,12 +369,16 @@ def _inline_cpu_policy(resources):
 
 def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_affinity=False):
     """Run this invocation's own partition; parent affinity stays unchanged."""
-    from .phewas_checkpoints import CheckpointCSVWriter
+    from .phewas_trait_csv import PerTraitCheckpointCSVWriter
     from .phewas_runtime.runtime import run_batched_configuration
+    from .phewas_resources import HostMemoryGate
+    from .phewas_run import (_host_memory_policy, _close_association_resources,
+                             _association_partition_strategy)
     output = Path(plan['output_directory'])
     prefix = output/f'worker_{worker_id}.attempt_{resources["attempt_id"]}'
     started, exit_code = time.perf_counter(), 1
     previous_threads = torch.get_num_threads()
+    repository, writer = None, None
     try:
         if run._implementation_sha256() != plan['source_implementation_sha256']:
             raise ValueError('prepared association implementation changed after planning')
@@ -386,15 +392,27 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
                 except ProcessLookupError:
                     pass
         torch.set_num_threads(resources['cpu_threads'])
-        repository = ModelRepository(entries)
+        from .phewas_partition import build_trait_dispatch, publish_trait_dispatch, dispatch_configuration
+        dispatch = build_trait_dispatch(entries,worker_count,plan['configuration'],
+            source_binding=dict(source_implementation_sha256=plan['source_implementation_sha256'],
+                scientific_binding_sha256=plan['scientific_binding_sha256'],
+                plan_sha256=digest_file(output/'plan.private.json')),
+            strategy=_association_partition_strategy(dict(plan, csv_output_layout='per_trait_checkpoint')),
+            model_cache_capacity_bytes=plan.get('association_model_cache_capacity_bytes'),
+            trait_batch_size=resources['trait_batch_size'])
+        publish_trait_dispatch(output,dispatch,resources['attempt_id'])
+        assigned_traits = dispatch['workers'][worker_id]['trait_indices']
+        repository = ModelRepository(entries,trait_indices=assigned_traits)
         binding = dict(source_implementation_sha256=plan['source_implementation_sha256'],
             input_manifest_sha256=plan['scientific_binding_sha256'],
             configuration_sha256=_hash(dict(configuration=plan['configuration'],
                                            trait_batch_size=resources['trait_batch_size'])),
             models=[dict(trait_index=entry['trait_index'], sha256=entry['sha256']) for entry in entries])
-        writer = CheckpointCSVWriter(output/'csv', binding=binding, resume=resources['resume'],
-                                     worker_id=str(worker_id))
-        configuration = _partition(plan['configuration'], worker_id, worker_count)
+        writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
+            resume=resources['resume'], worker_id=str(worker_id),
+            minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0))
+        gate = HostMemoryGate(output, **_host_memory_policy(plan))
+        configuration = dispatch_configuration(plan['configuration'],dispatch,worker_id)
         if configuration['chromosomes']:
             report = run_batched_configuration(configuration, model_repository=repository,
                 reader_factory=prepared_reader, writer=writer, device=device,
@@ -402,7 +420,8 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
                 memory_reserve_bytes=int(resources['memory_reserve_gib']*2**30),
                 cpu_threads=resources['cpu_threads'], device_cache_bytes=resources['device_cache_bytes'],
                 compact_cache_bytes=resources['compact_cache_bytes'],
-                metadata_cache_bytes=resources['metadata_cache_bytes'])
+                metadata_cache_bytes=resources['metadata_cache_bytes'],
+                host_memory_lease_factory=gate.lease_factory)
         else:
             report = dict(association_rows=dict.fromkeys(_KINDS, 0), job_groups=0,
                           output=writer.finish(), total_seconds=0., assigned_genetic_jobs=0)
@@ -411,25 +430,65 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
             raise ValueError('prepared association source changed during execution')
         report.update(worker_id=worker_id, worker_count=worker_count,
             end_to_end_seconds=time.perf_counter()-started,
-            source_implementation_sha256=plan['source_implementation_sha256'])
+            source_implementation_sha256=plan['source_implementation_sha256'],
+            assigned_trait_indices=assigned_traits,assigned_trait_tiles=dispatch['workers'][worker_id]['trait_tiles'],association_partition_strategy=dispatch['strategy'],
+            association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
+            assigned_genetic_schedule_sha256=dispatch['workers'][worker_id]['genetic_schedule_sha256'])
         atomic_json(prefix.with_name(prefix.name+'.report.private.json'), report)
         exit_code = 0
         return report
     except BaseException as error:
-        atomic_json(prefix.with_name(prefix.name+'.failed.private.json'), dict(error_type=type(error).__name__,
-            error=str(error), traceback=traceback.format_exc()))
+        try:
+            atomic_json(prefix.with_name(prefix.name+'.failed.private.json'), dict(error_type=type(error).__name__,
+                error=str(error), traceback=traceback.format_exc()))
+        except BaseException:
+            pass
         raise
     finally:
-        torch.set_num_threads(previous_threads)
-        atomic_json(prefix.with_name(prefix.name+'.exit.anonymous.json'), dict(worker_id=worker_id,
-            exit_code=exit_code, elapsed_seconds=time.perf_counter()-started))
+        original_error = sys.exc_info()[0] is not None
+        cleanup_error = None
+        try:
+            _close_association_resources(writer, repository, failed=exit_code != 0)
+        except BaseException as error:
+            cleanup_error, exit_code = error, 1
+        try:
+            torch.set_num_threads(previous_threads)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+            exit_code = 1
+        if cleanup_error is not None and not original_error:
+            try:
+                atomic_json(prefix.with_name(prefix.name+'.failed.private.json'),
+                    dict(error_type=type(cleanup_error).__name__, error=str(cleanup_error),
+                         traceback=''.join(traceback.format_exception(type(cleanup_error),cleanup_error,
+                                                                     cleanup_error.__traceback__)),
+                         phase='worker_cleanup'))
+            except BaseException:
+                pass
+        try:
+            atomic_json(prefix.with_name(prefix.name+'.exit.anonymous.json'), dict(worker_id=worker_id,
+                exit_code=exit_code, elapsed_seconds=time.perf_counter()-started))
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if cleanup_error is not None and not original_error:
+            raise cleanup_error
 
 
 def _dispatch(plan, entries, resources, gpu_ids):
+    from .phewas_partition import verify_dispatch_reports
+    def verified(reports):
+        path = Path(plan['output_directory'])/f'association_dispatch.{resources["attempt_id"]}.private.json'
+        dispatch = json.loads(path.read_text())
+        completion = verify_dispatch_reports(dispatch,reports)
+        for report in reports:
+            report['global_completion'] = completion
+        return reports
     if len(gpu_ids) == 1:
         with _inline_cpu_policy(resources):
-            return [_worker(plan, entries, resources, worker_id=0, worker_count=1,
-                            device=f'cuda:{gpu_ids[0]}')]
+            return verified([_worker(plan, entries, resources, worker_id=0, worker_count=1,
+                                     device=f'cuda:{gpu_ids[0]}')])
     context = mp.get_context('spawn')
     processes = [context.Process(target=_worker, kwargs=dict(plan=plan, entries=entries, resources=resources,
         worker_id=i, worker_count=len(gpu_ids), device=f'cuda:{device}', bind_affinity=True))
@@ -470,8 +529,8 @@ def _dispatch(plan, entries, resources, gpu_ids):
     if any(process.exitcode != 0 for process in owned):
         raise RuntimeError('prepared association worker failed; inspect the private attempt receipts')
     output = Path(plan['output_directory'])
-    return [json.loads((output/f'worker_{i}.attempt_{resources["attempt_id"]}.report.private.json').read_text())
-            for i in range(len(owned))]
+    return verified([json.loads((output/f'worker_{i}.attempt_{resources["attempt_id"]}.report.private.json').read_text())
+                     for i in range(len(owned))])
 
 
 def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
@@ -479,11 +538,16 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     """Run every independent modern trait through the shared cache backend."""
     if null_fit_mode != 'fp64':
         raise ValueError('shared prepared PheWAS null fitting requires fp64')
+    from .phewas_run import _validate_host_memory_limit
+    if type(options.get('rm_nan', True)) is not bool:
+        raise ValueError('rm_nan must be a boolean')
+    options.setdefault('rm_nan', True)
+    options['host_memory_limit_gib'] = _validate_host_memory_limit(options.get('host_memory_limit_gib'))
     cpu_resources = _cpu_resources(options['cpu_threads'])
     root, manifest_path, manifest, entries, population = run._dataset(prepared_directory, chromosomes)
     phenotype_csv, covariate_csv = Path(phenotype_csv).resolve(), Path(covariate_csv).resolve()
     phenotypes, covariates = run.read_csv_inputs(phenotype_csv, covariate_csv)
-    families = run._family_selection(options['phenotype_families'], phenotypes.names, phenotypes.values)
+    families = run._family_selection(options['phenotype_families'], phenotypes.names, phenotypes.values, rm_nan=options['rm_nan'])
     selections = _covariate_selection(options['phenotype_covariates'], phenotypes.names, covariates.names)
     kinship_file, kinship = None, None
     if options['grm'] == 'sparse':
@@ -504,19 +568,29 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     dictionary_sha = trait_index_sha256(phenotypes.names, families)
     scientific = dict(input_binding=input_binding, configuration=configuration, transform=transform,
         families=families, covariate_selection=selections, trait_names=list(phenotypes.names),
-        grm=options['grm'], trait_batch_size=options['trait_batch_size'], trait_index_sha256=dictionary_sha)
+        grm=options['grm'], rm_nan=options['rm_nan'], trait_batch_size=options['trait_batch_size'], trait_index_sha256=dictionary_sha)
     scientific_sha = _hash(scientific)
     plan = dict(schema_version=1, workflow='prepared_fid_iid_shared_association',
         source_implementation_sha256=source, scientific_binding_sha256=scientific_sha,
         output_directory=str(output), input_binding=input_binding, configuration=configuration,
-        families=families, covariate_selection=selections, transform=transform, dataset=manifest,
-        trait_count=len(phenotypes.names), trait_index_sha256=dictionary_sha)
+        families=families, covariate_selection=selections, transform=transform, rm_nan=options['rm_nan'], dataset=manifest,
+        trait_count=len(phenotypes.names), trait_index_sha256=dictionary_sha,
+        host_memory_limit_gib=options['host_memory_limit_gib'],association_partition_strategy='cohort_tiles',
+        csv_output_layout='per_trait_checkpoint')
+    from .phewas_partition import gpu_model_cache_capacity
+    plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,
+        memory_limit_gib=options['memory_limit_gib'],reserve_bytes=int(options['memory_reserve_gib']*2**30))
     if output.exists() and any(output.iterdir()):
         if not options['resume']:
             raise FileExistsError('full association requires a fresh output directory; choose resume=True')
         existing = json.loads((output/'plan.private.json').read_text())
-        if existing != plan:
+        resource_fields = {'host_memory_limit_gib','association_model_cache_capacity_bytes'}
+        if ({key:value for key,value in existing.items() if key not in resource_fields} !=
+                {key:value for key,value in plan.items() if key not in resource_fields}):
             raise ValueError('resume prepared association source/input/schedule binding differs')
+        if existing != plan:
+            atomic_json(output/f'plan.previous.{uuid.uuid4().hex}.private.json', existing)
+            atomic_json(output/'plan.private.json', plan)
     else:
         output.mkdir(parents=True, exist_ok=True, mode=0o700)
         (output/'models').mkdir(mode=0o700)
@@ -528,7 +602,7 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     _verify_inputs(input_binding)
     del kinship, phenotypes, covariates
     gc.collect()
-    resources = {key: options[key] for key in ('cpu_threads', 'memory_limit_gib', 'memory_reserve_gib',
+    resources = {key: options[key] for key in ('cpu_threads', 'memory_limit_gib', 'memory_reserve_gib', 'host_memory_limit_gib',
         'trait_batch_size', 'device_cache_bytes', 'compact_cache_bytes', 'metadata_cache_bytes', 'resume')}
     resources.update(cpu_resources)
     resources['attempt_id'] = uuid.uuid4().hex

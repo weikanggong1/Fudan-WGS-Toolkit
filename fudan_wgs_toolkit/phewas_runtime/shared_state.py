@@ -268,7 +268,9 @@ class SharedStateBroker:
         self._metrics = dict(frame_reads=0, compact_frame_hits=0, compact_frame_evictions=0,
             gpu_csr_uploads=0, gpu_csr_hits=0, gpu_csr_evictions=0,
             device_csr_uploads=0, device_csr_hits=0,
-            csr_h2d_bytes=0, index_h2d_bytes=0, h2d_bytes=0, state_read_calls=0,
+            csr_h2d_bytes=0, csr_host_copy_bytes=0, index_h2d_bytes=0, h2d_bytes=0,
+            raw_slab_merge_calls=0, raw_slab_merge_copy_bytes=0,
+            raw_slab_merge_new_bytes_highwater=0, state_read_calls=0,
             requested_variants=0, bound_rejected_variants=0, returned_raw_variants=0,
             trait_block_calls=0, trait_count_calls=0, returned_trait_variants=0,
             bound_sample_axes=0, sample_axis_reuse_calls=0, sample_axis_validation_calls=0,
@@ -470,6 +472,7 @@ class SharedStateBroker:
         self._guard(payload_bytes + 64 * 2**20)
         payload = tuple(torch.from_numpy(np.array(a, copy=True)).to(self.device)
                         for a in (source.offsets, source.sample_index, source.state))
+        self._metrics['csr_host_copy_bytes'] += payload_bytes
         self._metrics['device_csr_uploads'] += 1
         if self.device.type == 'cuda':
             self._metrics['gpu_csr_uploads'] += 1
@@ -560,6 +563,9 @@ class SharedStateBroker:
                 self._metrics['raw_slab_bytes_highwater'], output.numel())
             parts.append(output)
             positions.append(request_positions)
+            # The LRU owns cached payloads. A stale loop-local alias must not
+            # retain an evicted CSR through later-frame/merge admission.
+            del payload, offsets, r, state, c, output, source
         if parts:
             all_positions = np.concatenate(positions)
             order = np.argsort(all_positions)
@@ -567,8 +573,26 @@ class SharedStateBroker:
                 states = parts[0]
             else:
                 cells = len(self.samples) * len(all_positions)
-                self._guard(cells * 2 + 64 * 2**20)
-                states = torch.cat(parts, 1).index_select(1, self._indices_to_device(order))
+                # The old cat-then-index_select kept two additional complete
+                # slabs live. One destination plus exact uint8 index_copy
+                # preserves caller order with only one extra slab. Existing
+                # parts already count in the live allocator, not NEW bytes.
+                self._guard(cells + 64 * 2**20)
+                states = torch.empty((len(self.samples), len(all_positions)),
+                                     dtype=torch.uint8, device=self.device)
+                destination = np.empty(len(order), dtype=np.int64)
+                destination[order] = np.arange(len(order), dtype=np.int64)
+                begin = 0
+                while parts:
+                    part = parts.pop(0)
+                    end = begin + part.shape[1]
+                    states.index_copy_(1, self._indices_to_device(destination[begin:end]), part)
+                    self._metrics['raw_slab_merge_copy_bytes'] += part.numel() * part.element_size()
+                    begin = end
+                    del part
+                self._metrics['raw_slab_merge_calls'] += 1
+                self._metrics['raw_slab_merge_new_bytes_highwater'] = max(
+                    self._metrics['raw_slab_merge_new_bytes_highwater'], cells)
             selected = variants[all_positions[order]]
         else:
             states = torch.empty((len(self.samples), 0), dtype=torch.uint8, device=self.device)

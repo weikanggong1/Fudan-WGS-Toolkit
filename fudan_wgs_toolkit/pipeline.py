@@ -606,13 +606,17 @@ class PheWASPipeline:
         self.local_mask_reuse_counters[counter] = self.local_mask_reuse_counters.get(counter, 0) + 1
         return result
 
-    def _long_mask_products(self, model, host):
+    def _long_mask_products(self, model, host, *, compute_score=True):
+        if type(compute_score) is not bool:
+            raise ValueError('compute_score must be Boolean')
         if self.options.covariance_backend == "legacy":
-            return model.score_covariance_tiled(host,
+            score, covariance = model.score_covariance_tiled(host,
                 variant_tile_size=self.options.variant_tile_size or 512)
+            return (score if compute_score else None), covariance
         score, covariance, report = model.score_covariance_cached(host,
             variant_tile_size=self.options.cached_variant_tile_size,
-            memory_limit_gib=self.options.memory_limit_gib, profile=True)
+            memory_limit_gib=self.options.memory_limit_gib, profile=True,
+            compute_score=compute_score)
         self.covariance_diagnostics.append(report)
         return score, covariance
 

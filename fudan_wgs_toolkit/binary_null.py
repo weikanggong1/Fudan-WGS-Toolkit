@@ -161,7 +161,7 @@ class BinaryNullModel:
 
     def score_covariance_cached(self, genotype, *, variant_tile_size=4096,
                                 panel_variant_size=None, memory_limit_gib=40,
-                                matmul_mode=None, profile=False):
+                                matmul_mode=None, profile=False, compute_score=True):
         """Return fitted binary score, covariance and a bounded cache report.
 
         Host FP32 dosage is already oriented/imputed and ordered [N, M]. The
@@ -171,13 +171,15 @@ class BinaryNullModel:
         Output score [M] and covariance [M, M] stay CUDA FP32. Only explicit
         diagonal non-SPA state is supported; no fitting or statistical fallback
         occurs. Parameter meanings and admission rules match the Gaussian cache.
+        ``compute_score=False`` omits only an already shared score and returns
+        None in its place; covariance preparation/products remain unchanged.
         """
         mode = validate_mode(self.matmul_mode if matmul_mode is None else matmul_mode)
         from ._cached_covariance import score_covariance_cached
         return score_covariance_cached(
             self, genotype, variant_tile_size=variant_tile_size,
             panel_variant_size=panel_variant_size, memory_limit_gib=memory_limit_gib,
-            matmul_mode=mode, symmetry="average", profile=profile)
+            matmul_mode=mode, symmetry="average", profile=profile, compute_score=compute_score)
 
     def score_covariance_tiled(self, genotype, *, variant_tile_size=256, matmul_mode=None):
         """Bounded host-to-device variant tiles using the fitted binary formula.

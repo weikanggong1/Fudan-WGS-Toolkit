@@ -7,6 +7,7 @@ partial genotype is retained; callers unwind preparation before retrying.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 import fcntl
 import hashlib
 import json
@@ -77,6 +78,215 @@ def _process_rss(pid):
     except (OSError, ValueError):
         pass
     return 0
+
+
+def _process_memory_counters(pid, *, include_pss):
+    """Read one endpoint; unavailable PSS remains unknown rather than zero."""
+    status = {}
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            key, separator, tail = line.partition(":")
+            if separator and key in ("VmRSS", "RssAnon", "RssFile", "RssShmem", "VmSwap"):
+                status[key] = int(tail.split()[0])*1024
+    except (OSError, ValueError, IndexError):
+        pass
+    rollup = {}
+    if include_pss:
+        try:
+            for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
+                key, separator, tail = line.partition(":")
+                if separator and key in ("Rss", "Pss", "Pss_Anon", "Pss_File", "Pss_Shmem", "SwapPss"):
+                    rollup[key] = int(tail.split()[0])*1024
+        except (OSError, ValueError, IndexError):
+            pass
+    return dict(rss_bytes=rollup.get("Rss",status.get("VmRSS")),
+        pss_bytes=rollup.get("Pss"), anonymous_rss_bytes=status.get("RssAnon"),
+        mapped_file_rss_bytes=status.get("RssFile"), shared_rss_bytes=status.get("RssShmem"),
+        anonymous_pss_bytes=rollup.get("Pss_Anon"), mapped_file_pss_bytes=rollup.get("Pss_File"),
+        shared_pss_bytes=rollup.get("Pss_Shmem"), swap_bytes=status.get("VmSwap"),
+        swap_pss_bytes=rollup.get("SwapPss"))
+
+
+def _verified_children(pid):
+    """Loader-spawned children are attached to their TID, not just the leader."""
+    children = set()
+    try:
+        for task in Path(f"/proc/{pid}/task").iterdir():
+            try:
+                children.update(int(value) for value in (task/"children").read_text().split())
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    result = []
+    for child in children:
+        try:
+            fields = Path(f"/proc/{child}/stat").read_text().rsplit(")",1)[1].split()
+            if int(fields[1]) == pid:
+                result.append(child)
+        except (OSError, ValueError, IndexError):
+            pass
+    return result
+
+
+def process_memory_snapshot(identity=None, *, include_children=True, include_pss=True):
+    """Anonymous, identity-bracketed process-tree RSS/PSS and mapping counters.
+
+    This explicit diagnostic call may read ``smaps_rollup``; it is not called
+    by admission. RSS sums include shared mappings. PSS is an endpoint sharing
+    estimate, not project-exclusive physical use or a peak. Missing counters
+    stay ``None`` while their observed subtotal and coverage remain available.
+    """
+    identity = process_identity(os.getpid()) if identity is None else identity
+    names = ("rss_bytes", "pss_bytes", "anonymous_rss_bytes", "mapped_file_rss_bytes",
+        "shared_rss_bytes", "anonymous_pss_bytes", "mapped_file_pss_bytes",
+        "shared_pss_bytes", "swap_bytes", "swap_pss_bytes")
+    records, pending, seen = [], ([] if identity is None else [identity["pid"]]), set()
+    root_valid = identity is not None and process_identity(identity["pid"]) == identity
+    if root_valid:
+        while pending:
+            pid = pending.pop()
+            if pid in seen:
+                continue
+            current = process_identity(pid)
+            if current is None:
+                continue
+            seen.add(pid)
+            children = _verified_children(pid) if include_children else []
+            value = _process_memory_counters(pid,include_pss=include_pss)
+            if process_identity(pid) != current:
+                continue
+            records.append(value)
+            pending.extend(children)
+        root_valid = process_identity(identity["pid"]) == identity
+    if not root_valid:
+        records = []
+    count = len(records)
+    coverage = {name:sum(value.get(name) is not None for value in records) for name in names}
+    result = {name:(sum(value[name] for value in records) if count and coverage[name] == count else None)
+        for name in names}
+    result.update(observed_subtotals={name:sum(value.get(name) or 0 for value in records) for name in names},
+        counter_process_coverage=coverage, observed_process_count=count,
+        root_identity_verified=root_valid, descendant_traversal_requested=bool(include_children),
+        pss_requested=bool(include_pss), rss_sum_is_unique_memory=False,
+        pss_is_endpoint_estimate=True, scope="identity-verified owned process tree endpoint")
+    return result
+
+
+def tensor_storage_footprint(tensors):
+    """Actual backing bytes held by explicit tensor/array owners, with aliases deduplicated.
+
+    No tensor is moved, synchronized or retained by this function. Intersecting
+    address ranges on each device count once, including a small view keeping
+    a larger allocation alive. This is ownership coverage supplied by callers;
+    it does not claim to enumerate all allocator or native CUDA allocations.
+    """
+    pending = [tensors]
+    intervals, observed, mapped_host = {}, 0, 0
+    while pending:
+        value = pending.pop()
+        if value is None:
+            continue
+        if isinstance(value,dict):
+            pending.extend(value.values());continue
+        if isinstance(value,(tuple,list)):
+            pending.extend(value);continue
+        if hasattr(value,"untyped_storage"):
+            if str(value.device).startswith("meta"):
+                raise ValueError("meta tensors do not own materialized memory")
+            storage = value.untyped_storage()
+            device, start, size = str(value.device),int(storage.data_ptr()),int(storage.nbytes())
+        elif hasattr(value,"__array_interface__"):
+            owner = value
+            while hasattr(getattr(owner,"base",None),"__array_interface__"):
+                owner = owner.base
+            device, start, size = "cpu",int(owner.__array_interface__["data"][0]),int(owner.nbytes)
+            if hasattr(owner,"filename"):
+                mapped_host += size
+        else:
+            raise TypeError("storage telemetry accepts explicit tensors, arrays and nested containers")
+        if size < 0 or start < 0:
+            raise ValueError("storage telemetry received invalid backing geometry")
+        observed += 1
+        if size:
+            intervals.setdefault(device,[]).append((start,start+size))
+    totals = {}
+    for device,ranges in intervals.items():
+        total, begin, end = 0,None,None
+        for left,right in sorted(ranges):
+            if begin is None:
+                begin,end=left,right
+            elif left<=end:
+                end=max(end,right)
+            else:
+                total+=end-begin;begin,end=left,right
+        totals[device]=total+(0 if begin is None else end-begin)
+    return dict(retained_storage_bytes_by_device=totals,retained_storage_bytes=sum(totals.values()),
+        unique_cuda_storage_bytes=sum(size for device,size in totals.items() if device.startswith("cuda")),
+        observed_tensor_array_count=observed,mapped_host_bytes_before_alias_deduplication=mapped_host,
+        logical_view_bytes_are_not_backing_bytes=True,ownership_coverage_is_explicit=True)
+
+
+def sample_gpu_memory(device, *, limit_bytes=None, reserve_bytes=256*2**20,
+                      owned_tensors=(), required_new_bytes=0):
+    """One shared CUDA NEW-byte admission arithmetic and backing-storage endpoint.
+
+    Live allocator bytes already include materialized tensors. Driver free
+    bytes constrain shared-card pressure; unused allocator reservations can be
+    reused. Neither explicit owned-storage bytes nor reserved bytes are added
+    a second time. Sampling does not empty caches or change allocator policy.
+    """
+    _positive_bytes(reserve_bytes,"reserve_bytes")
+    _positive_bytes(required_new_bytes,"required_new_bytes")
+    if limit_bytes is not None:
+        _positive_bytes(limit_bytes,"limit_bytes",allow_zero=False)
+    import torch
+    target = torch.device(device)
+    if target.type == "cuda" and target.index is None:
+        target = torch.device("cuda",torch.cuda.current_device())
+    footprint = tensor_storage_footprint(owned_tensors)
+    if target.type != "cuda":
+        return dict(device_type=target.type,**footprint,cuda_memory_observed=False)
+    allocated,reserved = int(torch.cuda.memory_allocated(target)),int(torch.cuda.memory_reserved(target))
+    free,total = map(int,torch.cuda.mem_get_info(target))
+    unused = max(0,reserved-allocated)
+    capacity = total if limit_bytes is None else min(total,limit_bytes)
+    available = max(0,min(capacity-allocated,free+unused)-reserve_bytes)
+    return dict(device_type="cuda",cuda_memory_observed=True,**footprint,
+        allocated_bytes=allocated,reserved_bytes=reserved,unused_reserved_bytes=unused,
+        driver_free_bytes=free,physical_total_bytes=total,effective_limit_bytes=capacity,
+        explicit_limit_bytes=limit_bytes,reserve_bytes=reserve_bytes,available_new_bytes=available,
+        owned_current_device_storage_bytes=footprint["retained_storage_bytes_by_device"].get(str(target),0),
+        required_new_bytes=required_new_bytes,new_allocation_admitted=required_new_bytes<=available,
+        owned_storage_already_in_allocated=True,driver_free_is_shared_card_constraint=True,
+        scope="owned allocator and explicit backing storage endpoint with live shared-device free memory")
+
+
+class ResourceTelemetry:
+    """Optional rate-limited endpoints; admission never depends on cached samples."""
+    def __init__(self,minimum_interval_seconds=5.):
+        if (isinstance(minimum_interval_seconds,bool) or not isinstance(minimum_interval_seconds,(int,float))
+                or not math.isfinite(minimum_interval_seconds) or minimum_interval_seconds<0):
+            raise ValueError("telemetry interval must be finite and nonnegative")
+        self.interval = float(minimum_interval_seconds)
+        self._last_time,self._last,self._last_key = None,None,None
+
+    def sample(self, *, device=None, limit_bytes=None, reserve_bytes=256*2**20,
+               owned_tensors=(), queue_summary=None, include_pss=True, force=False):
+        now = time.monotonic()
+        key = (str(device),limit_bytes,reserve_bytes,bool(include_pss))
+        if not force and self._last is not None and key==self._last_key and now-self._last_time<self.interval:
+            return copy.deepcopy(dict(self._last,reused_sample=True,sample_age_seconds=max(0,now-self._last_time)))
+        result = dict(host=read_host_memory(),processes=process_memory_snapshot(include_pss=include_pss),
+            sampled_at=time.time(),reused_sample=False,sample_age_seconds=0.)
+        if device is not None:
+            result["gpu"] = sample_gpu_memory(device,limit_bytes=limit_bytes,reserve_bytes=reserve_bytes,
+                                             owned_tensors=owned_tensors)
+        if queue_summary is not None:
+            # Copy numerical observations, never queue/model/tensor owners.
+            result["queues"] = json.loads(json.dumps(queue_summary,allow_nan=False))
+        self._last_time,self._last,self._last_key = now,result,key
+        return copy.deepcopy(result)
 
 
 def process_tree_rss(identity):
@@ -204,15 +414,32 @@ def _memory_constraint(version, directory):
         if limit_text == "max":
             return None
         maximum = int(limit_text)
-        if maximum <= 0 or maximum >= 2**60:
+        if maximum < 0:
+            raise ValueError("negative memory limit")
+        if maximum >= 2**60:
             return None
         current = int((directory/("memory.usage_in_bytes" if version == 1 else "memory.current")).read_text())
         stats = dict(line.split() for line in (directory/"memory.stat").read_text().splitlines())
         inactive = int(stats.get("total_inactive_file",stats.get("inactive_file",0))) if version == 1 else int(stats.get("inactive_file",0))
         if current < 0 or inactive < 0:
             raise ValueError("negative memory pressure counter")
+        prefix = "total_" if version == 1 else ""
+        def counter(*names):
+            for name in names:
+                if name in stats:
+                    value = int(stats[name])
+                    if value<0:raise ValueError("negative memory telemetry counter")
+                    return value
+            return None
         return dict(current_bytes=current,limit_bytes=maximum,inactive_file_bytes=inactive,
-            effective_current_bytes=max(0,current-inactive),scope=f"cgroup_v{version}")
+            effective_current_bytes=max(0,current-inactive),scope=f"cgroup_v{version}",
+            anonymous_bytes=counter(prefix+"rss","anon","rss"),
+            file_cache_bytes=counter(prefix+"cache","file","cache"),
+            mapped_file_bytes=counter(prefix+"mapped_file","file_mapped","mapped_file"),
+            shared_memory_bytes=counter(prefix+"shmem","shmem"),
+            swap_bytes=counter(prefix+"swap","swap"),kernel_bytes=counter("kernel"),
+            slab_bytes=counter("slab"),inactive_file_is_reclaimable_estimate=True,
+            current_bytes_include_shared_background=True)
     except (OSError,ValueError) as error:
         # Never silently discard a finite ancestor because its usage/stat
         # read failed: the wider physical limit cannot substitute for it.
@@ -235,6 +462,7 @@ def read_host_memory():
                 seen.add(key)
                 constraint = _memory_constraint(version,directory)
                 if constraint:
+                    constraint["visible_ancestor_index"] = len(constraints)
                     constraints.append(constraint)
     try:
         values = {line.split(":",1)[0]:int(line.split()[1])*1024
@@ -286,6 +514,124 @@ def shared_gene_workspace_bytes(n,m,*,variant_tile_size=128,scratch_bytes=256*2*
     return 5*n*m + 7*n*min(m,variant_tile_size) + 512*m + scratch_bytes
 
 
+def single_output_workspace_bytes(rows,traits,*,bytes_per_row=2048,
+                                  packed_bytes_per_row=256,scratch_bytes=64*1024):
+    """Bound NEW Single row dictionaries and packed D2H values for one tile.
+
+    ``rows`` is the physical-request upper bound per trait, before filtering.
+    This deliberately excludes the genotype already held on the GPU. The
+    estimate covers Python rows/scalars, list slots and packed host fields;
+    it is a conservative allocation forecast, not a measured RSS footprint.
+    Zero output rows require no future host allocation.
+    """
+    _positive_bytes(rows,"rows")
+    _positive_bytes(traits,"traits",allow_zero=False)
+    _positive_bytes(bytes_per_row,"bytes_per_row",allow_zero=False)
+    _positive_bytes(packed_bytes_per_row,"packed_bytes_per_row")
+    _positive_bytes(scratch_bytes,"scratch_bytes")
+    return rows*traits*(bytes_per_row+packed_bytes_per_row)+scratch_bytes if rows else 0
+
+
+class HostOutputReservation:
+    """A future-only output reservation; materialization grants no RSS credit."""
+    def __init__(self,lease,required_bytes):
+        self.lease,self.required_bytes = lease,required_bytes
+        self.rows_materialized = False
+
+    def materialized(self):
+        """Clear the forecast immediately after the complete tile exists.
+
+        Its initialized rows/packed arrays are now represented by live host
+        usage. Waiting or retrying calculation after this point is forbidden;
+        write the tile once, release its owners, then leave this scope.
+        """
+        if not self.rows_materialized:
+            if self.lease is not None:
+                self.lease.set_future(0,phase="single_output_materialized")
+            self.rows_materialized = True
+
+
+@contextmanager
+def host_output_lease_scope(factory,rows,traits,*,chromosome_index,job_index,
+                            retry_seconds=5.,maximum_wait_seconds=None,on_wait=None,
+                            bytes_per_row=2048,packed_bytes_per_row=256,
+                            scratch_bytes=64*1024):
+    """Admit one Single tile before output allocation or any writer call.
+
+    Only entry admission is retried. Code inside the scope executes exactly
+    once, so a writer or calculation error cannot repeat an already published
+    prefix. Each deferral releases its exact lease before waiting. Delays are
+    bounded to 60 seconds, and ``on_wait`` may publish progress diagnostics.
+    Call ``reservation.materialized()`` as soon as output construction ends.
+    All exits release the lease; cleanup cannot replace the original error.
+    A missing factory retains compatible behavior without a host gate.
+    """
+    required = single_output_workspace_bytes(rows,traits,bytes_per_row=bytes_per_row,
+        packed_bytes_per_row=packed_bytes_per_row,scratch_bytes=scratch_bytes)
+    for name,value in (("chromosome_index",chromosome_index),("job_index",job_index)):
+        _positive_bytes(value,name)
+    if (isinstance(retry_seconds,bool) or not isinstance(retry_seconds,(int,float))
+            or not math.isfinite(retry_seconds) or not 0<retry_seconds<=60):
+        raise ValueError("Single output retry delay must be positive, finite and at most 60 seconds")
+    if maximum_wait_seconds is not None and (isinstance(maximum_wait_seconds,bool)
+            or not isinstance(maximum_wait_seconds,(int,float))
+            or not math.isfinite(maximum_wait_seconds) or maximum_wait_seconds<0):
+        raise ValueError("Single output maximum wait must be finite and nonnegative or None")
+    if factory is not None and not callable(factory):
+        raise TypeError("Single host lease factory must be callable or None")
+    if on_wait is not None and not callable(on_wait):
+        raise TypeError("Single output wait callback must be callable or None")
+    lease,started,attempts = None,time.monotonic(),0
+    if factory is not None:
+        while True:
+            lease = factory("individual",chromosome_index,job_index)
+            try:
+                lease.__enter__()
+                lease.set_future(required,phase="single_output_rows_and_transfer")
+                break
+            except (HostMemoryDeferred,HostMemoryRequestTooLarge) as error:
+                try:
+                    lease.release()
+                except BaseException:
+                    pass  # The admission error and its identity-bound retirement win.
+                if isinstance(error,HostMemoryRequestTooLarge):
+                    error.reason = "single_output_tile_exceeds_host_capacity"
+                    error.add_note(f"Single output tile: at most {rows} rows per trait, {traits} traits; "
+                                   "reduce the output tile or increase the host budget")
+                    raise
+                attempts += 1
+                elapsed = time.monotonic()-started
+                if maximum_wait_seconds is not None and elapsed>=maximum_wait_seconds:
+                    raise HostMemoryDeferred(required,available_bytes=error.available_bytes,
+                        reason="single_output_admission_timeout") from error
+                delay = (retry_seconds if maximum_wait_seconds is None else
+                         min(retry_seconds,maximum_wait_seconds-elapsed))
+                if on_wait is not None:
+                    on_wait(dict(event="single_host_output_wait",attempt=attempts,
+                        chromosome_index=chromosome_index,job_index=job_index,
+                        required_new_bytes=required,rows_per_trait_bound=rows,traits=traits,
+                        available_bytes=error.available_bytes,reason=error.reason,
+                        elapsed_wait_seconds=elapsed,wait_seconds=delay))
+                time.sleep(delay)
+            except BaseException:
+                try:
+                    lease.release()
+                except BaseException:
+                    pass
+                raise
+    failed = True
+    try:
+        yield HostOutputReservation(lease,required)
+        failed = False
+    finally:
+        if lease is not None:
+            try:
+                lease.release()
+            except BaseException:
+                if not failed:
+                    raise
+
+
 class HostMemoryGate:
     """Reserve only future host allocations under private host-local leases.
 
@@ -294,10 +640,22 @@ class HostMemoryGate:
     Callers explicitly replace the future budget as their owned buffers become
     initialized or are released; an unknown RSS increase grants no credit.
     """
-    def __init__(self,directory,*,host_limit_gib=200,reserve_gib=20,lock_timeout_seconds=5):
-        self.limit_bytes = _gib_bytes(host_limit_gib,"host_limit_gib")
-        self.reserve_bytes = _gib_bytes(reserve_gib,"reserve_gib",allow_zero=True)
-        if self.reserve_bytes >= self.limit_bytes:
+    def __init__(self,directory,*,host_limit_gib=None,reserve_gib=None,lock_timeout_seconds=5):
+        self.automatic_limit = host_limit_gib is None
+        self.automatic_reserve = reserve_gib is None
+        requested_limit = None if self.automatic_limit else _gib_bytes(host_limit_gib,"host_limit_gib")
+        detected_limit = None
+        if self.automatic_limit or self.automatic_reserve:
+            memory = read_host_memory()
+            detected_limit = min(int(c["limit_bytes"]) for c in memory.get("constraints",[memory]))
+            if detected_limit<0:
+                raise ValueError("detected host memory capacity is negative")
+        self.limit_bytes = detected_limit if self.automatic_limit else requested_limit
+        # A small allocation receives proportional headroom; larger nodes keep
+        # the established 20 GiB reserve. Peers bind the resolved byte policy.
+        self.reserve_bytes = (min(20*GiB,min(self.limit_bytes,detected_limit)//10) if self.automatic_reserve
+                              else _gib_bytes(reserve_gib,"reserve_gib",allow_zero=True))
+        if self.reserve_bytes > self.limit_bytes or (self.limit_bytes and self.reserve_bytes == self.limit_bytes):
             raise ValueError("host memory reserve must be smaller than its limit")
         if not isinstance(lock_timeout_seconds,(int,float)) or not math.isfinite(lock_timeout_seconds) or lock_timeout_seconds<=0:
             raise ValueError("lock timeout must be positive and finite")
@@ -334,8 +692,12 @@ class HostMemoryGate:
         state = json.loads(self.path.read_text())
         if state.get("schema_version") != 2 or state.get("scope_key") != self.key or state.get("scope") != self.scope:
             raise ValueError("private host memory ledger scope binding differs")
-        if state.get("policy") != dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes):
-            raise ValueError("host memory peers must use the same limit/reserve policy")
+        policy = state.get("policy")
+        if (not isinstance(policy,dict) or set(policy)!={"limit_bytes","reserve_bytes"}
+                or any(type(value) is not int or value<0 for value in policy.values())
+                or policy["reserve_bytes"]>policy["limit_bytes"]
+                or (policy["limit_bytes"] and policy["reserve_bytes"]==policy["limit_bytes"] )):
+            raise ValueError("private host memory ledger has an invalid limit/reserve policy")
         if not isinstance(state.get("leases"),dict):
             raise ValueError("private host memory ledger has invalid leases")
         for token,record in state["leases"].items():
@@ -354,6 +716,15 @@ class HostMemoryGate:
                     or type(identity["start_ticks"]) is not int or identity["start_ticks"]<0
                     or not isinstance(identity["boot_id"],str) or not identity["boot_id"]):
                 raise ValueError("private host memory ledger has invalid process identity")
+        expected_policy = dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes)
+        if policy != expected_policy:
+            self._live_leases(state)
+            if state["leases"]:
+                raise ValueError("host memory peers must use the same limit/reserve policy")
+            # A later resume may choose another resource budget. Only a ledger
+            # with no identity-verified live owners can change its byte policy;
+            # concurrent workers must continue to share one exact policy.
+            state["policy"] = expected_policy
         return state
 
     def _write(self,state):
@@ -399,7 +770,7 @@ class HostMemoryGate:
                     raise RuntimeError("one owner cannot hold nested host memory leases")
             live = read_host_memory()
             constraints = live.get("constraints",[live])
-            capacity = min(self.limit_bytes,*[int(c["limit_bytes"]) for c in constraints])-self.reserve_bytes
+            capacity = max(0,min(self.limit_bytes,*[int(c["limit_bytes"]) for c in constraints])-self.reserve_bytes)
             # A future allocation larger than the immutable total capacity
             # cannot ever fit. Shared/file-backed RSS is not a job-size bound.
             if required_bytes > capacity:
@@ -449,6 +820,8 @@ class HostMemoryGate:
                 capacity_bytes=capacity,future_bytes=future,
                 live_effective_bytes=int(live["effective_current_bytes"]),
                 active_leases=len(state["leases"]),reserve_bytes=self.reserve_bytes,
+                resolved_limit_bytes=self.limit_bytes,automatic_limit=self.automatic_limit,
+                automatic_reserve=self.automatic_reserve,
                 materialized_credit_bytes=lease.materialized_credit_bytes,
                 future_new_allocations=True,shared_rss_admission=False,phase=phase,
                 pressure_constraints=pressures,shrinking_or_zero=shrinking or not required_bytes)

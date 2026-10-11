@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import sys
 from pathlib import Path
 import time
 import traceback
@@ -349,7 +350,51 @@ def _selected_chromosomes(chromosomes):
     return selected
 
 
-def _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_batch_size):
+def _validate_host_memory_limit(value):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value <= 0):
+        raise ValueError('host_memory_limit_gib must be None or a positive finite number')
+    return value
+
+
+def _host_memory_policy(plan):
+    """One task policy for all same-node peers, with explicit public precedence."""
+    if 'host_memory_limit_gib' in plan:
+        limit = _validate_host_memory_limit(plan['host_memory_limit_gib'])
+        return dict(host_limit_gib=limit, reserve_gib=plan.get('host_memory_reserve_gib'))
+    # Older reviewed deployment plans use a shared host_limit_gib/reserve.
+    # Legacy per-worker values cannot generate conflicting same-node ledgers:
+    # retain the most restrictive explicit common policy for all workers.
+    limits = list(plan.get('host_limit_gib_by_worker', {}).values())
+    if 'host_limit_gib' in plan:
+        limits.append(plan['host_limit_gib'])
+    limits = [_validate_host_memory_limit(value) for value in limits]
+    limit = min((value for value in limits if value is not None), default=None)
+    return dict(host_limit_gib=limit, reserve_gib=plan.get('host_reserve_gib'))
+
+
+def _close_association_resources(writer, repository, *, failed):
+    """Always close model mappings; abort only unfinished exceptional writers.
+
+    An original worker error remains the raised error even if cleanup fails.
+    On a successful association, a cleanup error is still an execution error.
+    """
+    first_error = None
+    operations = ([writer.abort] if failed and writer is not None else [])
+    if repository is not None:
+        operations.append(repository.close)
+    for operation in operations:
+        try:
+            operation()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not failed:
+        raise first_error
+
+
+def _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_batch_size, host_memory_limit_gib=None):
+    _validate_host_memory_limit(host_memory_limit_gib)
     if memory_limit_gib is not None and (isinstance(memory_limit_gib, bool)
             or not isinstance(memory_limit_gib, (int, float)) or not math.isfinite(memory_limit_gib)
             or memory_limit_gib <= 0):
@@ -541,6 +586,9 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
     models = output/'models'
     models.mkdir(exist_ok=True)
     inputs = PhewasInputs(plan['prepared_inputs_directory'])
+    if plan.get('rm_nan', False) != inputs.manifest.get('rm_nan', False):
+        inputs.close()
+        raise ValueError('prepared phenotype missing policy differs from the immutable plan')
     input_sha = digest_file(inputs.directory/'manifest.private.json')
     if input_sha != plan.get('prepared_inputs_manifest_sha256'):
         inputs.close()
@@ -591,6 +639,10 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                     raise ValueError('prepared input manifest changed during null fitting')
                 metadata = dict(fitted.metadata, **design, trait_index=index, phenotype=trait['name'],
                     profile=trait['profile'], input_manifest_sha256=input_sha,
+                    rm_nan=trait.get('rm_nan', False), missing_policy=trait.get('missing_policy', 'available'),
+                    available_n=trait.get('available_n', len(trait['y_raw'])),
+                    mother_n=trait.get('mother_n', len(trait['y_raw'])),
+                    imputed_n=trait.get('imputed_n', 0), imputation_mean=trait.get('imputation_mean'),
                     **fit_binding,
                     wall_seconds=time.perf_counter()-before)
                 entry = save_model_store(fitted.model, target, sample_rows=rows, fit_metadata=metadata,
@@ -621,11 +673,116 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
         inputs.close()
 
 
-def _all_models(plan, worker_count):
+def _association_inputs(plan):
+    """Validate completed prepared inputs without rereading their large arrays.
+
+    The immutable manifest, trait metadata and mmap headers establish the
+    consumption contract. Array checksums remain checked when the association
+    storage loader actually materializes a fitted state.
+    """
+    if _implementation_sha256() != plan['source_implementation_sha256']:
+        raise ValueError('association-only implementation binding differs from the plan')
+    root = Path(plan['prepared_inputs_directory'])
+    manifest = _bound_json(root/'manifest.private.json', plan['prepared_inputs_manifest_sha256'])
+    if (manifest.get('status') != 'complete'
+            or type(plan.get('trait_count')) is not int or plan['trait_count'] < 1
+            or manifest.get('trait_count') != plan['trait_count']
+            or type(manifest.get('sample_count')) is not int or manifest['sample_count'] < 1
+            or type(plan.get('rm_nan', False)) is not bool
+            or manifest.get('rm_nan', False) != plan.get('rm_nan', False)):
+        raise ValueError('association-only prepared input count/status/missing policy differs')
+    inputs = PhewasInputs(root, verify_arrays=False)
+    try:
+        metadata = _bound_json(root/'traits.private.json',
+                               manifest['artifacts']['traits.private.json']['sha256'])
+        traits = metadata.get('traits', [])
+        if (len(traits) != plan['trait_count']
+                or [trait.get('index') for trait in traits] != list(range(plan['trait_count']))
+                or any(trait.get('family') not in ('gaussian', 'binomial') for trait in traits)):
+            raise ValueError('association-only prepared trait metadata coverage differs')
+        if 'trait_index_sha256' in plan:
+            names = [trait['name'] for trait in traits]
+            families = {trait['name']: trait['family'] for trait in traits}
+            if trait_index_sha256(names, families) != plan['trait_index_sha256']:
+                raise ValueError('association-only prepared trait dictionary binding differs')
+        for path_key, hash_key in (('kinship_npz', 'kinship_sha256'), ('cohort_rows', 'cohort_sha256')):
+            path = plan.get(path_key)
+            expected = plan.get(hash_key)
+            if (path is None) != (expected is None) or (path is not None and digest_file(path) != expected):
+                raise ValueError('association-only GRM/cohort checksum differs from the plan')
+        return dict(sample_count=manifest['sample_count'], traits=traits,
+                    missing_policy=manifest.get('missing_policy'))
+    finally:
+        inputs.close()
+
+
+def _association_model_metadata(plan, entry, metadata, prepared):
+    """Check bound normal/SPA descriptors; defer large NPY hashes to loading."""
+    index = entry['trait_index']
+    trait = prepared['traits'][index]
+    n = metadata.get('n')
+    if (type(n) is not int or not 0 < n <= prepared['sample_count']
+            or entry.get('n') != n or entry.get('family') != trait['family']
+            or metadata.get('family') != trait['family']
+            or metadata['fit'].get('trait_index') != index
+            or metadata['fit'].get('phenotype') != trait['name']
+            or metadata['fit'].get('profile') != trait['profile']
+            or metadata['fit'].get('rm_nan', False) != plan.get('rm_nan', False)
+            or (prepared['missing_policy'] is not None and 'missing_policy' in metadata['fit']
+                and metadata['fit']['missing_policy'] != prepared['missing_policy'])
+            or metadata.get('normal_state') != 'normal'
+            or metadata.get('spa_state') != ('spa' if trait['family'] == 'binomial' else None)
+            or not _hash(metadata.get('sample_rows_sha256'))):
+        raise ValueError('association-only fitted model trait/sample/policy metadata differs')
+    target = Path(entry['path']).resolve()
+    if not (target/'sample_rows.npy').is_file():
+        raise ValueError('association-only fitted model sample axis is missing')
+    for label, digest_key in (('normal', 'state_sha256'), ('spa', 'spa_state_sha256')):
+        if label == 'spa' and trait['family'] != 'binomial':
+            continue
+        state_root = target/label
+        if not state_root.resolve().is_relative_to(target):
+            raise ValueError('association-only fitted state escaped its model directory')
+        state = _bound_json(state_root/'state.private.json', metadata.get(digest_key))
+        arrays = state.get('arrays')
+        if (state.get('family') != trait['family'] or state.get('converged') is not True
+                or state.get('has_kinship') is not (plan.get('kinship_npz') is not None)
+                or state.get('matmul_mode') != ('fp64' if label == 'spa' else 'tf32')
+                or not isinstance(arrays, dict)
+                or not {'sample_ids', 'x', 'scaled_residuals', 'precision_x'} <= arrays.keys()):
+            raise ValueError('association-only normal/SPA state metadata differs')
+        for name, record in arrays.items():
+            filename = record.get('file')
+            shape = record.get('shape')
+            if (not isinstance(filename, str) or Path(filename).name != filename
+                    or not isinstance(shape, list) or any(type(size) is not int or size < 0 for size in shape)
+                    or not isinstance(record.get('dtype'), str) or not _hash(record.get('sha256'))
+                    or not (state_root/filename).is_file()
+                    or not (state_root/filename).resolve().is_relative_to(state_root.resolve())):
+                raise ValueError('association-only fitted array descriptor/path differs')
+            if name in ('sample_ids', 'x', 'scaled_residuals', 'precision_x') and (not shape or shape[0] != n):
+                raise ValueError('association-only fitted state sample geometry differs')
+            try:
+                if np.dtype(record['dtype']).hasobject:
+                    raise ValueError('object arrays are not fitted numerical state')
+            except (TypeError, ValueError) as error:
+                raise ValueError('association-only fitted array dtype differs') from error
+        if arrays['sample_ids']['shape'] != [n] or len(arrays['x']['shape']) != 2:
+            raise ValueError('association-only fitted state sample/design geometry differs')
+
+
+def _all_models(plan, worker_count, *, association_only=False):
+    if type(association_only) is not bool:
+        raise ValueError('association_only must be a boolean')
+    if association_only and (type(worker_count) is not int or worker_count < 1):
+        raise ValueError('association-only requires a positive fitted worker count')
+    prepared = _association_inputs(plan) if association_only else None
     context = _reuse_context(plan)
     receipts = [Path(plan['output_directory'])/f'fit_worker_{i}.complete.private.json'
                 for i in range(worker_count)]
     while not all(path.exists() for path in receipts):
+        if association_only:
+            raise FileNotFoundError('association-only requires every existing completed fit receipt')
         for i in range(worker_count):
             root = Path(plan['output_directory'])
             if (root/f'worker_{i}.failed.private.json').exists():
@@ -634,7 +791,23 @@ def _all_models(plan, worker_count):
             if exit_file.exists() and json.loads(exit_file.read_text()).get('exit_code', 0) != 0:
                 raise RuntimeError('a distributed worker exited before the model barrier')
         time.sleep(10)
-    results = [json.loads(path.read_text()) for path in receipts]
+    receipt_bindings = ([(path, _file_stat(path), digest_file(path)) for path in receipts]
+                        if association_only else [])
+    results = ([_bound_json(path, checksum) for path, _, checksum in receipt_bindings]
+               if association_only else [json.loads(path.read_text()) for path in receipts])
+    if association_only and context is None:
+        for i, result in enumerate(results):
+            if (type(result.get('worker_id')) is not int or result['worker_id'] != i
+                    or result.get('mode') != 'fresh_fit' or result.get('errors') != []
+                    or type(result.get('assigned')) is not int
+                    or result.get('assigned') != len(range(i, plan['trait_count'], worker_count))
+                    or result.get('model_fit_source_implementation_sha256') != plan['source_implementation_sha256']
+                    or result.get('consumer_source_implementation_sha256') != plan['source_implementation_sha256']
+                    or result.get('null_fit_compatibility_sha256') is not None
+                    or result.get('model_import_sha256') is not None
+                    or [entry.get('trait_index') for entry in result.get('models', [])]
+                        != list(range(i, plan['trait_count'], worker_count))):
+                raise ValueError('association-only existing fresh-fit worker/provenance coverage differs')
     if context is not None:
         for i, result in enumerate(results):
             if (type(result.get('worker_id')) is not int or result['worker_id'] != i
@@ -652,6 +825,8 @@ def _all_models(plan, worker_count):
     models = sorted((entry for result in results for entry in result['models']), key=lambda entry: entry['trait_index'])
     if [entry['trait_index'] for entry in models] != list(range(plan['trait_count'])):
         raise RuntimeError('fitted-model coverage differs from the complete phenotype plan')
+    if association_only and any(type(entry.get('trait_index')) is not int for entry in models):
+        raise ValueError('association-only fitted trait identities must be integer indices')
     expected = dict(input_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
                     **_fit_binding(plan, _context=context))
     if digest_file(Path(plan['prepared_inputs_directory'])/'manifest.private.json') != expected['input_manifest_sha256']:
@@ -664,9 +839,18 @@ def _all_models(plan, worker_count):
         model_path = Path(entry['path'])/'model.private.json'
         if digest_file(model_path) != entry['sha256']:
             raise ValueError('fitted model receipt checksum differs')
-        metadata = json.loads(model_path.read_text())
+        metadata = (_bound_json(model_path, entry['sha256']) if association_only
+                    else json.loads(model_path.read_text()))
         if any(metadata['fit'].get(key) != value for key,value in expected.items()):
             raise ValueError('fitted models do not share the bound input/source/cohort')
+        if association_only:
+            _association_model_metadata(plan, entry, metadata, prepared)
+    if association_only:
+        if digest_file(Path(plan['prepared_inputs_directory'])/'manifest.private.json') != expected['input_manifest_sha256']:
+            raise ValueError('association-only prepared input manifest changed during verification')
+        if any(_file_stat(path) != identity or digest_file(path) != checksum
+               for path, identity, checksum in receipt_bindings):
+            raise ValueError('association-only completed fit receipt changed during verification')
     return models
 
 
@@ -688,8 +872,28 @@ def _partition_configuration(configuration, worker_id, worker_count):
     return config
 
 
-def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_only=False):
+def _association_partition_strategy(plan):
+    """Give each canonical trait CSV exactly one active scientific owner.
+
+    Fixed cohort tiles retain their boundaries when GPU ownership changes on
+    resume. Legacy mixed-shard plans keep their original genetic dispatch.
+    """
+    strategy = plan.get('association_partition_strategy', 'auto')
+    canonical = (plan.get('public_api_options') or
+                 plan.get('csv_output_layout') == 'per_trait_checkpoint')
+    if canonical:
+        if strategy == 'auto':
+            return 'cohort_tiles'
+        if strategy != 'cohort_tiles':
+            raise ValueError('per-trait checkpoint CSV requires disjoint cohort_tiles dispatch')
+    return strategy
+
+
+def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_only=False,
+                    association_only=False):
     """One GPU worker: caller-bound CPU affinity, then genetic-major association."""
+    if type(fit_only) is not bool or type(association_only) is not bool or fit_only and association_only:
+        raise ValueError('fit_only and association_only must be mutually exclusive booleans')
     affinity = sorted(os.sched_getaffinity(0))
     if plan.get('public_api_options'):
         pool = plan.get('cpu_pool', affinity)
@@ -734,87 +938,135 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
         all_thread_affinities_verified=True, thread_affinities=thread_affinities))
     if _implementation_sha256() != plan['source_implementation_sha256']:
         raise ValueError('frozen implementation SHA differs from the dispatch plan')
-    result = fit_models(plan, worker_id=worker_id, worker_count=worker_count, device=device)
-    if result['errors']:
-        raise RuntimeError('assigned null fits failed; retain the private fit receipts and block association')
-    if fit_only:
-        return result
-    entries = _all_models(plan, worker_count)
+    if association_only:
+        entries = _all_models(plan, worker_count, association_only=True)
+    else:
+        result = fit_models(plan, worker_id=worker_id, worker_count=worker_count, device=device)
+        if result['errors']:
+            raise RuntimeError('assigned null fits failed; retain the private fit receipts and block association')
+        if fit_only:
+            return result
+        entries = _all_models(plan, worker_count)
     from .phewas_runtime.runtime import run_batched_configuration
     from .phewas_resources import HostMemoryGate
-    repository = ModelRepository(entries, binary_normal_cache=plan.get('binary_normal_cache', 'derived_fp64'))
-    if plan.get('public_api_options'):
-        from .phewas_checkpoints import CheckpointCSVWriter
-        binding = dict(source_implementation_sha256=plan['source_implementation_sha256'],
-            input_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
-            trait_batch_size=plan.get('trait_batch_size', 32), checkpoint_schema_version=1,
-            configuration_sha256=hashlib.sha256(json.dumps(plan['configuration'], sort_keys=True,
-                separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
-            models=[dict(trait_index=entry['trait_index'], sha256=entry['sha256']) for entry in entries])
-        writer = CheckpointCSVWriter(output/'csv', binding=binding, resume=plan.get('resume', False),
-                                     worker_id=str(worker_id))
-    else:
-        writer = StreamingCSVWriter(output/'csv', worker_id=str(worker_id))
-    host_limit = plan.get('host_limit_gib_by_worker', {}).get(str(worker_id),
-        plan.get('host_limit_gib', 200))
-    gate = HostMemoryGate(output, host_limit_gib=host_limit,
-                         reserve_gib=plan.get('host_reserve_gib', 20))
-    config = (_partition_configuration(plan['configuration'], worker_id, worker_count)
-              if plan.get('public_api_options') else dict(plan['configuration']))
-    if not plan.get('public_api_options'):
-        config['chromosomes'] = [entry for i, entry in enumerate(config['chromosomes']) if i % worker_count == worker_id]
-    journal_suffix = f'.attempt_{plan["attempt_id"]}' if plan.get('public_api_options') else ''
-    completed_jobs = output/f'worker_{worker_id}{journal_suffix}.completed_jobs.private.jsonl'
-    if completed_jobs.exists():
-        raise FileExistsError('association refuses to overwrite a previous job completion journal')
-    def event(item):
-        atomic_json(output/f'worker_{worker_id}.progress.anonymous.json',
-                    dict(item, worker_id=worker_id, observed_at=time.time()))
-        if item.get('event') == 'finished':
-            # Append only after the job's staged rows have been accepted. This
-            # proves the ordered schedule independently of aggregate counts.
-            with completed_jobs.open('a', encoding='utf-8') as handle:
-                handle.write(json.dumps(dict(item, worker_id=worker_id,
-                    observed_at=time.time()), allow_nan=False)+'\n')
+    repository, writer = None, None
+    association_failed = True
     try:
-        if not config['chromosomes']:
-            # More selected GPUs than genetic jobs is legal. An idle worker
-            # participates in the full model barrier and publishes an empty,
-            # explicit report rather than inventing completed associations.
-            report = dict(job_groups=0, association_rows=dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0),
-                          trait_rows={}, total_seconds=0.,
-                          output=writer.finish(), assigned_genetic_jobs=0)
-            completed_jobs.touch(exist_ok=False)
+        dispatch = None
+        if (plan.get('public_api_options') or plan.get('csv_output_layout') == 'per_trait_checkpoint'
+                or 'association_partition_strategy' in plan):
+            from .phewas_partition import build_trait_dispatch, publish_trait_dispatch, dispatch_configuration
+            dispatch = build_trait_dispatch(entries,worker_count,plan['configuration'],
+                source_binding=dict(source_implementation_sha256=plan['source_implementation_sha256'],
+                    prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+                    plan_sha256=digest_file(output/'plan.private.json')),
+                strategy=_association_partition_strategy(plan),
+                model_cache_capacity_bytes=plan.get('association_model_cache_capacity_bytes'),
+                binary_normal_cache=plan.get('binary_normal_cache','derived_fp64'),
+                trait_batch_size=plan.get('trait_batch_size',32))
+            publish_trait_dispatch(output,dispatch,plan.get('attempt_id','production'))
+        assigned_traits = None if dispatch is None else dispatch['workers'][worker_id]['trait_indices']
+        repository = ModelRepository(entries, trait_indices=assigned_traits,
+            binary_normal_cache=plan.get('binary_normal_cache', 'derived_fp64'))
+        per_trait_output = (plan.get('public_api_options') or
+                            plan.get('csv_output_layout') == 'per_trait_checkpoint')
+        if per_trait_output:
+            from .phewas_trait_csv import PerTraitCheckpointCSVWriter
+            binding = dict(source_implementation_sha256=plan['source_implementation_sha256'],
+                input_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+                trait_batch_size=plan.get('trait_batch_size', 32), checkpoint_schema_version=2,
+                configuration_sha256=hashlib.sha256(json.dumps(plan['configuration'], sort_keys=True,
+                    separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
+                models=[dict(trait_index=entry['trait_index'], sha256=entry['sha256']) for entry in entries])
+            writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
+                resume=plan.get('resume', False), worker_id=str(worker_id),
+                minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0))
         else:
-            report = run_batched_configuration(config, model_repository=repository,
-            reader_factory=portable_reader, writer=writer, device=device,
-            trait_batch_size=plan.get('trait_batch_size', 32), memory_limit_gib=plan.get('memory_limit_gib'),
-            memory_reserve_bytes=plan.get('memory_reserve_bytes', 256*2**20),
-            cpu_threads=cpu_threads if plan.get('public_api_options') else 4,
-            device_cache_bytes=plan.get('device_cache_bytes', 512*2**20),
-            compact_cache_bytes=plan.get('compact_cache_bytes', 64*2**20),
-            metadata_cache_bytes=plan.get('metadata_cache_bytes', 256*2**20),
-            sample_axis_cache_bytes=plan.get('sample_axis_cache_bytes', 64*2**20),
-            sample_axis_host_cache_bytes=plan.get('sample_axis_host_cache_bytes', 64*2**20),
-            job_state_cache_bytes=plan.get('job_state_cache_bytes', 0),
-            job_state_cache_live_fraction=plan.get('job_state_cache_live_fraction', .25),
-            device_cache_live_fraction=plan.get('device_cache_live_fraction'),
-            emit=event, host_memory_lease_factory=gate.lease_factory)
-        report.update(end_to_end_seconds=time.time()-started, model_repository=repository.summary(),
-                      source_implementation_sha256=plan['source_implementation_sha256'],
-                      worker_id=worker_id, worker_count=worker_count,
-                      assigned_chromosomes=[c['name'] for c in config['chromosomes']],
-                      completed_jobs_sha256=digest_file(completed_jobs))
-        atomic_json(output/f'worker_{worker_id}.report.private.json', report)
-        return report
-    except Exception as error:
-        atomic_json(output/f'worker_{worker_id}.failed.private.json', dict(error_type=type(error).__name__,
-            error=str(error), traceback=traceback.format_exc(), end_to_end_seconds=time.time()-started))
-        raise
+            writer = StreamingCSVWriter(output/'csv', worker_id=str(worker_id))
+        gate = HostMemoryGate(output, **_host_memory_policy(plan))
+        config = (dispatch_configuration(plan['configuration'],dispatch,worker_id) if dispatch is not None
+                  else dict(plan['configuration']))
+        if dispatch is None:
+            config['chromosomes'] = [entry for i, entry in enumerate(config['chromosomes']) if i % worker_count == worker_id]
+        # A resumed invocation replays the verified schedule while the writer
+        # skips its committed scientific tiles. Keep each invocation's journal
+        # independently instead of overwriting history or appending duplicates.
+        journal_suffix = (f'.attempt_{plan.get("attempt_id", "production")}.{time.time_ns()}'
+                          if per_trait_output else '')
+        completed_jobs = output/f'worker_{worker_id}{journal_suffix}.completed_jobs.private.jsonl'
+        if completed_jobs.exists():
+            raise FileExistsError('association refuses to overwrite a previous job completion journal')
+        def event(item):
+            atomic_json(output/f'worker_{worker_id}.progress.anonymous.json',
+                        dict(item, worker_id=worker_id, observed_at=time.time()))
+            if item.get('event') == 'finished':
+                # Append only after the job's staged rows have been accepted. This
+                # proves the ordered schedule independently of aggregate counts.
+                with completed_jobs.open('a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(dict(item, worker_id=worker_id,
+                        observed_at=time.time()), allow_nan=False)+'\n')
+        try:
+            if not config['chromosomes']:
+                # More selected GPUs than genetic jobs is legal. An idle worker
+                # participates in the full model barrier and publishes an empty,
+                # explicit report rather than inventing completed associations.
+                report = dict(job_groups=0, association_rows=dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0),
+                              trait_rows={}, total_seconds=0.,
+                              output=writer.finish(), assigned_genetic_jobs=0)
+                completed_jobs.touch(exist_ok=False)
+            else:
+                report = run_batched_configuration(config, model_repository=repository,
+                reader_factory=portable_reader, writer=writer, device=device,
+                trait_batch_size=plan.get('trait_batch_size', 32), memory_limit_gib=plan.get('memory_limit_gib'),
+                memory_reserve_bytes=plan.get('memory_reserve_bytes', 256*2**20),
+                cpu_threads=cpu_threads if plan.get('public_api_options') else 4,
+                device_cache_bytes=plan.get('device_cache_bytes', 512*2**20),
+                compact_cache_bytes=plan.get('compact_cache_bytes', 64*2**20),
+                metadata_cache_bytes=plan.get('metadata_cache_bytes', 256*2**20),
+                sample_axis_cache_bytes=plan.get('sample_axis_cache_bytes', 64*2**20),
+                sample_axis_host_cache_bytes=plan.get('sample_axis_host_cache_bytes', 64*2**20),
+                job_state_cache_bytes=plan.get('job_state_cache_bytes', 0),
+                job_state_cache_live_fraction=plan.get('job_state_cache_live_fraction', .25),
+                device_cache_live_fraction=plan.get('device_cache_live_fraction'),
+                emit=event, host_memory_lease_factory=gate.lease_factory)
+            report.update(end_to_end_seconds=time.time()-started, model_repository=repository.summary(),
+                          source_implementation_sha256=plan['source_implementation_sha256'],
+                          worker_id=worker_id, worker_count=worker_count,
+                          assigned_chromosomes=[c['name'] for c in config['chromosomes']],
+                          completed_jobs_sha256=digest_file(completed_jobs),
+                          completed_jobs_file=completed_jobs.name)
+            if association_only:
+                report.update(association_only=True, models_refitted=0,
+                              existing_fit_receipts_preserved=True)
+            if dispatch is not None:
+                report.update(assigned_trait_indices=assigned_traits,assigned_trait_tiles=dispatch['workers'][worker_id]['trait_tiles'],
+                    association_partition_strategy=dispatch['strategy'],
+                    association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
+                    assigned_genetic_schedule_sha256=dispatch['workers'][worker_id]['genetic_schedule_sha256'])
+            atomic_json(output/f'worker_{worker_id}.report.private.json', report)
+            association_failed = False
+            return report
+        except Exception as error:
+            try:
+                atomic_json(output/f'worker_{worker_id}.failed.private.json', dict(error_type=type(error).__name__,
+                    error=str(error), traceback=traceback.format_exc(), end_to_end_seconds=time.time()-started))
+            except BaseException:
+                pass  # A diagnostic write cannot replace the calculation error.
+            raise
+    finally:
+        _close_association_resources(writer, repository, failed=association_failed)
 
 
-def execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_only=False):
-    """Publish an exit receipt even when preparation fails before the barrier."""
+def execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_only=False,
+                   association_only=False):
+    """Publish a worker exit; optionally consume already certified null fits.
+
+    ``association_only=True`` requires every fit receipt and its scientific
+    bindings to remain valid. It never fits models or rewrites fit receipts.
+    The default still fits assigned null models before association.
+    """
+    if type(fit_only) is not bool or type(association_only) is not bool or fit_only and association_only:
+        raise ValueError('fit_only and association_only must be mutually exclusive booleans')
     started, code = time.time(), 1
     output = Path(plan['output_directory'])
     output.mkdir(parents=True, exist_ok=True)
@@ -829,25 +1081,33 @@ def execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_on
             streams = _stream_bindings(plan['configuration']['chromosomes'])
         _verify_stream_bindings(streams)
         result = _execute_worker(plan, worker_id=worker_id, worker_count=worker_count,
-                                 device=device, fit_only=fit_only)
+                                 device=device, fit_only=fit_only, association_only=association_only)
         _verify_stream_bindings(streams)
         code = 0
         return result
     except BaseException as error:
-        atomic_json(output/f'worker_{worker_id}.failed.private.json',
-                    dict(error_type=type(error).__name__, error=str(error), traceback=traceback.format_exc()))
+        try:
+            atomic_json(output/f'worker_{worker_id}.failed.private.json',
+                        dict(error_type=type(error).__name__, error=str(error), traceback=traceback.format_exc()))
+        except BaseException:
+            pass
         raise
     finally:
-        atomic_json(output/f'worker_{worker_id}.exit.anonymous.json',
-                    dict(worker_id=worker_id, exit_code=code, elapsed_seconds=time.time()-started))
+        original_error = sys.exc_info()[0] is not None
+        try:
+            atomic_json(output/f'worker_{worker_id}.exit.anonymous.json',
+                        dict(worker_id=worker_id, exit_code=code, elapsed_seconds=time.time()-started))
+        except BaseException:
+            if not original_error:
+                raise
 
 
 
 def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_directory,
                        chromosomes='all', trait_batch_size=32, continuous_transform='paper',
                        analyses=('individual', 'coding', 'noncoding', 'ncrna'),
-                       phenotype_families='auto', phenotype_covariates=None,
-                       gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1.,
+                       phenotype_families='auto', phenotype_covariates=None, rm_nan=True,
+                       gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1., host_memory_limit_gib=None,
                        cpu_threads=8, grm='sparse', grm_file=None, resume=False,
                        covariance_block_size=4096, long_mask_threshold=5000,
                        long_mask_rank=512, seed=1729, single_mac_cutoff=20,
@@ -864,15 +1124,21 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
     change the default of all supplied covariates.
     Phenotype/covariate CSVs use FID/IID identities and numerical values or NA;
     the legacy numeric cache accepts its explicitly preserved numeric ID axis.
-    Each trait keeps its own complete cases and covariate profile. Complete
-    outputs are private CSV.gz shards plus a trait dictionary and receipts.
+    rm_nan=True fills missing phenotypes after checking selected covariates;
+    False retains only available phenotype/covariate cases. The policy is
+    bound to the prepared input manifest and null models. Complete
+    outputs are independent trait CSV.gz directories, a trait dictionary and
+    bound logical-block receipts. Resume verifies committed compressed ranges
+    before skipping their association and recovers only uncommitted tails.
     """
     from .phewas_cache import _cache_path
-    _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_batch_size)
+    _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_batch_size, host_memory_limit_gib)
     for name, value in dict(device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
                             metadata_cache_bytes=metadata_cache_bytes).items():
         if type(value) is not int or value < 0:
             raise ValueError(name+' must be a nonnegative integer')
+    if type(rm_nan) is not bool:
+        raise ValueError('rm_nan must be a boolean')
     if type(resume) is not bool:
         raise ValueError('resume must be a boolean')
     if grm not in ('sparse', 'none') or (grm == 'none' and grm_file is not None):
@@ -908,7 +1174,7 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
     prepared = output/'inputs'
     if not prepared.exists():
         prepare_phewas_inputs(phenotypes=phenotype_csv, covariates=covariate_csv,
-            phenotype_families=phenotype_families, phenotype_covariates=phenotype_covariates,
+            phenotype_families=phenotype_families, phenotype_covariates=phenotype_covariates, rm_nan=rm_nan,
             sample_ids=root/manifest.get('sample_ids', 'sample_ids.npy'), output=prepared)
     inputs = PhewasInputs(prepared)
     try:
@@ -917,8 +1183,10 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
             if digest_file(path) != binding['sha256']:
                 raise ValueError('existing prepared matrix is bound to another input CSV')
         requested = dict(phenotype_families=(dict(phenotype_families) if isinstance(phenotype_families, Mapping) else 'auto'),
-            phenotype_covariates={name: list(columns) for name, columns in (phenotype_covariates or {}).items()})
-        recorded = inputs.manifest.get('trait_options', dict(phenotype_families='auto', phenotype_covariates={}))
+            phenotype_covariates={name: list(columns) for name, columns in (phenotype_covariates or {}).items()}, rm_nan=rm_nan)
+        recorded = dict(inputs.manifest.get('trait_options', dict(phenotype_families='auto', phenotype_covariates={})))
+        # Inputs created before the explicit policy used available cases.
+        recorded.setdefault('rm_nan', False)
         if 'profiles' in inputs.manifest['sources'] or recorded != requested:
             raise ValueError('existing prepared matrix is bound to another trait family/covariate selection')
         if not np.array_equal(inputs.sample_ids, sample_ids):
@@ -937,11 +1205,13 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
         cohort_rows=None if cohort is None else str(cohort),
         cohort_sha256=None if cohort is None else digest_file(cohort), trait_count=count,
         trait_index_sha256=dictionary_sha,
-        continuous_transform=continuous_transform,
+        continuous_transform=continuous_transform, rm_nan=rm_nan,
         trait_batch_size=trait_batch_size, cpu_threads=cpu_threads,
         memory_limit_gib=memory_limit_gib, memory_reserve_bytes=int(memory_reserve_gib*2**30),
+        host_memory_limit_gib=host_memory_limit_gib,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, resume=resume, public_api_options=True,
+        csv_output_layout='per_trait_checkpoint',
         attempt_id=str(time.time_ns()), source_implementation_sha256=_implementation_sha256(),
         prepared_inputs_manifest_sha256=digest_file(prepared/'manifest.private.json'),
         configuration=config, strict_logp_delta_required=False,
@@ -950,9 +1220,9 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
     if previous_path.exists():
         previous = json.loads(previous_path.read_text())
         for key in ('source_implementation_sha256', 'prepared_inputs_manifest_sha256', 'kinship_sha256',
-                    'cohort_sha256', 'continuous_transform', 'configuration', 'trait_count', 'trait_batch_size',
-                    'genotype_streams', 'trait_index_sha256'):
-            if previous.get(key) != plan.get(key):
+                    'cohort_sha256', 'continuous_transform', 'rm_nan', 'configuration', 'trait_count', 'trait_batch_size',
+                    'genotype_streams', 'trait_index_sha256', 'csv_output_layout'):
+            if previous.get(key, False if key=='rm_nan' else None) != plan.get(key):
                 raise ValueError('resume plan scientific/source bindings differ; use a new output directory')
         # Retain the original plan as audit evidence across resource/device changes.
         atomic_json(output/f'plan.previous.{plan["attempt_id"]}.private.json', previous)
@@ -965,8 +1235,8 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
 def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_directory,
                gpu_ids=(0,), chromosomes='all', trait_batch_size=32, continuous_transform='paper',
                analyses=('individual', 'coding', 'noncoding', 'ncrna'),
-               phenotype_families='auto', phenotype_covariates=None,
-               gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1.,
+               phenotype_families='auto', phenotype_covariates=None, rm_nan=True,
+               gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1., host_memory_limit_gib=None,
                cpu_threads=8, grm='sparse', grm_file=None, resume=False,
                covariance_block_size=4096, long_mask_threshold=5000,
                long_mask_rank=512, seed=1729, single_mac_cutoff=20,
@@ -977,9 +1247,10 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
     """One call for all traits and chromosomes on the selected local GPUs.
 
     Remote deployments use the identical private plan on each host. Genetic
-    schedules are partitioned across workers; traits never trigger new complete
-    genome scans. Genetic jobs are assigned once across GPUs even for one
-    chromosome. CPU affinity is bounded per worker; the node quota is shared.
+    jobs are partitioned across workers when the fitted bank fits one GPU's
+    cache. Larger banks assign whole ordered cohorts to workers; each worker
+    scans the genetic schedule for its own disjoint traits. CPU affinity is
+    bounded per worker; the node quota is shared.
     """
     import multiprocessing as mp
     gpu_ids = tuple(gpu_ids)
@@ -989,9 +1260,10 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
     plan = prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory,
         output_directory=output_directory, chromosomes=chromosomes, trait_batch_size=trait_batch_size,
         continuous_transform=continuous_transform, analyses=analyses,
-        phenotype_families=phenotype_families, phenotype_covariates=phenotype_covariates,
+        phenotype_families=phenotype_families, phenotype_covariates=phenotype_covariates, rm_nan=rm_nan,
         gene_variant_type=gene_variant_type, memory_limit_gib=memory_limit_gib,
-        memory_reserve_gib=memory_reserve_gib, cpu_threads=cpu_threads, grm=grm,
+        memory_reserve_gib=memory_reserve_gib, host_memory_limit_gib=host_memory_limit_gib,
+        cpu_threads=cpu_threads, grm=grm,
         grm_file=grm_file, resume=resume, covariance_block_size=covariance_block_size,
         long_mask_threshold=long_mask_threshold, long_mask_rank=long_mask_rank, seed=seed,
         single_mac_cutoff=single_mac_cutoff, single_group_variants=single_group_variants,
@@ -1005,6 +1277,10 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
     plan['cpu_pool'] = sorted(os.sched_getaffinity(0))[:capacity['effective_cores']]
     plan['cpu_capacity'] = capacity
     plan['cpu_offsets'] = {str(i):(cpu_threads*i) % capacity['effective_cores'] for i in range(len(gpu_ids))}
+    from .phewas_partition import gpu_model_cache_capacity, verify_dispatch_reports
+    plan['association_partition_strategy'] = 'cohort_tiles'
+    plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,
+        memory_limit_gib=memory_limit_gib,reserve_bytes=int(memory_reserve_gib*2**30))
     output = Path(plan['output_directory'])
     if resume:
         prior = [path for pattern in ('worker_*.exit.anonymous.json', 'worker_*.failed.private.json',
@@ -1030,7 +1306,12 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
                 pass
         main_affinity = sorted(os.sched_getaffinity(0))
         try:
-            return [execute_worker(plan, worker_id=0, worker_count=1, device=f'cuda:{gpu_ids[0]}')]
+            reports = [execute_worker(plan, worker_id=0, worker_count=1, device=f'cuda:{gpu_ids[0]}')]
+            dispatch = json.loads((output/f'association_dispatch.{plan["attempt_id"]}.private.json').read_text())
+            completion = verify_dispatch_reports(dispatch,reports)
+            for report in reports:
+                report['global_completion'] = completion
+            return reports
         finally:
             torch.set_num_threads(previous_threads)
             for path in Path('/proc/self/task').iterdir():
@@ -1079,8 +1360,13 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
             worker.join(timeout=.2)
     if any(worker.exitcode != 0 for worker in workers):
         raise RuntimeError('a PheWAS worker failed; inspect private failure receipts')
-    return [json.loads((Path(plan['output_directory'])/f'worker_{i}.report.private.json').read_text())
-            for i in range(len(workers))]
+    reports = [json.loads((Path(plan['output_directory'])/f'worker_{i}.report.private.json').read_text())
+               for i in range(len(workers))]
+    dispatch = json.loads((output/f'association_dispatch.{plan["attempt_id"]}.private.json').read_text())
+    completion = verify_dispatch_reports(dispatch,reports)
+    for report in reports:
+        report['global_completion'] = completion
+    return reports
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1093,18 +1379,33 @@ def main(argv=None):
     parser.add_argument('--worker-id', type=int, default=0)
     parser.add_argument('--worker-count', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--fit-only', action='store_true')
+    phases = parser.add_mutually_exclusive_group()
+    phases.add_argument('--fit-only', action='store_true')
+    phases.add_argument('--association-only', action='store_true',
+                        help='consume existing completed null fits without refitting or rewriting fit receipts')
+    parser.add_argument('--host-memory-limit-gib', type=float, default=None,
+                        help='shared host task budget in GiB; default detects all finite limits')
+    parser.add_argument('--rm-nan', action=argparse.BooleanOptionalAction, default=None,
+                        help='fill phenotypes by default; --no-rm-nan selects available cases')
     parser.add_argument('--continuous-transform', choices=['paper','none','rint'], default='paper')
     args = parser.parse_args(argv)
     if args.plan is None:
+        if args.association_only:
+            parser.error('--association-only requires an existing --plan')
         if any(value is None for value in (args.phenotype_csv, args.covariate_csv, args.cache_directory, args.output_directory)):
             parser.error('provide phenotype CSV, covariate CSV, cache directory and output directory')
         return run_phewas(args.phenotype_csv, args.covariate_csv, args.cache_directory,
                           output_directory=args.output_directory, gpu_ids=args.gpu_ids,
-                          continuous_transform=args.continuous_transform)
+                          continuous_transform=args.continuous_transform,
+                          rm_nan=True if args.rm_nan is None else args.rm_nan,
+                          host_memory_limit_gib=args.host_memory_limit_gib)
     plan = json.loads(Path(args.plan).read_text())
+    if args.rm_nan is not None and args.rm_nan != plan.get('rm_nan', False):
+        parser.error('rm_nan cannot change an existing prepared plan; use a new output directory')
+    if args.host_memory_limit_gib is not None:
+        plan['host_memory_limit_gib'] = _validate_host_memory_limit(args.host_memory_limit_gib)
     execute_worker(plan, worker_id=args.worker_id, worker_count=args.worker_count,
-                   device=args.device, fit_only=args.fit_only)
+                   device=args.device, fit_only=args.fit_only, association_only=args.association_only)
 
 
 if __name__ == '__main__':

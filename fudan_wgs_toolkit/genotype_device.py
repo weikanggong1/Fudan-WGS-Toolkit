@@ -8,6 +8,42 @@ from dataclasses import dataclass, field
 import numpy as np
 from .genotype import _indices
 
+_COLUMN_DENSE_KERNEL = None
+
+
+def _column_dense_kernel():
+    """Convert selected lossless columns directly into an admitted output."""
+    global _COLUMN_DENSE_KERNEL, triton, tl
+    if _COLUMN_DENSE_KERNEL is not None:
+        return _COLUMN_DENSE_KERNEL
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def kernel(S, ROWS, COLS, MEANS, DEST, O, N, M, SOURCE_ROW_STRIDE,
+               SOURCE_COLUMN_STRIDE, OUTPUT_ROW_STRIDE, OUTPUT_COLUMN_STRIDE,
+               IDENTITY_ROWS: tl.constexpr, MEAN_IMPUTATION: tl.constexpr,
+               BLOCK: tl.constexpr):
+        x = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+        valid = x < N * M
+        row, col = x // M, x % M
+        source_row = row if IDENTITY_ROWS else tl.load(ROWS + row, valid, other=0)
+        source_col = tl.load(COLS + col, valid, other=0)
+        state = tl.load(S + source_row.to(tl.int64) * SOURCE_ROW_STRIDE
+                        + source_col.to(tl.int64) * SOURCE_COLUMN_STRIDE,
+                        valid, other=3)
+        if MEAN_IMPUTATION:
+            mean = tl.load(MEANS + col, valid, other=0)
+            value = tl.where(state == 3, mean, state)
+        else:
+            value = tl.where(state == 3, 0, state)
+        destination = tl.load(DEST + col, valid, other=0)
+        tl.store(O + row.to(tl.int64) * OUTPUT_ROW_STRIDE
+                 + destination.to(tl.int64) * OUTPUT_COLUMN_STRIDE, value, valid)
+
+    _COLUMN_DENSE_KERNEL = kernel
+    return kernel
+
 
 @dataclass
 class DeviceMinorBlock:
@@ -157,3 +193,82 @@ class DeviceMinorBlock:
         else:
             genotype.masked_fill_(missing, 0)
         return genotype, maf, mac, missing_count, self.union_ref_af >= 0.5
+
+    def trait_dense_columns(self, trait_rows, column_indices, imputation="mean", *,
+                            frequency_mode="count", dtype=None, out=None,
+                            out_columns=None):
+        """Write selected columns without a floating host dosage round trip.
+
+        Summaries preserve ``trait_dense``'s integer counts and NumPy FP64
+        frequency formulas. CUDA gathers uint8 dosage and fills the original
+        double mean cast once directly into ``out``; it creates neither a
+        selected uint8 matrix nor a sample-by-variant missing mask. Callers
+        must admit the output and the small row/column/mean index workspace
+        before invoking this method. ``out_columns`` names unique destination
+        columns and allows several blocks to fill one final dosage matrix.
+        The returned dosage is ``out`` itself when supplied; summaries always
+        follow ``column_indices`` order. CPU mode is the exact small oracle.
+        """
+        import torch
+        dtype = torch.float64 if dtype is None else dtype
+        if dtype not in (torch.float64, torch.float32):
+            raise ValueError("dosage dtype must be torch.float64 or torch.float32")
+        rows = self._trait_rows(trait_rows, imputation, frequency_mode)
+        columns = _indices(column_indices, self.shape[1], "column_indices")
+        if out is None:
+            if out_columns is not None:
+                raise ValueError("out_columns requires an output tensor")
+            destinations = np.arange(len(columns), dtype=np.int64)
+        else:
+            if (not isinstance(out, torch.Tensor) or out.ndim != 2
+                    or out.shape[0] != len(rows) or out.dtype != dtype
+                    or out.device != self.dosage.device or out.layout != torch.strided
+                    or out.requires_grad or any(stride <= 0 for stride in out.stride())
+                    or (out.numel() and self.dosage.numel()
+                        and out.untyped_storage().data_ptr() == self.dosage.untyped_storage().data_ptr())
+                    or not (out.stride(0) >= out.shape[1] * out.stride(1)
+                            or out.stride(1) >= out.shape[0] * out.stride(0))):
+                raise ValueError("output dosage must have matching rows, dtype, device and nonoverlapping row/column-major storage")
+            destinations = _indices(np.arange(len(columns), dtype=np.int64)
+                if out_columns is None else out_columns, out.shape[1], "out_columns")
+            if len(destinations) != len(columns) or len(np.unique(destinations)) != len(destinations):
+                raise ValueError("out_columns must provide one unique destination per selected column")
+        cached = self._cached_counts(rows)
+        if cached is None:
+            _, selected, missing, mac, absent = self._trait_counts(rows)
+            del selected, missing
+        else:
+            mac, absent = cached
+        all_maf = self._trait_frequency(rows, mac, absent, imputation, frequency_mode)
+        maf, mac, absent = all_maf[columns].copy(), mac[columns].copy(), absent[columns].copy()
+        is_alt = (self.union_ref_af >= .5)[columns]
+        output = out if out is not None else torch.empty(
+            (len(rows), len(columns)), dtype=dtype, device=self.dosage.device)
+        if not len(rows) or not len(columns):
+            return output, maf, mac, absent, is_alt
+        identity_rows = len(rows) == self.shape[0] and np.array_equal(rows, np.arange(self.shape[0]))
+        if self.dosage.device.type == 'cuda':
+            kernel = _column_dense_kernel()
+            # Only validated small host axes/summaries move to the device.
+            source_rows = None if identity_rows else torch.tensor(rows, device=self.dosage.device)
+            source_columns = torch.tensor(columns, device=self.dosage.device)
+            destination_columns = torch.tensor(destinations, device=self.dosage.device)
+            means = torch.tensor(2 * maf, dtype=dtype, device=self.dosage.device)
+            with torch.cuda.device(self.dosage.device):
+                kernel[(triton.cdiv(len(rows) * len(columns), 256),)](
+                    self.dosage, source_rows, source_columns, means, destination_columns,
+                    output, len(rows), len(columns), *self.dosage.stride(),
+                    *output.stride(), IDENTITY_ROWS=identity_rows,
+                    MEAN_IMPUTATION=imputation == 'mean', BLOCK=256)
+        else:
+            selected = self.dosage if identity_rows else self.dosage.index_select(
+                0, torch.tensor(rows, device=self.dosage.device))
+            selected = selected.index_select(1, torch.tensor(columns, device=self.dosage.device))
+            dense = selected.to(dtype=dtype, copy=True)
+            if imputation == 'mean':
+                means = torch.tensor(2 * maf, dtype=dtype, device=self.dosage.device)
+                torch.where(selected == 3, means[None, :], dense, out=dense)
+            else:
+                dense.masked_fill_(selected == 3, 0)
+            output.index_copy_(1, torch.tensor(destinations, device=self.dosage.device), dense)
+        return output, maf, mac, absent, is_alt

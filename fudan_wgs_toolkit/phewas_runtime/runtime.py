@@ -362,12 +362,14 @@ def _descriptor_groups(repository):
         if type(index) is not int or index < 0 or index in seen:
             raise ValueError('trait_index must be a distinct nonnegative integer')
         seen.add(index)
-        raw = np.asarray(descriptor.get('ordered_rows'))
+        raw = np.asanyarray(descriptor.get('ordered_rows'))
         if (raw.ndim != 1 or raw.dtype.kind not in 'iu' or not len(raw)
                 or descriptor.get('n') != len(raw) or descriptor.get('family') not in ('gaussian', 'binomial')):
             raise ValueError('descriptor requires n/family and a nonempty ordered integer sample axis')
-        rows = np.asarray(raw, dtype=np.int64)
-        key = (len(rows), hashlib.sha256(rows.tobytes()).digest())
+        rows = raw if raw.dtype == np.dtype(np.int64) else np.asarray(raw, dtype=np.int64)
+        row_bytes = memoryview(rows).cast('B') if rows.flags.c_contiguous else rows.tobytes()
+        key = (len(rows), hashlib.sha256(row_bytes).digest())
+        del row_bytes
         group = by_digest.get(key)
         if group is None or not np.array_equal(rows, group['rows']):
             # Verified read-only model-store mmaps retain their source binding.
@@ -431,7 +433,7 @@ def _thin_pipeline(gds, model, rows, options, configuration, structural=None):
         'fallback_host_reused_masks', 'geometry_checks', 'geometry_union_covariance_cells',
         'geometry_mask_covariance_cells'), 0)
     p.statistics_tail_optimization_calls = 0
-    p.profiler = StageProfiler(model.device, enabled=configuration.get('stage_profile', False))
+    p.profiler = configuration.get('_stage_profiler') or StageProfiler(model.device, enabled=configuration.get('stage_profile', False))
     p.resident_genotypes = True
     p.single_batch_optimization = True
     p.individual_effective_block_size = configuration.get('individual_effective_block_size', 1024)
@@ -471,6 +473,73 @@ def _prepare_host_guard(pipeline, model, selected_m, materialized_bytes=0):
         guard(n=model.n, m=int(selected_m), phase='prepare')
 
 
+def _prepare_shared_gene_device(pipeline, indices, broker, phred, names):
+    """Keep one small cohort/mask on device, preserving the original F layout.
+
+    This route is optional memory admission, never a scientific filter. A
+    rejected resident workspace uses the established bounded host route. Each
+    cohort still owns its allele summaries, eligibility and imputed dosages.
+    """
+    model, options = pipeline.models[0], pipeline.options
+    n, candidate_m = model.n, len(indices)
+    # NEW peak: retained uint8 slabs, final FP32 G, indexing/count scratch,
+    # subsequent native covariance/projection and bounded cMAC reduction.
+    broker._guard(12*n*candidate_m + 32*candidate_m*candidate_m + 256*2**20)
+    parts, physical, frequencies, groups = [], [], [], []
+    prefiltered = 0
+    for offset in range(0, candidate_m, options.genotype_block_size):
+        selected = indices[offset:offset+options.genotype_block_size]
+        raw = broker.read_states(selected)
+        block = broker.trait_block(raw, pipeline.union_rows)
+        del raw
+        alt = 1-block.union_ref_af
+        source_maf = np.where(block.union_ref_af >= alt, alt, block.union_ref_af)
+        prefilter = np.isfinite(source_maf) & (source_maf > 0) & (source_maf < options.rare_maf_cutoff)
+        prefiltered += int(prefilter.sum())
+        if prefiltered >= options.rv_num_cutoff_max_prefilter:
+            raise ValueError('union-prefilter variant count reaches rv_num_cutoff_max_prefilter')
+        maf = block.trait_summary(pipeline.trait_rows[0], options.imputation, frequency_mode='reference')[0]
+        keep = prefilter & np.isfinite(maf) & (maf > 0) & (maf < options.rare_maf_cutoff)
+        columns = np.flatnonzero(keep)
+        if len(columns):
+            physical.extend((offset+columns).tolist())
+            frequencies.extend(maf[columns])
+            missing = block.allele_missing_rate()
+            grouping = np.where(alt > .5, 2, np.where((source_maf >= .01) | (missing >= .01), 1, 0))
+            groups.extend(grouping[columns])
+            parts.append((block, columns))
+        else:
+            del block
+    count = len(physical)
+    if count < options.rv_num_cutoff:
+        return None
+    if count >= options.rv_num_cutoff_max:
+        raise ValueError('rare variant count reaches rv_num_cutoff_max')
+    maximum = pipeline.maximum_mask_variants
+    if maximum is not None and count > maximum:
+        pipeline.skipped_sets.append(dict(eligible_variants=count, reason='eligible_M_exceeds_configured_limit'))
+        return None
+    group = np.asarray(groups, dtype=np.int64)
+    order = np.argsort(group, kind='stable')
+    inverse = np.empty(count, dtype=np.int64); inverse[order] = np.arange(count)
+    # Baseline NumPy F-contiguous -> CUDA F-strided G fixes native GEMV order.
+    genotype = torch.empty((count, n), dtype=torch.float32, device=broker.device).T
+    begin = 0
+    for block, columns in parts:
+        end = begin+len(columns)
+        block.trait_dense_columns(pipeline.trait_rows[0], columns, options.imputation,
+            frequency_mode='reference', dtype=torch.float32, out=genotype, out_columns=inverse[begin:end])
+        begin = end
+    parts.clear(); del block
+    physical = np.asarray(physical, dtype=np.int64)[order]
+    maf = np.asarray(frequencies, dtype=np.float64)[order]
+    from ..pipeline import _cmac_scalar_sum
+    return dict(_genotype_device=genotype, _variant_indices=indices[physical], cmac=_cmac_scalar_sum(genotype),
+        _extraction_groups=group[order], maf=maf, mac=np.rint(maf*2*n), annotations=phred[physical], names=names,
+        acat_calibration='chi2', rare_maf_cutoff=options.rare_maf_cutoff,
+        rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
+
+
 def _prepare_shared_gene(pipeline, indices, broker):
     """Prepare one cohort/mask once, retaining bounded CPU uint8 parts.
 
@@ -484,6 +553,16 @@ def _prepare_shared_gene(pipeline, indices, broker):
     annotations = pipeline.annotations(indices, metadata='weights')
     phred, names = annotation_phred_matrix(annotations.annotations, pipeline.annotation_names,
         variant_type=options.variant_type, number_variants=len(indices))
+    # Candidate geometry bounds raw ownership before counts are known. Large
+    # masks retain the old tiled host path; no eligible mask is skipped.
+    if (torch.device(broker.device).type == 'cuda' and len(indices) <= options.long_mask_threshold
+            and pipeline.resident_genotypes):
+        try:
+            return _prepare_shared_gene_device(pipeline, indices, broker, phred, names)
+        except (MemoryError, torch.cuda.OutOfMemoryError):
+            # Exception-local tensors lose their owners here. Recompute only
+            # preparation using the unchanged bounded CPU route.
+            pass
     parts, physical, frequencies, groups = [], [], [], []
     prefiltered = 0
     for offset in range(0, len(indices), options.genotype_block_size):
@@ -558,19 +637,95 @@ def _prepare_shared_gene(pipeline, indices, broker):
 
 
 def _shared_gene_scores(genotype, models, broker, variant_tile_size=512):
-    from ..tf32 import matmul
+    from .scores import fp32_score_columns
     n, m = genotype.shape
-    broker._guard(4*(n*min(m, variant_tile_size) + n*len(models) + m*len(models)) + 64*2**20)
-    residuals = torch.stack([model.scaled_residuals for model in models], 1)
+    resident = isinstance(genotype, torch.Tensor) and genotype.is_cuda
+    panel_new = 0 if resident else n*min(m, variant_tile_size)
+    # G/fitted vectors already belong to their owners. Admit mandatory panels
+    # and outputs here; the Score helper admits optional N x traits SIMT stack
+    # against the same live cap, or reduces to mature GEMV under pressure.
+    traits = len(models)
+    temporary_output = (m if resident else min(m, variant_tile_size))*traits
+    broker._guard(4*(panel_new + m*traits + temporary_output) + 64*2**20)
+    residuals = [model.scaled_residuals for model in models]
     result = torch.empty((m, len(models)), dtype=torch.float32, device=models[0].device)
     if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
-        result.copy_(matmul(genotype.T, residuals, mode='tf32'))
+        fp32_score_columns(genotype, residuals, out=result)
     else:
         for begin in range(0, m, variant_tile_size):
             end = min(begin+variant_tile_size, m)
             block = torch.as_tensor(genotype[:, begin:end], dtype=torch.float32, device=models[0].device)
-            result[begin:end] = matmul(block.T, residuals, mode='tf32')
+            fp32_score_columns(block, residuals, out=result[begin:end])
             del block
+    return result
+
+
+def _gene_normal_score_extreme(score, covariance):
+    """Identify sensitive ordinary normal tails using this model's own V."""
+    from ..pipeline import _individual_log_probabilities
+    log_probability = _individual_log_probabilities(score, covariance.diagonal())
+    return bool((log_probability > 100*np.log(10)).any())
+
+
+def _gene_probability_extreme(result):
+    """Check emitted native probabilities without inventing a zero-P floor."""
+    if not isinstance(result, dict):
+        return False
+    for name, value in result.items():
+        if not name.startswith(('SKAT(', 'Burden(', 'ACAT-', 'WGS-', 'STAAR-')):
+            continue
+        if name.endswith(('_log10', '-log10p')):
+            if value is not None and np.isfinite(value) and value > 100:
+                return True
+        elif name.endswith('_log'):
+            if value is not None and np.isfinite(value) and value > 100*np.log(10):
+                return True
+        elif value is not None and np.isfinite(value) and 0 <= value < 1e-100:
+            return True
+    return False
+
+
+def _evaluate_gaussian_gene_score(pipeline, payload, model, genotype, broker,
+                                  *, shared_simt, report):
+    """Retain the original full trait column when FP32 tail sensitivity is high.
+
+    IEEE FP32 matrix and vector reductions can differ slightly. Above native
+    -log10(P)=100, or when an aggregate gene tail reaches that range, evaluate
+    the original whole resident-G / 512 host-panel GEMV column with this same
+    fitted residual and V. A failed first evaluation remains a real failure.
+    The threshold selects an arithmetic fallback, never a mask/sample filter.
+    """
+    original = False
+    def restore(reason):
+        nonlocal original
+        started = time.perf_counter()
+        with pipeline.profiler.measure('gene_score_original_fallback', gpu=True):
+            payload['score'] = _shared_gene_scores(genotype, [model], broker)[:, 0]
+        original = True
+        report['gene_score_original_fallback_columns'] = report.get('gene_score_original_fallback_columns', 0)+1
+        name = 'gene_score_original_fallback_'+reason
+        report[name] = report.get(name, 0)+1
+        report['gene_score_original_fallback_submission_seconds'] = report.get('gene_score_original_fallback_submission_seconds', 0.)+time.perf_counter()-started
+        report['gene_score_fallback_wall_scope'] = 'CPU submission wall; CUDA time is the nested profiler phase'
+    if shared_simt:
+        report['gene_score_normal_tail_checks'] = report.get('gene_score_normal_tail_checks', 0)+1
+        if payload['score'].is_cuda:
+            report['gene_score_control_d2h_batches'] = report.get('gene_score_control_d2h_batches', 0)+1
+            report['gene_score_control_d2h_bytes'] = report.get('gene_score_control_d2h_bytes', 0)+1
+        if _gene_normal_score_extreme(payload['score'], payload['covariance']):
+            restore('normal_tail')
+    report['gene_score_tail_evaluations'] = report.get('gene_score_tail_evaluations', 0)+1
+    result = pipeline._evaluate_prepared(payload, model)
+    if shared_simt and not original and _gene_probability_extreme(result):
+        # First-tail dictionaries may contain native CUDA values. Release them
+        # before the original-score tail, while keeping this same V resident.
+        del result
+        restore('gene_tail')
+        report['gene_score_additional_tail_evaluations'] = report.get('gene_score_additional_tail_evaluations', 0)+1
+        report['gene_score_tail_evaluations'] += 1
+        started = time.perf_counter()
+        result = pipeline._evaluate_prepared(payload, model)
+        report['gene_score_additional_tail_submission_seconds'] = report.get('gene_score_additional_tail_submission_seconds', 0.)+time.perf_counter()-started
     return result
 
 
@@ -682,8 +837,59 @@ def _gene_workspace_scope(repository, broker, required):
 
 def _trait_tiles(group, trait_batch_size):
     descriptors = group['descriptors']
+    fixed = group.get('trait_tiles')
+    if fixed is not None:
+        pending = {d['trait_index'] for d in descriptors}
+        for tile in fixed:
+            ids = {d['trait_index'] for d in tile}
+            remaining = pending.intersection(ids)
+            if remaining and remaining != ids:
+                raise ValueError('a fixed cohort tile cannot be partially resumed')
+            if remaining:
+                yield tile
+        return
     for begin in range(0, len(descriptors), trait_batch_size):
         yield descriptors[begin:begin+trait_batch_size]
+
+
+def _bind_trait_tiles(groups, configured, trait_batch_size):
+    """Retain global tile boundaries when GPU ownership or resume changes."""
+    if configured is None:
+        return
+    if not isinstance(configured, list) or not configured:
+        raise ValueError('fixed cohort tiles require a nonempty bound list')
+    by_index = {d['trait_index']: (group, d)
+                for group in groups for d in group['descriptors']}
+    seen, bound = set(), {id(group): [] for group in groups}
+    for record in configured:
+        keys = ('cohort_index', 'tile_index', 'ordered_sample_rows_sha256',
+                'n', 'trait_indices', 'trait_batch_size')
+        if not isinstance(record, dict) or any(key not in record for key in keys):
+            raise ValueError('fixed cohort tile scientific binding is incomplete')
+        scientific = {key: record[key] for key in keys}
+        digest = hashlib.sha256(json.dumps(scientific, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        ids = record['trait_indices']
+        if (record.get('tile_binding_sha256') != digest
+                or record['trait_batch_size'] != trait_batch_size
+                or not isinstance(ids, list) or not ids
+                or any(type(i) is not int or i not in by_index or i in seen for i in ids)
+                or ids != sorted(set(ids)) or len(ids) > trait_batch_size):
+            raise ValueError('fixed cohort tile IDs or scientific binding changed')
+        group = by_index[ids[0]][0]
+        tile = []
+        for index in ids:
+            owner, descriptor = by_index[index]
+            if (owner is not group or descriptor['n'] != record['n']
+                    or descriptor.get('sample_rows_sha256') != record['ordered_sample_rows_sha256']):
+                raise ValueError('fixed cohort tile differs from its verified ordered sample axis')
+            tile.append(descriptor)
+        seen.update(ids)
+        bound[id(group)].append(tile)
+    if seen != set(by_index):
+        raise ValueError('fixed cohort tiles do not cover all assigned traits')
+    for group in groups:
+        group['trait_tiles'] = bound[id(group)]
 
 
 def _record_checkpoint_rows(report, receipt):
@@ -776,67 +982,91 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                 continue
             axis = broker.reader_view(group['rows'])
             rows = axis._axis.samples
-            block = broker.trait_block(raw, rows, minimum_mac=mac)
-            prepared = None
+            block, prepared = None, None
             ordinal_before = ordinals[gi]
             try:
+                # A rejected block still owns the reader's pinned sample axis.
+                # Enter its cleanup scope before any allocating preparation.
+                block = broker.trait_block(raw, rows, minimum_mac=mac)
                 for tile_index, tile in enumerate(_trait_tiles(group, trait_batch_size)):
                     if cached[tile_index] is not None:
                         continue
                     models, model, state, outputs = None, None, None, None
                     pipelines = []
                     try:
-                        with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
-                            pipelines = []
-                            for model, descriptor in zip(models, tile):
-                                _check_model(model, descriptor, metadata, verified)
-                                pipelines.append(_thin_pipeline(axis, model, rows, options, configuration, structural))
-                            if len(models) != len(tile):
-                                raise ValueError('repository acquire must retain the requested model order/count')
-                            if prepared is None:
-                                state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinal_before, mac_cutoff=mac)
-                                prepared = (None if state is None else
-                                    pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac))
-                                state = None
-                                if prepared is not None:
-                                    prepared.pop('model')
-                                for receipt in cached:
-                                    if receipt is not None and receipt['ordinal_after'] != ordinals[gi]:
-                                        raise ValueError('Single checkpoint ordinal differs from the current verified genetic block')
-                            if prepared is None:
-                                outputs = [[] for _ in tile]
-                            else:
-                                broker._guard(pipelines[0]._workspace_estimate(models[0], prepared['genotype'].shape[1], individual=True)
-                                              + 4*models[0].n*len(models))
-                                def correction(index, model, genotype, score, variance):
-                                    from ..binary import binary_single_phewas
-                                    return binary_single_phewas(model, genotype,
-                                        spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
-                                        normal_score=score, normal_variance=variance,
-                                        p_filter_cutoff=options.p_filter_cutoff,
-                                        tol=options.spa_tol, max_iter=options.spa_max_iter)
-                                outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
-                                    mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
-                            if checkpoints:
-                                writer.write_tile('individual', chromosome,
-                                    [(d['trait_index'], result) for d, result in zip(tile, outputs)],
-                                    job_index=job_index, block_index=block_index,
-                                    block_identity=block_identity, ordinal_before=ordinal_before,
-                                    ordinal_after=ordinals[gi])
-                            else:
+                        from ..phewas_resources import host_output_lease_scope
+                        with host_output_lease_scope(configuration.get('_single_host_lease_factory'),
+                                rows=len(request), traits=len(tile),
+                                chromosome_index=configuration.get('_chromosome_index', 0), job_index=job_index,
+                                on_wait=configuration.get('_batched_emit')) as output_reservation:
+                            with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
+                                pipelines = []
+                                for model, descriptor in zip(models, tile):
+                                    _check_model(model, descriptor, metadata, verified)
+                                    pipelines.append(_thin_pipeline(axis, model, rows, options, configuration, structural))
+                                if len(models) != len(tile):
+                                    raise ValueError('repository acquire must retain the requested model order/count')
+                                if prepared is None:
+                                    state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinal_before, mac_cutoff=mac)
+                                    prepared = (None if state is None else
+                                        pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac))
+                                    state = None
+                                    if prepared is not None:
+                                        prepared.pop('model')
+                                    for receipt in cached:
+                                        if receipt is not None and receipt['ordinal_after'] != ordinals[gi]:
+                                            raise ValueError('Single checkpoint ordinal differs from the current verified genetic block')
+                                if prepared is None:
+                                    outputs = [[] for _ in tile]
+                                else:
+                                    g = prepared['genotype']
+                                    m, t = g.shape[1], len(models)
+                                    # One G is already materialized; three NEW
+                                    # genotype/projection buffers remain in the
+                                    # mature single-model estimate. Variance is
+                                    # serial, but packed tails/corrections span
+                                    # the trait tile and need separate storage.
+                                    core = max(p._workspace_estimate(model, m, individual=True)
+                                               for p, model in zip(pipelines, models))
+                                    resident_g = g.numel()*g.element_size()
+                                    binary_traits = sum(model.family == 'binomial' for model in models)
+                                    tile_tail = 128*m*t + 264*m*binary_traits
+                                    broker._guard(max(0, core-resident_g) + tile_tail)
+                                    del g
+                                    # Optional IEEE Score N x traits stack is
+                                    # admitted by its own native live-budget
+                                    # gate, with mature GEMV pressure fallback.
+                                    def correction(index, model, genotype, score, variance):
+                                        from ..binary import binary_single_phewas
+                                        return binary_single_phewas(model, genotype,
+                                            spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
+                                            normal_score=score, normal_variance=variance,
+                                            p_filter_cutoff=options.p_filter_cutoff,
+                                            tol=options.spa_tol, max_iter=options.spa_max_iter)
+                                    outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
+                                        mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
+                                output_reservation.materialized()
+                                if checkpoints:
+                                    writer.write_tile('individual', chromosome,
+                                        [(d['trait_index'], result) for d, result in zip(tile, outputs)],
+                                        job_index=job_index, block_index=block_index,
+                                        block_identity=block_identity, ordinal_before=ordinal_before,
+                                        ordinal_after=ordinals[gi])
+                                else:
+                                    for descriptor, result in zip(tile, outputs):
+                                        writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
                                 for descriptor, result in zip(tile, outputs):
-                                    writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
-                            for descriptor, result in zip(tile, outputs):
-                                report['association_rows']['individual'] += len(result)
-                                report['trait_rows'][descriptor['trait_index']]['individual'] += len(result)
-                                if descriptor['family'] == 'binomial':
-                                    report['binary_spa_selected'] += sum(row['spa_selected'] for row in result)
-                                    report['binary_spa_failed'] += sum(row['spa_failed'] for row in result)
+                                    report['association_rows']['individual'] += len(result)
+                                    report['trait_rows'][descriptor['trait_index']]['individual'] += len(result)
+                                    if descriptor['family'] == 'binomial':
+                                        report['binary_spa_selected'] += sum(row['spa_selected'] for row in result)
+                                        report['binary_spa_failed'] += sum(row['spa_failed'] for row in result)
                     finally:
                         for pipeline in pipelines:
                             pipeline.models = []
                         pipelines.clear()
                         models, model, state, outputs = None, None, None, None
+                        descriptor, result, pipeline = None, None, None
             finally:
                 del prepared, block
                 axis.close()
@@ -1015,7 +1245,9 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
                             _check_model(models[0], anchor, metadata, verified)
                             prototype = _thin_pipeline(axis, models[0], axis._axis.samples, options, configuration, structural)
-                            prepared = _prepare_shared_gene(prototype, indices, broker)
+                            with prototype.profiler.measure('gene_read_decode_cohort_prepare', gpu=True):
+                                with _gene_workspace_scope(repository, broker, 0):
+                                    prepared = _prepare_shared_gene(prototype, indices, broker)
                             q = models[0].x.shape[1]
                         prototype.models = []
                         del models
@@ -1024,29 +1256,54 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                             set_future(0, phase='gene_host_ready')
                         if prepared is None:
                             continue
-                        host = prepared['_genotype_host']
+                        host = prepared.get('_genotype_device', prepared.get('_genotype_host'))
                         genotype, burdens = host, None
                         n, m = host.shape
+                        genotype_elements = n*m
+                        memory_sample = configuration.get('_memory_sample')
+                        if callable(memory_sample):
+                            memory_sample('gene_prepared', genotype=host)
                         has_gaussian = any(d['family'] == 'gaussian' for d in group['descriptors'])
-                        score_new = 4*(n*min(m, 512)+n*min(trait_batch_size, len(group['descriptors']))
-                                       +m*min(trait_batch_size, len(group['descriptors']))) + 64*2**20
+                        resident_input = isinstance(host, torch.Tensor) and host.is_cuda
+                        score_traits = min(trait_batch_size, len(group['descriptors']))
+                        host_panel = min(m, 512)
+                        # Keep the host route's panel allowance independently of
+                        # where G currently lives: a rejected resident route must
+                        # still admit its bounded host score/variance work.
+                        host_score_new = 4*(n*host_panel+(m+host_panel)*score_traits)+64*2**20
+                        device_score_new = 8*m*score_traits+64*2**20
                         tail_new = _gene_tail_new_bytes(n, m, options) if has_gaussian else 0
                         host_peak = (max(_gene_host_covariance_new_bytes(n, m, q, options),
-                                         4*m*m+tail_new, score_new) if has_gaussian else score_new)
-                        with _gene_workspace_scope(repository, broker, host_peak) as workspace:
+                                         4*m*m+tail_new, host_score_new) if has_gaussian else host_score_new)
+                        device_peak = max(8*genotype_elements+32*m*m+256*2**20,
+                                          4*m*m+tail_new, device_score_new)
+                        # Existing device G is already counted by live admission.
+                        # Start with zero NEW bytes, then attempt the optional
+                        # resident workspace inside the host-fallback handler.
+                        # Host inputs retain their mandatory bounded workspace.
+                        initial_peak = 0 if resident_input else host_peak
+                        with _gene_workspace_scope(repository, broker, initial_peak) as workspace:
                             # Materialize only if the live device can admit original
                             # fitted ordinary covariance products plus this one G.
-                            if m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda':
+                            if resident_input or (m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda'):
                                 # Relatedness may vary between traits in one cohort;
                                 # two genotype copies cover the original block path.
-                                device_peak = max(8*host.size+32*m*m+256*2**20,
-                                                  4*m*m+tail_new, score_new)
                                 try:
-                                    workspace.set_required(4*host.size+device_peak, phase='gene_genotype_upload')
+                                    workspace.set_required(device_peak + (0 if isinstance(host, torch.Tensor) else 4*genotype_elements),
+                                                           phase='gene_genotype_upload')
                                 except MemoryError:
-                                    # Preserve the established bounded-host route
-                                    # when full G plus pinned state cannot fit.
-                                    pass
+                                    # A resident preparation must release its CUDA
+                                    # owner before genuinely selecting the host path.
+                                    # Admit NEW host storage before that transfer.
+                                    if isinstance(host, torch.Tensor):
+                                        _prepare_host_guard(prototype, SimpleNamespace(n=n), m)
+                                        host = host.detach().cpu().numpy()
+                                        prepared.pop('_genotype_device')
+                                        prepared['_genotype_host'] = host
+                                        genotype = host
+                                        if callable(set_future):
+                                            set_future(0, phase='gene_host_fallback_materialized')
+                                    workspace.set_required(host_peak, phase='gene_host_fallback')
                                 else:
                                     genotype = torch.as_tensor(host, device=broker.device)
                                     workspace.set_required(device_peak, phase='gene_genotype_resident')
@@ -1061,8 +1318,12 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                     for model, descriptor in zip(models, tile):
                                         _check_model(model, descriptor, metadata, verified)
                                     gaussian_indices = [i for i, model in enumerate(models) if model.family == 'gaussian']
-                                    scores = (_shared_gene_scores(genotype, [models[i] for i in gaussian_indices], broker)
-                                              if gaussian_indices else None)
+                                    from .scores import execution_metadata as score_metadata
+                                    before_simt = score_metadata()['fp32_simt_products']
+                                    with prototype.profiler.measure('gene_shared_score', gpu=True):
+                                        scores = (_shared_gene_scores(genotype, [models[i] for i in gaussian_indices], broker)
+                                                  if gaussian_indices else None)
+                                    shared_simt = score_metadata()['fp32_simt_products'] > before_simt
                                     gauss_columns = {i: j for j, i in enumerate(gaussian_indices)}
                                     for ti, (descriptor, model) in enumerate(zip(tile, models)):
                                         p = _thin_pipeline(axis, model, axis._axis.samples, options, configuration, structural)
@@ -1089,31 +1350,34 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                 raise RuntimeError('binary burden path must not construct a variant covariance')
                                             del diagnostic
                                         else:
-                                            cov_new = (4*host.size*(2 if model.spectrum.blocks else 1)
+                                            cov_new = (4*genotype_elements*(2 if model.spectrum.blocks else 1)
                                                        +32*m*m+256*2**20
                                                        if isinstance(genotype, torch.Tensor) and genotype.is_cuda
                                                        else _gene_host_covariance_new_bytes(n, m, model.x.shape[1], options))
                                             workspace.set_required(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
                                             if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
                                                 copies = 2 if model.spectrum.blocks else 1
-                                                broker._guard(4*host.size*copies + 32*host.shape[1]**2 + 256*2**20)
+                                                broker._guard(4*genotype_elements*copies + 32*m*m + 256*2**20)
                                                 covariance = _gaussian_covariance(model, genotype)
                                             else:
                                                 # Cached/tiled covariance is fitted-model specific;
                                                 # only G IO and phenotype-score GEMM are shared.
                                                 if p._supports_long_tf32_products(model):
-                                                    redundant_score, covariance = p._long_mask_products(model, host)
+                                                    redundant_score, covariance = p._long_mask_products(model, host, compute_score=False)
                                                     del redundant_score
                                                 else:
                                                     covariance = _blocked_gaussian_covariance(model, host, broker,
                                                         variant_tile_size=options.variant_tile_size or 512)
+                                            if callable(memory_sample):
+                                                memory_sample('gene_covariance_ready', genotype=genotype, covariance=covariance, score=scores)
                                             # Its input covariance is now allocated.
                                             # Reserve only NEW STAAR/tail bytes here.
                                             workspace.set_required(tail_new, phase='gene_tail')
                                             payload = {key: value for key, value in prepared.items() if not key.startswith('_')}
                                             payload.update(score=scores[:, gauss_columns[ti]], covariance=covariance,
                                                            cmac=prepared['cmac'])
-                                            value = p._evaluate_prepared(payload, model)
+                                            value = _evaluate_gaussian_gene_score(p, payload, model, genotype, broker,
+                                                shared_simt=shared_simt, report=report)
                                             del covariance, payload
                                         result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
                                         del p, model, value
@@ -1172,7 +1436,8 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
     admission and trait tiles; neither all-trait G nor M² covariances are stacked.
     None removes artificial GiB caps while retaining live-memory reservation.
     Binary formal probabilities use on-demand fitted FP64 SPA sidecars. Shared
-    TF32 score GEMM is a new arithmetic route, not claimed reference-equivalent.
+    IEEE FP32 CUDA Score tiles retain mature vector fallback for sensitive tails;
+    covariance/projection preserve the fitted native TF32 route.
     host_memory_lease_factory receives kind/chromosome_index/job_index and yields
     a guard(n,m,phase) or a lease exposing guard. Shared-host dispatchers supply
     a nonblocking lease, retry deferred jobs after this context releases state,
@@ -1212,6 +1477,30 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         if host_memory_lease_factory is not None and not callable(host_memory_lease_factory):
             raise TypeError('host_memory_lease_factory must be callable or None')
         configuration['_batched_emit'] = emit
+        configuration['_single_host_lease_factory'] = host_memory_lease_factory
+        profiler = StageProfiler(device, enabled=configuration.get('stage_profile', False))
+        configuration['_stage_profiler'] = profiler
+        from ..phewas_resources import ResourceTelemetry, tensor_storage_footprint
+        telemetry = ResourceTelemetry(configuration.get('memory_telemetry_seconds', 30.))
+        last_sample = [None]
+        memory_samples = []
+        def memory_sample(phase, **owners):
+            sample = telemetry.sample(device=device, limit_bytes=(None if memory_limit_gib is None else int(budget*2**30)),
+                                      reserve_bytes=memory_reserve_bytes, include_pss=True)
+            # Deep process mapping inspection is throttled independently of
+            # computational phases. Retain numerical summaries, never tensors.
+            token = sample['sampled_at']
+            if token == last_sample[0]:
+                return
+            last_sample[0] = token
+            sample.update(phase=phase, explicit_workspace_owners=tensor_storage_footprint(owners),
+                          fitted_state_owners=getattr(model_repository, 'resident_storage_summary', lambda: {})())
+            memory_samples.append(sample)
+            if len(memory_samples) > 120:
+                del memory_samples[0]
+            if emit:
+                emit(dict(event='resource_sample', memory=sample))
+        configuration['_memory_sample'] = memory_sample
         if configuration.get('matmul_mode', 'tf32') != 'tf32' or configuration.get('precision_control', False):
             raise ValueError('batched PheWAS uses native FP32 storage and TF32 products')
         raw_options = dict(configuration.get('analysis_options', {}))
@@ -1252,6 +1541,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             catalog = json.loads(Path(catalog).read_text())
         configuration['_resolved_annotation_catalog'] = catalog
         descriptors, groups = _descriptor_groups(model_repository)
+        _bind_trait_tiles(groups, configuration.get('_association_trait_tiles'), trait_batch_size)
         for descriptor in descriptors:
             if descriptor['family'] == 'binomial' and not callable(getattr(model_repository, 'acquire_spa', None)):
                 raise ValueError('formal binary analysis requires a fitted FP64 SPA repository')
@@ -1260,7 +1550,8 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         policy = getattr(model_repository, 'memory_policy', None)
         if callable(policy):
             repository_policy.enter_context(policy(device, limit_bytes=(None if memory_limit_gib is None else int(budget*2**30)),
-                                                  reserve_bytes=memory_reserve_bytes))
+                                                  reserve_bytes=memory_reserve_bytes,
+                                                  cache_live_fraction=configuration.get('model_cache_live_fraction', .5)))
         tf32_metadata(reset=True); single_metadata(reset=True); statistics_execution_metadata(reset=True)
         start = time.perf_counter()
         kinds = ('individual', 'coding', 'noncoding', 'ncrna')
@@ -1307,6 +1598,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                             structural.models = [SimpleNamespace(device=broker.device, use_spa=False)]
                             del models
                             for ji, job in enumerate(reference.get('jobs', [])):
+                                configuration['_chromosome_index'] = ci
                                 kind = job.get('kind')
                                 if kind not in kinds:
                                     raise ValueError('unknown association job kind')
@@ -1318,6 +1610,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                                 elif kind == 'noncoding' and chromosome_promoters is not None:
                                     arguments.setdefault('promoter_intervals', chromosome_promoters)
                                 before = time.perf_counter()
+                                memory_sample('job_started')
                                 if emit:
                                     emit(dict(event='started', chromosome_index=ci, job_index=ji, kind=kind))
                                 function = _batched_single if kind == 'individual' else _batched_gene
@@ -1360,6 +1653,8 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                                                       gpu_memory=_gpu_memory_diagnostics(device, model_repository, broker)))
                                             last_cohort_progress = now
                                 report['job_groups'] += 1
+                                profiler.flush()
+                                memory_sample('job_released')
                                 if emit:
                                     emit(dict(event='finished', chromosome_index=ci, job_index=ji, kind=kind,
                                               wall_seconds=time.perf_counter()-before,
@@ -1381,14 +1676,19 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             gpu_memory=_gpu_memory_diagnostics(device, model_repository),
             cpu_thread_control=dict(requested=cpu_threads, effective=torch.get_num_threads(), previous=previous_threads,
                                     restored=True, scope='pytorch_intraop'),
-            output=writer.finish())
+            output=writer.finish(), stage_profile=profiler.report(), resource_samples=memory_samples,
+            resource_samples_scope='bounded 120 throttled owned-process endpoints; not additive with allocator or cgroup usage')
         if callable(getattr(model_repository, 'summary', None)):
             report['model_repository'] = model_repository.summary()
         return report
-    except BaseException:
+    except BaseException as error:
         abort = getattr(writer, 'abort', None)
         if callable(abort):
-            abort()
+            try:
+                abort()
+            except BaseException as cleanup_error:
+                if hasattr(error, 'add_note'):
+                    error.add_note('CSV abort also failed: '+type(cleanup_error).__name__)
         raise
     finally:
         try:

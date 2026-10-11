@@ -132,7 +132,7 @@ def test_cached_wrapper_uses_mature_backend_and_keeps_original_model(monkeypatch
                                             memory_limit_gib=20, profile=True)
     assert actual is expected and calls[0][0] is model and calls[0][1] is genotype
     assert calls[0][2] == dict(variant_tile_size=512, panel_variant_size=1024, memory_limit_gib=20,
-                             matmul_mode='tf32', symmetry='average', profile=True)
+                             matmul_mode='tf32', symmetry='average', profile=True, compute_score=True)
 
 
 def test_cached_backend_rejects_cpu_and_untyped_binary_protocol():

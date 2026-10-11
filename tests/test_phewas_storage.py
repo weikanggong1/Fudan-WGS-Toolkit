@@ -112,7 +112,9 @@ def test_model_axes_are_immutable_and_descriptor_groups_alias_authenticated_rows
     descriptors, groups = _descriptor_groups(repository)
     assert len(groups) == 1 and groups[0]['rows'] is rows
     assert all(descriptor['ordered_rows'] is rows for descriptor in descriptors)
-    assert repository.summary()['sample_axis_ram_bytes'] == rows.nbytes
+    assert repository.summary()['sample_axis_ram_bytes'] == 0
+    assert repository.summary()['sample_axis_mapped_logical_bytes'] == rows.nbytes
+    assert repository.summary()['sample_axis_open_mmaps'] == 1
 
 
 def test_design_dedup_survives_one_bank_eviction_and_releases_last_owner(tmp_path):
@@ -299,7 +301,7 @@ axes=bank.descriptors()
 assert len(axes)==1342 and all(axis['ordered_rows'].tolist()==[0,2,7] for axis in axes)
 assert all(axis['ordered_rows'] is axes[0]['ordered_rows'] for axis in axes)
 assert not axes[0]['ordered_rows'].flags.writeable
-assert bank.summary()['unique_sample_axes']==1 and bank.summary()['sample_axis_open_mmaps']==0
+assert bank.summary()['unique_sample_axes']==1 and bank.summary()['sample_axis_open_mmaps']==1
 assert len(list(Path('/proc/self/fd').iterdir()))<=before+2
 '''
     result = subprocess.run([sys.executable, '-c', code, str(directory)],

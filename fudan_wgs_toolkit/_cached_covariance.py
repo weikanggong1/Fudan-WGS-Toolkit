@@ -240,7 +240,8 @@ class _Timers:
 
 def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
                             panel_variant_size=None, memory_limit_gib=40,
-                            symmetry="average", matmul_mode="tf32", profile=False):
+                            symmetry="average", matmul_mode="tf32", profile=False,
+                            compute_score=True):
     """Return ``(score, covariance, report)`` without changing a fitted model.
 
     ``genotype`` is the finite, already oriented/imputed host N-by-M FP32
@@ -260,6 +261,9 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
     pure-kernel time. H2D counts include genotype panels; D2H counts include
     one Boolean finite flag per newly encountered panel. Covariance has no
     host transfer. Each panel is checked before its score/projection products.
+    ``compute_score=False`` returns None for score and omits its allocation
+    and products when a caller already owns the shared phenotype scores. It
+    keeps preparation layouts and every covariance product unchanged.
     """
     started = time.perf_counter()
     _positive_integer(variant_tile_size, "variant_tile_size")
@@ -275,6 +279,8 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
         raise ValueError("cached covariance only admits symmetry=average")
     if type(profile) is not bool:
         raise ValueError("profile must be Boolean")
+    if type(compute_score) is not bool:
+        raise ValueError("compute_score must be Boolean")
     if matmul_mode != "tf32" or getattr(model, "matmul_mode", "tf32") != "tf32":
         raise ValueError("cached covariance requires a native TF32 model")
     # Binary fitted state has no kinship eigenspectrum. Admit only its explicit
@@ -335,6 +341,7 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
     effective_tile = plan["effective_variant_tile_size"]
     timers = _Timers(device, profile)
     report = dict(backend="cached_native_tf32", cache_version=1,
+                  compute_score=compute_score, score_retained=compute_score,
                   samples=n, variants=m, covariates=q, symmetry=symmetry,
                   variant_tile_size=effective_tile,
                   requested_variant_tile_size=variant_tile_size,
@@ -365,7 +372,7 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
                   matmul_module=module.__name__, max_observed_allocated_bytes=allocated_before,
                   timing_contract="host wall and CUDA stream elapsed overlap; events are not pure-kernel timings")
     if not m:
-        score = torch.empty((0,), dtype=torch.float32, device=device)
+        score = torch.empty((0,), dtype=torch.float32, device=device) if compute_score else None
         covariance = torch.empty((0, 0), dtype=torch.float32, device=device)
         report.update(cache_mode="empty", panel_variant_size=0,
                       conservative_new_workspace_bytes=0, stages=timers.finish(),
@@ -391,7 +398,8 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
     def allocate(factory):
         return _allocate_with_pressure_reclaim(factory, device, record_pressure_cleanup)
 
-    score = allocate(lambda: torch.empty((m,), dtype=torch.float32, device=device))
+    score = (allocate(lambda: torch.empty((m,), dtype=torch.float32, device=device))
+             if compute_score else None)
     cross = allocate(lambda: torch.empty((q, m), dtype=torch.float32, device=device))
     projected_left = allocate(lambda: torch.empty((m, q), dtype=torch.float32, device=device))
     covariance = allocate(lambda: torch.empty((m, m), dtype=torch.float32, device=device))
@@ -438,9 +446,10 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
                     score_tile = raw.contiguous()
                 report["score_layout_copy_calls"] += 1
                 report["score_layout_copy_bytes"] += 4 * n * (end - column)
-            with timers.measure("score_prepare"):
-                score[column:end] = mm(score_tile.T, residual, mode="tf32")
-            report["score_product_calls"] += 1
+            if compute_score:
+                with timers.measure("score_prepare"):
+                    score[column:end] = mm(score_tile.T, residual, mode="tf32")
+                report["score_product_calls"] += 1
             with timers.measure("projection_prepare"):
                 # A one-column tail uses CUDA FP32 GEMV. Preserve the same
                 # compact host-C layout as legacy preparation for that route,

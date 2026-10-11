@@ -197,7 +197,7 @@ def _metadata(profiles, names, covariate_names, dictionary=None, *,
 
 
 def _parse(path, cache_ids, target, *, families=None, infer_families=False,
-           chunk_rows=8192, emit=None, phase=None):
+           chunk_rows=8192, emit=None, phase=None, rm_nan=False):
     import pandas as pd  # Existing project dependency; only needed for preparation.
     header = _header(path)
     identity_width = _identity_width(header)
@@ -230,7 +230,7 @@ def _parse(path, cache_ids, target, *, families=None, infer_families=False,
                 finite = np.isfinite(numeric)
                 any_nonmissing |= finite.any(axis=0)
                 binary_compatible &= ~(finite & (numeric != 0) & (numeric != 1)).any(axis=0)
-            if binary_indices:
+            if binary_indices and not rm_nan:
                 binary = numeric[:, binary_indices]
                 if np.any(np.isfinite(binary) & (binary != 0) & (binary != 1)):
                     raise ValueError("Binary phenotype values must be zero, one or missing")
@@ -260,22 +260,94 @@ def _release(array):
         mapping.close()
 
 
+def _missing_policy(rm_nan):
+    return {"schema_version": 1,
+            "sample_selection": "phenotype_present_and_selected_covariates_valid" if rm_nan
+                                else "finite_phenotype_and_selected_covariates_valid",
+            "gaussian": "eligible_finite_mean_fill_nan" if rm_nan else "finite_available_samples",
+            "binomial": "one_is_case_all_other_finite_or_nan_are_controls" if rm_nan
+                        else "finite_exact_zero_or_one",
+            "covariates": "selected_columns_complete_no_imputation",
+            "infinite_values": "rejected"}
+
+
+def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_valid):
+    """Select one trait's rows and apply its explicit missing-value policy.
+
+    ``covariate_valid`` identifies the eligible analysis population, including
+    any caller-selected cohort and source-row alignment. Returned ``values``
+    is a new float64 vector in the order of ``sample_indices``. Inputs are never
+    changed. The Gaussian mean uses finite phenotypes in that eligible
+    population, so filling cannot borrow a different cohort's phenotype mean.
+    ``available_n`` always counts eligible finite phenotypes before filling.
+    Infinite values are invalid data under both policies, rather than NaNs.
+    """
+    if type(rm_nan) is not bool:
+        raise ValueError("rm_nan must be a boolean")
+    if family == "binary":
+        family = "binomial"
+    if family not in ("gaussian", "binomial"):
+        raise ValueError("phenotype family must be gaussian or binomial")
+    values = np.asarray(values, dtype=np.float64)
+    eligible = np.asarray(covariate_valid)
+    if values.ndim != 1 or eligible.shape != values.shape or eligible.dtype != np.bool_:
+        raise ValueError("phenotype values and boolean eligible-sample mask must be aligned one-dimensional arrays")
+    if np.any(np.isinf(values)):
+        raise ValueError("Infinite phenotype values are invalid under both missing-value policies")
+    finite = np.isfinite(values)
+    available = eligible & finite
+    available_n, mother_n = int(available.sum()), int(eligible.sum())
+    if family == "binomial" and not rm_nan and np.any(finite & (values != 0) & (values != 1)):
+        raise ValueError("Binary phenotype values must be zero, one or missing when rm_nan=False")
+    selected = eligible if rm_nan else available
+    indices = np.flatnonzero(selected)
+    mean = None
+    if rm_nan and family == "gaussian" and mother_n:
+        if not available_n:
+            raise ValueError("Gaussian missing phenotypes cannot be filled without a finite eligible phenotype mean")
+        try:
+            with np.errstate(over="raise", invalid="raise"):
+                mean = float(np.mean(values[available], dtype=np.float64))
+        except FloatingPointError as error:
+            raise ValueError("The eligible Gaussian phenotype mean is not finite") from error
+        if not np.isfinite(mean):
+            raise ValueError("The eligible Gaussian phenotype mean is not finite")
+    result = np.array(values[indices], dtype=np.float64, copy=True)
+    missing = np.isnan(result)
+    if rm_nan:
+        if family == "binomial":
+            result = (result == 1).astype(np.float64)
+        elif mean is not None:
+            result[missing] = mean
+    return {"values": result, "sample_indices": indices, "available_n": available_n,
+            "mother_n": mother_n, "imputed_n": int(missing.sum()) if rm_nan else 0,
+            "recoded_nonbinary_n": int((finite & eligible & (values != 0) & (values != 1)).sum())
+                                   if rm_nan and family == "binomial" else 0,
+            "imputation_mean": mean, "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan)}
+
+
 def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profiles=None,
                          phenotype_dictionary=None, phenotype_manifest=None,
                          covariate_manifest=None, chunk_rows=8192, emit=None,
-                         phenotype_families="auto", phenotype_covariates=None):
+                         phenotype_families="auto", phenotype_covariates=None, rm_nan=True):
     """Create immutable raw float64 arrays in cache sample order.
 
     ``output`` must not exist.  No intercept, RINT, residualization, ancestry
     filter, null model or association result is computed.  Full-file hashes
     bracket one numeric CSV parse per input; input/stat/source hashes are
-    recorded privately.  ``trait`` applies each profile's missingness later.
+    recorded privately. ``trait`` applies each profile's missingness later:
+    ``rm_nan=True`` fills Gaussian NaNs with the eligible finite mean and
+    binomial values other than one, including NaNs, with zero. ``False`` uses
+    finite available samples. Covariates are never filled; each trait only
+    checks its selected columns. Raw phenotype arrays remain unmodified.
     With ``profiles=None``, all covariate columns are used for every trait and
     family is inferred from all rows in the single phenotype CSV parse: a
     nonempty column containing only exact 0/1 is binomial, all other columns
     (including entirely missing columns) are Gaussian. This generic profile
     does not reproduce a paper-specific covariate protocol.
     """
+    if type(rm_nan) is not bool:
+        raise ValueError("rm_nan must be a boolean")
     if not isinstance(chunk_rows, int) or chunk_rows <= 0:
         raise ValueError("chunk_rows must be a positive integer")
     started = time.perf_counter()
@@ -319,7 +391,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         infer_families = any(trait["family"] is None for trait in traits)
         p_parse, p_present = _parse(phenotypes, axis, y, families=[r["family"] for r in traits],
                                    infer_families=infer_families,
-                                   chunk_rows=chunk_rows, emit=emit, phase="phenotypes")
+                                   chunk_rows=chunk_rows, emit=emit, phase="phenotypes", rm_nan=rm_nan)
         if infer_families:
             for trait, family in zip(traits, p_parse.pop("inferred_families")):
                 if trait["family"] is None:
@@ -337,16 +409,24 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         for trait in traits:
             values = y[:, trait["index"]]
             finite = np.isfinite(values)
-            selected = finite & complete[trait["profile_index"]]
+            eligible = complete[trait["profile_index"]]
+            if rm_nan:
+                eligible = eligible & p_present
+            policy = apply_phenotype_missing_policy(values, family=trait["family"],
+                rm_nan=rm_nan, covariate_valid=eligible)
+            analyzed = policy["values"]
             quality = {"index": trait["index"], "family": trait["family"],
                        "phenotype_nonmissing": int(finite.sum()),
                        "phenotype_missing": int((~finite).sum()),
                        "profile_complete_samples": int(complete[trait["profile_index"]].sum()),
-                       "analysis_complete_samples": int(selected.sum()),
+                       "analysis_complete_samples": len(analyzed),
+                       "available_n": policy["available_n"], "mother_n": policy["mother_n"],
+                       "imputed_n": policy["imputed_n"], "imputation_mean": policy["imputation_mean"],
+                       "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
                        "minimum": float(values[finite].min()) if finite.any() else None,
                        "maximum": float(values[finite].max()) if finite.any() else None,
-                       "analysis_cases": int((values[selected] == 1).sum()) if trait["family"] == "binomial" else None,
-                       "analysis_controls": int((values[selected] == 0).sum()) if trait["family"] == "binomial" else None}
+                       "analysis_cases": int((analyzed == 1).sum()) if trait["family"] == "binomial" else None,
+                       "analysis_controls": int((analyzed == 0).sum()) if trait["family"] == "binomial" else None}
             trait_counts.append(quality)
         np.save(output / "sample_ids.npy", axis, allow_pickle=False)
         np.save(output / "profile_complete.npy", complete, allow_pickle=False)
@@ -357,6 +437,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         for binding in sources.values():
             _unchanged(binding)
         metadata = {"traits": traits, "covariate_names": covariate_names,
+                    "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
                     "profile_covariate_indices": profile_indices,
                     "phenotype_dictionary": dictionary, "quality": trait_counts,
                     "profile_scope": ("explicit_profiles" if profiles is not None else
@@ -379,8 +460,12 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                 "min_analysis_complete_samples": min(q["analysis_complete_samples"] for q in rows),
                 "max_analysis_complete_samples": max(q["analysis_complete_samples"] for q in rows),
                 "sum_analysis_complete_samples": sum(q["analysis_complete_samples"] for q in rows),
+                "min_available_samples": min(q["available_n"] for q in rows),
+                "max_available_samples": max(q["available_n"] for q in rows),
+                "sum_imputed_samples": sum(q["imputed_n"] for q in rows),
                 "empty_traits": sum(q["analysis_complete_samples"] == 0 for q in rows)}
         anonymous = {"status": "complete", "cache_sample_count": len(axis), "phenotype_count": len(traits),
+                     "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
                      "covariate_count": len(covariate_names), "unique_covariate_profiles": len(profile_indices),
                      "families": family_counts, "phenotype_parse": p_parse, "covariate_parse": c_parse,
                      "cache_axis_preserved": True, "ancestry_selection_applied": False,
@@ -394,12 +479,14 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                      "elapsed_seconds": time.perf_counter() - started,
                      "array_bytes": sum(v["bytes"] for k, v in artifacts.items() if k.endswith(".npy"))}
         manifest = {"schema": 1, "status": "complete", "sample_count": len(axis), "trait_count": len(traits),
+                    "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
                     "covariate_count": len(covariate_names), "profile_count": len(profile_indices),
                     "array_dtype": "float64", "array_order": "C", "sample_order": "input_cache_axis",
                     "cohort_scope": "all_supplied_cache_samples; analysis cohort not locked",
                     "sources": sources, "artifacts": artifacts, "anonymous_summary": anonymous}
         if profiles is None:
             manifest["trait_options"] = {
+                "rm_nan": rm_nan,
                 "phenotype_families": dict(phenotype_families) if isinstance(phenotype_families, Mapping) else "auto",
                 "phenotype_covariates": {name: list(columns) for name, columns in (phenotype_covariates or {}).items()}}
         _json(output / "manifest.private.json", manifest)
@@ -439,19 +526,34 @@ class PhewasInputs:
             if verify_arrays and sha256(path) != binding["sha256"]:
                 raise ValueError("Prepared input artifact SHA is invalid")
         self.metadata = json.loads((self.directory / "traits.private.json").read_text())
+        # Pre-policy manifests retain their original available-sample behavior.
+        # A default at the public API must never reinterpret an old fitted input.
+        self.rm_nan = self.manifest.get("rm_nan", False)
+        if (type(self.rm_nan) is not bool
+                or self.metadata.get("rm_nan", False) != self.rm_nan
+                or ("trait_options" in self.manifest and
+                    self.manifest["trait_options"].get("rm_nan", False) != self.rm_nan)
+                or ((self.rm_nan or "missing_policy" in self.manifest or "missing_policy" in self.metadata)
+                    and (self.manifest.get("missing_policy") != _missing_policy(self.rm_nan)
+                         or self.metadata.get("missing_policy") != _missing_policy(self.rm_nan)))):
+            raise ValueError("Prepared phenotype missing-value policy binding is invalid")
         self.sample_ids = np.load(self.directory / "sample_ids.npy", mmap_mode="r", allow_pickle=False)
         self.phenotypes = np.load(self.directory / "phenotypes.npy", mmap_mode="r", allow_pickle=False)
         self.covariates = np.load(self.directory / "covariates.npy", mmap_mode="r", allow_pickle=False)
         self.profile_complete = np.load(self.directory / "profile_complete.npy", mmap_mode="r", allow_pickle=False)
+        self.phenotype_source_present = (np.load(self.directory / "phenotype_source_present.npy",
+            mmap_mode="r", allow_pickle=False) if self.rm_nan else None)
         n, t, c, p = (self.manifest[key] for key in ("sample_count", "trait_count", "covariate_count", "profile_count"))
         if (self.phenotypes.shape != (n, t) or self.covariates.shape != (n, c)
                 or self.profile_complete.shape != (p, n) or self.sample_ids.shape != (n,)
                 or self.phenotypes.dtype != np.float64 or self.covariates.dtype != np.float64
-                or self.profile_complete.dtype != np.bool_ or len(self.metadata["traits"]) != t):
+                or self.profile_complete.dtype != np.bool_ or len(self.metadata["traits"]) != t
+                or (self.rm_nan and (self.phenotype_source_present.shape != (n,)
+                                     or self.phenotype_source_present.dtype != np.bool_))):
             raise ValueError("Prepared input array schema is invalid")
 
     def trait(self, index, *, cohort_indices=None):
-        """Return phenotype-wise complete rows and raw covariates, no intercept.
+        """Return phenotype-wise rows under the bound policy, no intercept.
 
         ``cohort_indices`` may be a unique vector of cache row indices or a
         cache-length boolean mask.  Returned rows retain original cache order.
@@ -461,7 +563,11 @@ class PhewasInputs:
             raise IndexError("Phenotype index is outside the prepared matrix")
         trait = self.metadata["traits"][index]
         values = self.phenotypes[:, index]
-        keep = np.isfinite(values) & self.profile_complete[trait["profile_index"]]
+        keep = np.array(self.profile_complete[trait["profile_index"]], dtype=bool, copy=True)
+        if self.rm_nan:
+            # Missing trait values in an existing CSV row may be filled. A
+            # participant absent from the phenotype CSV is not a new control.
+            keep &= self.phenotype_source_present
         if cohort_indices is not None:
             selected = np.asarray(cohort_indices)
             if selected.dtype == np.bool_:
@@ -472,18 +578,25 @@ class PhewasInputs:
                 if selected.ndim != 1 or selected.dtype.kind not in "iu" or np.any(selected < 0) or np.any(selected >= len(keep)) or len(np.unique(selected)) != len(selected):
                     raise ValueError("Cohort indices must be unique cache-axis row indices")
                 mask = np.zeros(len(keep), dtype=bool); mask[selected] = True; keep &= mask
-        indices = np.flatnonzero(keep)
+        policy = apply_phenotype_missing_policy(values, family=trait["family"],
+            rm_nan=self.rm_nan, covariate_valid=keep)
+        indices = policy["sample_indices"]
         covariate_indices = trait["covariate_indices"]
         return {"index": index, "name": trait["name"], "family": trait["family"],
                 "profile": trait["profile"], "sample_indices": indices,
                 "sample_ids": np.asarray(self.sample_ids[indices]),
-                "y_raw": np.asarray(values[indices], dtype=np.float64),
+                "y_raw": policy["values"],
                 "covariates": np.asarray(self.covariates[np.ix_(indices, covariate_indices)], dtype=np.float64),
                 "covariate_names": [self.metadata["covariate_names"][i] for i in covariate_indices],
-                "intercept_added": False}
+                "intercept_added": False, "rm_nan": self.rm_nan,
+                "missing_policy": policy["missing_policy"],
+                "available_n": policy["available_n"], "mother_n": policy["mother_n"],
+                "imputed_n": policy["imputed_n"], "imputation_mean": policy["imputation_mean"],
+                "recoded_nonbinary_n": policy["recoded_nonbinary_n"]}
 
     def close(self):
-        for value in (self.sample_ids, self.phenotypes, self.covariates, self.profile_complete):
+        for value in (self.sample_ids, self.phenotypes, self.covariates, self.profile_complete,
+                      self.phenotype_source_present):
             mapping = getattr(value, "_mmap", None)
             if mapping is not None:
                 mapping.close()

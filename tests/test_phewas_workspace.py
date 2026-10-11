@@ -195,11 +195,16 @@ def test_dynamic_reservation_evicts_only_device_owned_unpinned_models_and_source
         assert (1, 'cuda:0') in repository.models
         assert (3, 'cuda:0') in repository.spa_sources
         assert repository.summary()['workspace_evictions'] == 1
+        # Retiring the cold owner suffices for this successful admission.
+        assert state['emptied'] == 0
         with pytest.raises(MemoryError, match='pinned states are retained'):
             with repository.reserve_workspace('cuda:0', 60, reserve_bytes=0):
                 pass
+        # A genuinely rejected nested request may reclaim unused allocator
+        # blocks once before proving that retained pins still prevent admission.
+        assert state['emptied'] == 1
         assert repository.summary()['active_workspace_reservations'] == 1
-    assert state['emptied'] and repository.summary()['active_workspace_reservations'] == 0
+    assert state['emptied'] == 1 and repository.summary()['active_workspace_reservations'] == 0
 
 
 def test_reservations_restore_after_exception_and_phase_failure(monkeypatch):
@@ -347,7 +352,7 @@ def test_gene_runtime_uses_covariance_then_incremental_tail_and_cleans_workspace
     _, groups = runtime._descriptor_groups(repository)
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_select_mask_chunks', lambda self, *args: {'ncRNA': np.arange(m)})
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_long_mask_products',
-                        lambda self, model, host: model.score_covariance(torch.from_numpy(host)))
+                        lambda self, model, host, **kwargs: model.score_covariance(torch.from_numpy(host)))
     monkeypatch.setattr(runtime.LimitedMaskPipeline, '_evaluate_prepared',
                         lambda self, payload, model: dict(num_variant=len(payload['maf']),
                                                          cMAC=payload['cmac'], **{'STAAR-O': .25}))

@@ -83,6 +83,7 @@ def injected_execution(monkeypatch):
 
 
 def call(root, phenotype, covariate, output, **kwargs):
+    kwargs.setdefault('rm_nan', False)
     return run_WGS_all(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
         phenotype_covariates={'continuous': ['age'], 'binary': []}, **kwargs)
@@ -227,17 +228,21 @@ def test_portable_grm_exact_family_identity_and_reordered_submatrix(tmp_path):
         loaded.subset(np.asarray([keys[0], keys[0]]))
 
 
-def test_corrupt_finished_csv_is_preserved_and_only_that_block_recomputed(tmp_path, monkeypatch):
+def test_corrupt_committed_trait_csv_blocks_resume_without_overwriting_evidence(tmp_path, monkeypatch):
+    from fudan_wgs_toolkit.phewas_trait_csv import CommittedCSVCorruption
     root, phenotype, covariate, _ = fixture(tmp_path)
     calls = injected_execution(monkeypatch)
     output = tmp_path/'results'
     report = call(root, phenotype, covariate, output)
     filename = output/'csv'/report['workers'][0]['output']['receipts'][0]['csv_file']
     filename.write_bytes(b'corrupt gzip')
-    resumed = call(root, phenotype, covariate, output, resume=True)
-    assert resumed['completed'] and len(calls['fits']) == 2 and len(calls['computed']) == 4
-    assert resumed['workers'][0]['output']['reused_blocks'] == 2
-    assert list((output/'csv/.checkpoints/invalid').rglob('*.csv.gz'))
+    with pytest.raises(CommittedCSVCorruption, match='truncated'):
+        call(root, phenotype, covariate, output, resume=True)
+    assert filename.read_bytes() == b'corrupt gzip'
+    assert len(calls['fits']) == 2 and calls['computed'] == [0, 1, 2]
+    assert not (output/'report.private.json').exists()
+    assert json.loads((output/'status.private.json').read_text())['status'] == 'failed'
+    assert json.loads(next(output.glob('report.previous.*.private.json')).read_text()) == report
 
 
 def test_corrupt_model_array_cannot_resume_or_refit_silently(tmp_path, monkeypatch):
@@ -329,7 +334,7 @@ def test_default_covariates_reduce_constant_and_collinear_columns_per_trait(tmp_
     output = tmp_path/'results'
     first = run_WGS_all(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
-        phenotype_covariates={'binary': []})
+        phenotype_covariates={'binary': []}, rm_nan=False)
     assert first['completed'] and len(calls['fits']) == 2
     meta = json.loads((output/'models/trait_0000/model.private.json').read_text())
     assert meta['fit']['covariate_names'] == ['Intercept', 'age']
@@ -337,7 +342,7 @@ def test_default_covariates_reduce_constant_and_collinear_columns_per_trait(tmp_
     assert meta['fit']['prepared_association_binding']['covariate_design'] == design
     resumed = run_WGS_all(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
-        phenotype_covariates={'binary': []}, resume=True)
+        phenotype_covariates={'binary': []}, rm_nan=False, resume=True)
     assert resumed['completed'] and len(calls['fits']) == 2
 
 
@@ -396,3 +401,59 @@ def test_inline_cpu_policy_restores_existing_and_new_helper_threads(monkeypatch,
     assert torch_threads[0] == 24
     assert affinities[0] == caller_main and affinities[100] == caller_main
     assert affinities[101] == {10, 11} and affinities[102] == caller_main
+
+
+def test_modern_host_budget_uses_shared_gate_and_can_change_on_resume(tmp_path,monkeypatch):
+    from fudan_wgs_toolkit import phewas_resources
+    root,phenotype,covariate,_=fixture(tmp_path)
+    calls=injected_execution(monkeypatch)
+    policies=[]
+    class Gate:
+        def __init__(self,directory,**policy):policies.append((Path(directory),policy))
+        def lease_factory(self,*args):pass
+    monkeypatch.setattr(phewas_resources,'HostMemoryGate',Gate)
+    output=tmp_path/'results'
+    assert call(root,phenotype,covariate,output,host_memory_limit_gib=12)['completed']
+    first=json.loads((output/'plan.private.json').read_text())
+    assert first['host_memory_limit_gib']==12
+    assert call(root,phenotype,covariate,output,host_memory_limit_gib=8,resume=True)['completed']
+    second=json.loads((output/'plan.private.json').read_text())
+    assert second['scientific_binding_sha256']==first['scientific_binding_sha256']
+    assert second['host_memory_limit_gib']==8
+    assert policies==[(output,dict(host_limit_gib=12,reserve_gib=None)),
+                      (output,dict(host_limit_gib=8,reserve_gib=None))]
+    assert all(kwargs['resources']['host_memory_lease_factory'] is not None for kwargs in calls['runner'])
+    assert len(calls['fits'])==2
+
+
+@pytest.mark.parametrize('failed',[False,True])
+def test_modern_worker_closes_model_mappings_and_preserves_original_failure(tmp_path,monkeypatch,failed):
+    from fudan_wgs_toolkit.phewas_trait_csv import PerTraitCheckpointCSVWriter
+    from fudan_wgs_toolkit.phewas_runtime import runtime
+    root,phenotype,covariate,_=fixture(tmp_path)
+    injected_execution(monkeypatch)
+    bank_type=prepared.ModelRepository
+    actions=[]
+    class Repository(bank_type):
+        def close(self):
+            super().close()
+            actions.append('close')
+            if failed:raise MemoryError('secondary close failure')
+    monkeypatch.setattr(prepared,'ModelRepository',Repository)
+    original_abort=PerTraitCheckpointCSVWriter.abort
+    def abort(writer):
+        actions.append('abort')
+        original_abort(writer)
+        if failed:raise MemoryError('secondary abort failure')
+    monkeypatch.setattr(PerTraitCheckpointCSVWriter,'abort',abort)
+    if failed:
+        def association(*args,**kwargs):raise ArithmeticError('primary association failure')
+        monkeypatch.setattr(runtime,'run_batched_configuration',association)
+        with pytest.raises(ArithmeticError,match='primary association'):
+            call(root,phenotype,covariate,tmp_path/'results')
+        assert actions==['abort','close']
+        receipts=list((tmp_path/'results').glob('worker_*.exit.anonymous.json'))
+        assert receipts and json.loads(receipts[0].read_text())['exit_code']==1
+    else:
+        assert call(root,phenotype,covariate,tmp_path/'results')['completed']
+        assert actions==['close']

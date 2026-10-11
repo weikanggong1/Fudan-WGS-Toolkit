@@ -131,16 +131,18 @@ def test_public_run_shares_schedule_and_retains_independent_samples(tmp_path, mo
                 counts[job["kind"]] += existing["rows"]
                 if job["kind"] == "individual":
                     assert job["arguments"]["variant_type"] == "variant"
-        return dict(association_rows=counts, output=writer.finish())
+        return dict(association_rows=counts, output=writer.finish(),
+            job_groups=sum(len(chromosome['jobs']) for chromosome in configuration['chromosomes']),
+            trait_rows={str(index):{kind: count//2 for kind,count in counts.items()} for index in (0,1)})
     monkeypatch.setattr(runtime, "run_batched_configuration", shared)
     PositionMetadata.opens = 0
     output = tmp_path / "results"
     report = run_WGS_all(phenotype, covariate, root, output_directory=output,
-        single_region_size=10, grm="none")
+        single_region_size=10, grm="none", rm_nan=False)
     assert report["completed"] and len(seen) == 1 and PositionMetadata.opens == 1
     assert report["eligible_association_tests"] == 10 and len(fits) == 2
     reused = run_WGS_all(phenotype, covariate, root, output_directory=output,
-        single_region_size=10, grm="none", resume=True)
+        single_region_size=10, grm="none", rm_nan=False, resume=True)
     assert reused["association_rows"] == report["association_rows"]
     assert len(seen) == 2 and len(fits) == 2
     assert reused["workers"][0]["output"]["reused_blocks"] == 5

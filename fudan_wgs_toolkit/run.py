@@ -77,7 +77,7 @@ def _normalise_devices(device, gpu_ids=None):
     return tuple(indices)
 
 
-def _family_selection(value, names, values):
+def _family_selection(value, names, values, *, rm_nan=False):
     from collections.abc import Mapping
     if value is None or value == "auto":
         overrides = {}
@@ -95,7 +95,7 @@ def _family_selection(value, names, values):
             family = "binomial" if finite.size and np.all((finite == 0) | (finite == 1)) else "gaussian"
         if family == "binary":
             family = "binomial"
-        if family == "binomial" and np.any((finite != 0) & (finite != 1)):
+        if family == "binomial" and not rm_nan and np.any((finite != 0) & (finite != 1)):
             raise ValueError("binary phenotype values must be zero, one or missing")
         result[name] = family
     return result
@@ -186,8 +186,12 @@ def read_csv_inputs(phenotype_csv, covariate_csv):
 
 
 def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_names=None,
-                      reduce_redundant=False):
-    """Select this phenotype's complete cases in prepared sample-axis order."""
+                      reduce_redundant=False, rm_nan=False, family="gaussian"):
+    """Align this trait and apply its explicit missing policy in cache order.
+
+    This lower-level alignment helper keeps the historical available-case
+    default. Public association entry points pass their rm_nan=True default.
+    """
     if trait not in phenotypes.names:
         raise ValueError("unknown phenotype column")
     if covariate_names is not None:
@@ -211,8 +215,13 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
     cov_rows = np.asarray([item[2] for item in matched], dtype=np.int64)
     y = phenotypes.values[pheno_rows, phenotypes.names.index(trait)]
     x = covariates.values[cov_rows] if uses_covariates else np.empty((len(y), 0), dtype=np.float64)
-    keep = np.isfinite(y) & np.isfinite(x).all(axis=1)
-    identifiers, y, x = keys[cache_rows][keep], y[keep], x[keep]
+    from .phewas_inputs import apply_phenotype_missing_policy
+    policy = apply_phenotype_missing_policy(y, family=family, rm_nan=rm_nan,
+        covariate_valid=np.isfinite(x).all(axis=1))
+    selected = policy['sample_indices']
+    keep = np.zeros(len(y), dtype=bool)
+    keep[selected] = True
+    identifiers, y, x = keys[cache_rows][selected], policy['values'], x[selected]
     has_intercept = bool(x.shape[1] and np.any(np.all(x == 1, axis=0)))
     names = covariates.names
     design = None
@@ -235,7 +244,10 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
         excluded_missing_rows=int((~keep).sum()), analysis_samples=len(y),
         phenotype_rows_absent_from_prepared=sum(key not in cache_set for key in pheno_lookup),
         phenotype_rows_absent_from_covariates=sum(key not in cov_lookup for key in pheno_lookup),
-        intercept_added=not has_intercept, design_columns=x.shape[1])
+        intercept_added=not has_intercept, design_columns=x.shape[1],
+        rm_nan=rm_nan, missing_policy=policy['missing_policy'],
+        available_n=policy['available_n'], mother_n=policy['mother_n'],
+        imputed_n=policy['imputed_n'], imputation_mean=policy['imputation_mean'])
     if design is not None:
         counts['covariate_design'] = design
     return identifiers, y, x, names, counts
@@ -425,8 +437,8 @@ def _jobs(entry, analyses, output, *, single_mac_cutoff, single_group_variants, 
 
 def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
                 chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
-                memory_limit_gib=None, memory_reserve_gib=1.0,
-                phenotype_families="auto", phenotype_covariates=None,
+                memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
+                phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
                 transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
                 covariance_block_size=4096, long_mask_threshold=5000, long_mask_rank=512, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
@@ -439,21 +451,34 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
     chromosomes='all' consumes all declared autosomes; a list selects a subset.
     device=['cuda:0'] selects one GPU, while integer n selects the first n GPUs.
     None uses physical GPU capacity with memory_reserve_gib kept for workspace.
+    host_memory_limit_gib bounds the whole node task, shared across GPU workers;
+    None detects all finite cgroup ancestor limits and physical capacity.
     Exact finite 0/1 columns are binomial in auto mode; other columns Gaussian.
-    Unlisted traits use all supplied covariates and their own complete cases.
+    rm_nan=True fills Gaussian missing phenotypes with their eligible mean and
+    maps binomial values other than one, including missing, to zero. False
+    selects complete cases. Selected covariates are never imputed. Unlisted
+    traits use all supplied covariates; changing rm_nan requires new null fits.
     grm='sparse' requires an ID-bound GRM; grm='none' selects ordinary nulls.
     resume verifies immutable per-block CSV/model/input/source proofs and fills
     missing blocks. A new full run (resume=False) requires a fresh output folder.
     Both supported cache formats use genetic-major GPU phenotype tiles and
     emit complete compressed text CSV shards and a private trait dictionary.
+    Large fitted banks partition ordered cohorts across GPUs; when too few
+    cohorts fit the workers or a cohort exceeds cache capacity, fixed global
+    phenotype tiles divide that cohort. Smaller banks partition genetic jobs.
+    Unique jobs and worker scan visits are
+    reported separately, with global trait IDs and model bindings preserved.
     Genetic preparation is never invoked by this association entry point.
     """
     chromosomes = _normalise_chromosomes(chromosomes)
+    if type(rm_nan) is not bool:
+        raise ValueError("rm_nan must be a boolean")
     if type(resume) is not bool:
         raise ValueError("resume must be a boolean")
     if type(cpu_threads) is not int or cpu_threads < 1:
         raise ValueError("cpu_threads must be a positive integer")
     for name, value, allow_none in (("memory_limit_gib", memory_limit_gib, True),
+                                     ("host_memory_limit_gib", host_memory_limit_gib, True),
                                      ("memory_reserve_gib", memory_reserve_gib, False)):
         if allow_none and value is None:
             continue
@@ -493,8 +518,8 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
         continuous_transform = "paper" if population else "none"
     devices = _normalise_devices(device, gpu_ids)
     options = dict(analyses=kinds, cpu_threads=cpu_threads, memory_limit_gib=memory_limit_gib,
-        memory_reserve_gib=float(memory_reserve_gib), phenotype_families=phenotype_families,
-        phenotype_covariates=phenotype_covariates, gene_variant_type=gene_variant_type,
+        memory_reserve_gib=float(memory_reserve_gib), host_memory_limit_gib=host_memory_limit_gib, phenotype_families=phenotype_families,
+        phenotype_covariates=phenotype_covariates, rm_nan=rm_nan, gene_variant_type=gene_variant_type,
         covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
         long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
@@ -544,6 +569,12 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
             eligible_association_tests=sum(rows.values()), association_rows=rows, workers=workers,
             gpu_ids=list(devices), end_to_end_seconds=time.perf_counter()-started,
             output_directory=str(output))
+        completions = [worker.get('global_completion') for worker in workers]
+        if any(completion is not None for completion in completions):
+            if (any(completion is None for completion in completions)
+                    or any(completion!=completions[0] for completion in completions)):
+                raise RuntimeError('worker global completion bindings differ')
+            report.update(completions[0])
         output.mkdir(parents=True, exist_ok=True, mode=0o700)
         _json_write(output/"report.private.json", report)
         _json_write(output/"status.private.json", dict(status="complete", attempt_id=attempt_id,
@@ -583,6 +614,8 @@ def main(argv=None):
     parser.add_argument("--cpu-threads",type=positive_integer,default=8)
     parser.add_argument("--memory-limit-gib",type=float,default=_DEFAULT_MEMORY_LIMIT)
     parser.add_argument("--memory-reserve-gib",type=float,default=1.0)
+    parser.add_argument("--host-memory-limit-gib",type=float,default=None,
+                        help="shared host task budget in GiB; default detects physical and all finite cgroup limits")
     parser.add_argument("--phenotype-families",default="auto",help="auto, or a JSON file mapping phenotype names to gaussian or binomial")
     parser.add_argument("--phenotype-covariates",help="JSON file mapping phenotype names to selected covariate column names")
     parser.add_argument("--transform",choices=("none","rint"),default="none")
@@ -593,6 +626,8 @@ def main(argv=None):
         ("individual-effective-block-size",1024),("device-cache-bytes",512*2**20),
         ("compact-cache-bytes",64*2**20),("metadata-cache-bytes",256*2**20)):
         parser.add_argument("--"+name,type=int,default=default)
+    parser.add_argument("--rm-nan", action=argparse.BooleanOptionalAction, default=True,
+        help="fill missing phenotypes (default); --no-rm-nan selects available complete cases")
     parser.add_argument("--resume",action="store_true")
     parser.add_argument("--grm",choices=("sparse","none"),default="sparse")
     parser.add_argument("--grm-file",help="ID-bound sparse GRM NPZ; otherwise use the prepared dataset sidecar")

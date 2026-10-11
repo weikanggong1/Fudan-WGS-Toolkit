@@ -48,7 +48,7 @@ def api_inputs(tmp_path, monkeypatch):
     # A neighboring profile file is also deliberately unrelated.
     csv_table(covariate.with_suffix('.profiles.csv'), [['wrong', 'schema']])
     return dict(phenotype_csv=phenotype, covariate_csv=covariate,
-                cache_directory=root, output_directory=tmp_path/'out', grm='none')
+                cache_directory=root, output_directory=tmp_path/'out', grm='none', rm_nan=False)
 
 
 def test_api_per_trait_family_override_and_covariate_missingness(api_inputs):
@@ -221,6 +221,10 @@ def test_single_chromosome_jobs_partition_once_across_gpus(api_inputs):
 def test_single_gpu_uses_this_call_and_restores_thread_policy(tmp_path, monkeypatch):
     from fudan_wgs_toolkit import cpu_budget
     calls, thread_updates = [], []
+    from fudan_wgs_toolkit import phewas_partition
+    budgets = []
+    monkeypatch.setattr(phewas_partition, 'gpu_model_cache_capacity',
+        lambda gpu_ids, **options: budgets.append((gpu_ids, options)) or 8*2**30)
     monkeypatch.setattr(cpu_budget, 'detect_cpu_capacity', lambda: dict(effective_cores=8))
     monkeypatch.setattr(phewas_run.os, 'sched_getaffinity', lambda pid: set(range(8)))
     monkeypatch.setattr(phewas_run.os, 'sched_setaffinity', lambda pid, cpus: None)
@@ -230,7 +234,14 @@ def test_single_gpu_uses_this_call_and_restores_thread_policy(tmp_path, monkeypa
         output_directory=str(tmp_path), attempt_id='example'))
     def execute(plan, **kwargs):
         calls.append((plan.copy(), kwargs))
-        return dict(association_rows=dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0))
+        configuration = dict(chromosomes=[dict(name='21', jobs=[dict(kind='individual')])])
+        dispatch = phewas_partition.build_trait_dispatch([dict(trait_index=0, sha256='a'*64)],
+            1, configuration, source_binding='inline-thread-contract', strategy='genetic_jobs')
+        phewas_partition.publish_trait_dispatch(tmp_path, dispatch, plan['attempt_id'])
+        return dict(worker_id=0, association_rows=dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0),
+            assigned_trait_indices=[0], association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
+            assigned_genetic_schedule_sha256=dispatch['workers'][0]['genetic_schedule_sha256'],
+            job_groups=1, trait_rows={0:dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0)})
     monkeypatch.setattr(phewas_run, 'execute_worker', execute)
     result = phewas_run.run_phewas('p.csv', 'c.csv', 'cache', output_directory=tmp_path,
                                  gpu_ids=(2,), cpu_threads=8)
@@ -238,6 +249,7 @@ def test_single_gpu_uses_this_call_and_restores_thread_policy(tmp_path, monkeypa
     assert calls[0][1] == dict(worker_id=0, worker_count=1, device='cuda:2')
     assert calls[0][0]['inline_worker'] and calls[0][0]['cpu_pool'] == list(range(8))
     assert thread_updates == [3]
+    assert budgets[0][0] == (2,) and budgets[0][1]['memory_limit_gib'] is None
 
 
 def test_resume_completed_tiles_do_not_hide_corrupt_null_arrays(api_inputs):
@@ -320,3 +332,52 @@ def test_invalid_public_resource_options_do_not_prepare_inputs(api_inputs, optio
     with pytest.raises(ValueError):
         phewas_run.prepare_phewas_run(**api_inputs, **options)
     assert not Path(api_inputs['output_directory']).exists()
+
+
+def test_public_host_budget_is_resource_only_and_recorded_in_plan(api_inputs):
+    first=phewas_run.prepare_phewas_run(**api_inputs,analyses=('coding',),host_memory_limit_gib=12)
+    assert first['host_memory_limit_gib']==12
+    again=phewas_run.prepare_phewas_run(**api_inputs,analyses=('coding',),resume=True,host_memory_limit_gib=8)
+    assert again['host_memory_limit_gib']==8
+    assert again['configuration']==first['configuration']
+    assert again['prepared_inputs_manifest_sha256']==first['prepared_inputs_manifest_sha256']
+    assert phewas_run._host_memory_policy(dict(again,host_limit_gib=200,host_reserve_gib=20,
+        host_limit_gib_by_worker={'0':40,'1':80}))==dict(host_limit_gib=8,reserve_gib=None)
+    assert phewas_run._host_memory_policy(dict(again,host_memory_limit_gib=None,
+        host_limit_gib=200))==dict(host_limit_gib=None,reserve_gib=None)
+
+
+def test_legacy_host_policy_keeps_explicit_budget_and_uses_one_shared_limit():
+    assert phewas_run._host_memory_policy(dict(host_limit_gib=200,host_reserve_gib=20))==dict(
+        host_limit_gib=200,reserve_gib=20)
+    plan=dict(host_limit_gib=200,host_reserve_gib=20,host_limit_gib_by_worker={'0':80,'1':120})
+    assert phewas_run._host_memory_policy(plan)==dict(host_limit_gib=80,reserve_gib=20)
+    assert phewas_run._host_memory_policy({})==dict(host_limit_gib=None,reserve_gib=None)
+
+
+@pytest.mark.parametrize('limit',[0,-1,True,float('nan'),float('inf'),'12'])
+def test_host_budget_rejected_before_preparing_or_creating_output(api_inputs,limit):
+    with pytest.raises(ValueError,match='host_memory_limit_gib'):
+        phewas_run.prepare_phewas_run(**api_inputs,host_memory_limit_gib=limit)
+    assert not Path(api_inputs['output_directory']).exists()
+
+
+def test_unified_and_phewas_cli_forward_shared_host_budget(monkeypatch,tmp_path,capsys):
+    from fudan_wgs_toolkit import run as public
+    calls=[]
+    def unified(**options):
+        calls.append(options)
+        return {'completed':True}
+    monkeypatch.setattr(public,'run_WGS_all',unified)
+    public.main(['phenotypes.csv','covariates.csv','prepared','--output-directory','output',
+                 '--host-memory-limit-gib','64'])
+    assert calls[-1]['host_memory_limit_gib']==64
+    def phewas(*args,**options):calls.append(options);return []
+    monkeypatch.setattr(phewas_run,'run_phewas',phewas)
+    phewas_run.main(['--phenotype-csv','phenotypes.csv','--covariate-csv','covariates.csv',
+        '--cache-directory','prepared','--output-directory','output','--host-memory-limit-gib','32'])
+    assert calls[-1]['host_memory_limit_gib']==32
+    plan=tmp_path/'plan.json';plan.write_text(json.dumps({'host_limit_gib':200}))
+    monkeypatch.setattr(phewas_run,'execute_worker',lambda plan,**options:calls.append(plan))
+    phewas_run.main(['--plan',str(plan),'--host-memory-limit-gib','16'])
+    assert calls[-1]['host_memory_limit_gib']==16 and calls[-1]['host_limit_gib']==200

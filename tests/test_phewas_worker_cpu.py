@@ -51,3 +51,59 @@ def test_partial_null_fit_cannot_publish_a_successful_fit_process_exit(isolated_
     receipt = next(value for path, value in records if path.name.endswith('exit.anonymous.json'))
     assert receipt['exit_code'] == 1
     assert any(path.name.endswith('failed.private.json') for path, _ in records)
+
+
+@pytest.mark.parametrize('failure',['none','association','writer_constructor'])
+def test_worker_finally_closes_repository_and_preserves_original_error(isolated_worker,monkeypatch,failure):
+    from fudan_wgs_toolkit.phewas_runtime import runtime
+    from fudan_wgs_toolkit import phewas_resources
+    plan,_,records=isolated_worker
+    plan.update(configuration={'chromosomes':[] if failure=='none' else [{'name':'21'}]},
+                host_memory_limit_gib=12)
+    monkeypatch.setattr(run,'fit_models',lambda *args,**kwargs:{'errors':[]})
+    monkeypatch.setattr(run,'_all_models',lambda *args:[])
+    actions=[]
+    class Repository:
+        def __init__(self,*args,**kwargs):actions.append('repository')
+        def summary(self):return {'endpoint':'before close'}
+        def close(self):
+            actions.append('close')
+            if failure!='none':raise RuntimeError('cleanup failure must not mask original')
+    class Writer:
+        def __init__(self,*args,**kwargs):
+            if failure=='writer_constructor':raise ArithmeticError('original writer failure')
+        def finish(self):return {'complete':True}
+        def abort(self):
+            actions.append('abort')
+            raise MemoryError('abort cleanup failure')
+    policy=[]
+    class Gate:
+        def __init__(self,output,**kwargs):policy.append(kwargs)
+        def lease_factory(self,*args):pass
+    monkeypatch.setattr(run,'ModelRepository',Repository)
+    monkeypatch.setattr(run,'StreamingCSVWriter',Writer)
+    monkeypatch.setattr(phewas_resources,'HostMemoryGate',Gate)
+    def association(*args,**kwargs):raise ArithmeticError('original association failure')
+    monkeypatch.setattr(runtime,'run_batched_configuration',association)
+    if failure=='none':
+        report=run.execute_worker(plan)
+        assert report['model_repository']=={'endpoint':'before close'}
+        assert actions==['repository','close']
+        assert policy==[dict(host_limit_gib=12,reserve_gib=None)]
+        assert next(value for path,value in records if path.name.endswith('exit.anonymous.json'))['exit_code']==0
+    else:
+        with pytest.raises(ArithmeticError,match='original'):
+            run.execute_worker(plan)
+        assert actions[-1]=='close'
+        assert ('abort' in actions)==(failure=='association')
+        assert next(value for path,value in records if path.name.endswith('exit.anonymous.json'))['exit_code']==1
+
+
+def test_diagnostic_or_exit_write_failure_does_not_replace_worker_error(isolated_worker,monkeypatch):
+    plan,_,_=isolated_worker
+    def original(*args,**kwargs):raise ArithmeticError('primary calculation failure')
+    def disk_failure(*args,**kwargs):raise OSError('secondary report disk failure')
+    monkeypatch.setattr(run,'_execute_worker',original)
+    monkeypatch.setattr(run,'atomic_json',disk_failure)
+    with pytest.raises(ArithmeticError,match='primary calculation'):
+        run.execute_worker(plan)

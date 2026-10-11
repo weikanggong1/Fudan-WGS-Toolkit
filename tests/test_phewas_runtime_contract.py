@@ -222,7 +222,7 @@ def test_effective_buffer_guard_rejects_before_splitting_or_consuming_parts():
     buffer.append(second)
     with pytest.raises(MemoryError, match="live budget"):
         buffer.take()
-    assert required == [4 * (3 + 4) + 64 * 2**20]
+    assert required == [4 * 3 + 64 * 2**20]
     assert buffer.count == 5 and list(buffer.parts) == [first, second]
 
 

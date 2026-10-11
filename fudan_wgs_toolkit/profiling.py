@@ -18,6 +18,8 @@ class StageProfiler:
         self.records = defaultdict(lambda: {"calls": 0, "host_wall_seconds": 0.0,
                                             "cuda_stream_seconds": 0.0})
         self.pending = []
+        self.maximum_pending = 256
+        self.omitted_cuda_intervals = 0
 
     @contextmanager
     def measure(self, name, *, gpu=False):
@@ -37,7 +39,15 @@ class StageProfiler:
             if use_events:
                 with torch.cuda.device(self.device):
                     end.record()
-                self.pending.append((name, start, end))
+                if len(self.pending) >= self.maximum_pending:
+                    self.flush()
+                if len(self.pending) < self.maximum_pending:
+                    self.pending.append((name, start, end))
+                else:
+                    # Diagnostic pressure never synchronizes a scientific mask.
+                    # Report incomplete timing coverage instead of holding an
+                    # unbounded list of CUDA event owners.
+                    self.omitted_cuda_intervals += 1
             self.records[name]["calls"] += 1
             self.records[name]["host_wall_seconds"] += elapsed
 
@@ -56,4 +66,5 @@ class StageProfiler:
         self.flush()
         return {"enabled": self.enabled, "stages": dict(self.records),
                 "pending_cuda_intervals": len(self.pending),
+                "omitted_cuda_intervals": self.omitted_cuda_intervals,
                 "timing_contract": "host wall and CUDA stream elapsed; overlapping metrics, not additive; pure kernel requires an external profiler"}

@@ -63,6 +63,33 @@ class _SingleReader(MetadataReader):
         return np.full(n, 'A'), np.full(n, 'C')
 
 
+@pytest.mark.parametrize('failure', [MemoryError, torch.cuda.OutOfMemoryError])
+def test_single_failed_block_preparation_unpins_reader_axis(tmp_path, monkeypatch, failure):
+    n, m = 24, 10
+    rows = np.arange(n)
+    with SharedStateBroker(SharedMetadataReader(_SingleReader(n, m)),
+                          make_cache(tmp_path/'cache', fixture_states(m=m, n=n)),
+                          device='cpu') as broker:
+        structural_axis = broker.reader_view(rows)
+        options = AnalysisOptions(wrapper_semantics='base', memory_limit_gib=80)
+        structural = runtime._thin_pipeline(structural_axis, model_for(rows), rows, options, {})
+        structural._base_mask = lambda *args: np.ones(m, dtype=bool)
+        initial_pins = structural_axis._axis.pins
+
+        def reject(*args, **kwargs):
+            raise failure('injected block admission failure')
+
+        monkeypatch.setattr(broker, 'trait_block', reject)
+        groups = [dict(rows=rows, descriptors=[descriptor(0, rows)])]
+        with pytest.raises(failure, match='injected block admission failure'):
+            runtime._batched_single(groups, None, broker, broker._reader, options,
+                {'individual_genotype_block_size': 4}, {'mac_cutoff': 1},
+                SimpleNamespace(), dict(association_rows={'individual': 0}), set(),
+                '21', 0, 1, structural)
+        assert structural_axis._axis.pins == initial_pins
+        structural_axis.close()
+
+
 @pytest.mark.parametrize('mode', ['normal', 'empty', 'output_error'])
 def test_single_releases_unowned_model_and_prepared_state_between_tiles(
         tmp_path, monkeypatch, cpu_product_oracle, mode):

@@ -251,17 +251,16 @@ class CheckpointCSVWriter:
             for item in stale:
                 item.replace(invalid/item.name)
             self.invalid_blocks += 1
-        rows, columns = [], ['trait_index']
+        row_count, columns = 0, ['trait_index']
         trait_counts = dict.fromkeys(map(str, traits), 0)
         selected = failed = 0
         for trait, result in trait_results:
             for source in _rows(result):
                 if 'trait_index' in source:
                     raise ValueError('association row cannot override its bound trait index')
-                row = dict(trait_index=int(trait), **source)
-                rows.append(row)
+                row_count += 1
                 trait_counts[str(trait)] += 1
-                for name in row:
+                for name in source:
                     if name not in columns:
                         columns.append(name)
                 selected += int(bool(source.get('spa_selected', False)))
@@ -271,13 +270,17 @@ class CheckpointCSVWriter:
             with gzip.open(partial, 'wt', encoding='utf-8', newline='', compresslevel=1) as handle:
                 output = csv.writer(handle, lineterminator='\n')
                 output.writerow(columns)
-                for row in rows:
-                    output.writerow([cell_text(row.get(name)) for name in columns])
+                # Results are explicit dictionaries/lists, so scan them twice
+                # without retaining a second block of copied row dictionaries.
+                for trait, result in trait_results:
+                    for source in _rows(result):
+                        output.writerow([cell_text(int(trait))]+
+                            [cell_text(source.get(name)) for name in columns[1:]])
             partial.replace(path)
             record = dict(schema_version=1, complete=True, writer_id=self.worker_id, binding_sha256=self.binding_sha256,
                 key=key, block_identity=block_identity, ordinal_before=ordinal_before,
                 ordinal_after=ordinal_after, kind=kind, chromosome=str(chromosome),
-                rows=len(rows), trait_rows=trait_counts, columns=columns,
+                rows=row_count, trait_rows=trait_counts, columns=columns,
                 csv_file=str(path.relative_to(self.directory)), sha256=digest_file(path),
                 compressed_bytes=path.stat().st_size, first_job=job_index, last_job=job_index,
                 binary_spa_selected=(selected if binary_counts is None else binary_counts['selected']),

@@ -332,7 +332,7 @@ def test_real_cross_process_lease_cannot_double_admit_and_reaps_dead_owner(tmp_p
             connection.close()
 
 
-@pytest.mark.parametrize("kwargs", [dict(host_limit_gib=0),dict(reserve_gib=200),
+@pytest.mark.parametrize("kwargs", [dict(host_limit_gib=0),dict(host_limit_gib=200,reserve_gib=200),
     dict(host_limit_gib=float("nan")),dict(lock_timeout_seconds=0)])
 def test_invalid_policy_is_rejected(tmp_path,kwargs):
     with pytest.raises(ValueError):
