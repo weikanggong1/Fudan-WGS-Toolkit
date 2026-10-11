@@ -10,22 +10,95 @@ import math
 import os
 from pathlib import Path
 import time
+import uuid
 import numpy as np
 import torch
 from .identity import sample_keys, validate_sample_pairs, pairs_from_keys
 
 _MISSING = {"", "na", "nan", "null", "none", "n/a"}
 _KINDS = ("individual", "coding", "noncoding", "ncrna")
-class _WorkflowDefaultString(str):
-    """Preserve the modern public default while detecting explicit overrides."""
+_DEFAULT_MEMORY_LIMIT = None
+_DEFAULT_GENE_VARIANT = "SNV"
 
 
-class _WorkflowDefaultFloat(float):
-    """A numeric default with an identity reserved for workflow selection."""
+def _normalise_chromosomes(value):
+    """All supplied autosomes, or a distinct explicitly requested subset."""
+    if value is None or value == "all" or isinstance(value, (list, tuple)) and list(value) == ["all"]:
+        return None
+    if isinstance(value, (str, int)):
+        value = [value]
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("chromosomes must be 'all' or a nonempty chromosome list")
+    selected = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (str, int)):
+            raise ValueError("chromosomes must contain integers from 1 to 22")
+        text = str(item).removeprefix("chr")
+        if not text.isdecimal() or not 1 <= int(text) <= 22:
+            raise ValueError("chromosomes must contain integers from 1 to 22")
+        name = str(int(text))
+        if name in selected:
+            raise ValueError("chromosomes must not contain duplicates")
+        selected.append(name)
+    return selected
 
 
-_DEFAULT_MEMORY_LIMIT = _WorkflowDefaultFloat(20.)
-_DEFAULT_GENE_VARIANT = _WorkflowDefaultString("SNV")
+def _normalise_devices(device, gpu_ids=None):
+    """A CUDA name list selects devices; integer n selects cuda:0..n-1."""
+    if gpu_ids is not None:
+        if device not in (("cuda:0",), "cuda:0", ["cuda:0"]):
+            raise ValueError("use device or gpu_ids, rather than both")
+        if not isinstance(gpu_ids, (list, tuple)) or any(type(i) is not int or i < 0 for i in gpu_ids):
+            raise ValueError("gpu_ids must contain nonnegative integers")
+        device = [f"cuda:{i}" for i in gpu_ids]
+    if type(device) is int:
+        if device < 1:
+            raise ValueError("device GPU count must be positive")
+        device = [f"cuda:{i}" for i in range(device)]
+    elif isinstance(device, (str, torch.device)):
+        device = [str(device)]
+    if not isinstance(device, (list, tuple)) or not device:
+        raise ValueError("device must be a CUDA device list or positive GPU count")
+    indices = []
+    for value in device:
+        if not isinstance(value, str):
+            raise ValueError("device lists must contain CUDA names, such as cuda:0")
+        try:
+            selected = torch.device(value)
+        except (ValueError, RuntimeError) as error:
+            raise ValueError("invalid CUDA device name") from error
+        if selected.type != "cuda":
+            raise ValueError("run_WGS_all requires CUDA devices")
+        indices.append(0 if selected.index is None else selected.index)
+    if len(set(indices)) != len(indices):
+        raise ValueError("device must select distinct GPUs")
+    if not torch.cuda.is_available() or max(indices) >= torch.cuda.device_count():
+        raise ValueError("requested CUDA devices are unavailable")
+    return tuple(indices)
+
+
+def _family_selection(value, names, values):
+    from collections.abc import Mapping
+    if value is None or value == "auto":
+        overrides = {}
+    elif isinstance(value, Mapping):
+        overrides = dict(value)
+    else:
+        raise ValueError("phenotype_families must be 'auto' or a phenotype mapping")
+    if set(overrides) - set(names) or any(v not in ("gaussian", "binomial", "binary", "auto") for v in overrides.values()):
+        raise ValueError("phenotype_families must map existing traits to gaussian or binomial")
+    result = {}
+    for index, name in enumerate(names):
+        family = overrides.get(name, "auto")
+        finite = values[:, index][np.isfinite(values[:, index])]
+        if family == "auto":
+            family = "binomial" if finite.size and np.all((finite == 0) | (finite == 1)) else "gaussian"
+        if family == "binary":
+            family = "binomial"
+        if family == "binomial" and np.any((finite != 0) & (finite != 1)):
+            raise ValueError("binary phenotype values must be zero, one or missing")
+        result[name] = family
+    return result
 
 
 def _sha256(path):
@@ -112,7 +185,8 @@ def read_csv_inputs(phenotype_csv, covariate_csv):
     return _read_csv(phenotype_csv, require_columns=True), _read_csv(covariate_csv, require_columns=False)
 
 
-def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_names=None):
+def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_names=None,
+                      reduce_redundant=False):
     """Select this phenotype's complete cases in prepared sample-axis order."""
     if trait not in phenotypes.names:
         raise ValueError("unknown phenotype column")
@@ -129,18 +203,26 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
     keys = sample_keys(cached)
     pheno_lookup = {key: i for i, key in enumerate(phenotypes.sample_ids)}
     cov_lookup = {key: i for i, key in enumerate(covariates.sample_ids)}
-    matched = [(row, pheno_lookup[key], cov_lookup[key]) for row, key in enumerate(keys)
-               if key in pheno_lookup and key in cov_lookup]
+    uses_covariates = bool(covariates.names)
+    matched = [(row, pheno_lookup[key], cov_lookup.get(key, -1)) for row, key in enumerate(keys)
+               if key in pheno_lookup and (not uses_covariates or key in cov_lookup)]
     cache_rows = np.asarray([item[0] for item in matched], dtype=np.int64)
     pheno_rows = np.asarray([item[1] for item in matched], dtype=np.int64)
     cov_rows = np.asarray([item[2] for item in matched], dtype=np.int64)
     y = phenotypes.values[pheno_rows, phenotypes.names.index(trait)]
-    x = covariates.values[cov_rows]
+    x = covariates.values[cov_rows] if uses_covariates else np.empty((len(y), 0), dtype=np.float64)
     keep = np.isfinite(y) & np.isfinite(x).all(axis=1)
     identifiers, y, x = keys[cache_rows][keep], y[keep], x[keep]
     has_intercept = bool(x.shape[1] and np.any(np.all(x == 1, axis=0)))
     names = covariates.names
-    if not has_intercept:
+    design = None
+    if reduce_redundant:
+        if not len(y):
+            raise ValueError(f"phenotype {trait}: insufficient complete-case samples for the covariate design")
+        from .phewas_run import _design
+        x, design = _design(x, names)
+        names = tuple(design['covariate_names'])
+    elif not has_intercept:
         x = np.column_stack((np.ones(len(y)), x))
         names = ("Intercept", *names)
     if len(y) <= x.shape[1]:
@@ -154,6 +236,8 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
         phenotype_rows_absent_from_prepared=sum(key not in cache_set for key in pheno_lookup),
         phenotype_rows_absent_from_covariates=sum(key not in cov_lookup for key in pheno_lookup),
         intercept_added=not has_intercept, design_columns=x.shape[1])
+    if design is not None:
+        counts['covariate_design'] = design
     return identifiers, y, x, names, counts
 
 
@@ -340,251 +424,141 @@ def _jobs(entry, analyses, output, *, single_mac_cutoff, single_group_variants, 
 
 
 def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
-                chromosomes=None, analyses=_KINDS, device="cuda:0", cpu_threads=8,
-                memory_limit_gib=_DEFAULT_MEMORY_LIMIT, phenotype_families=None, phenotype_covariates=None,
-                transform="none", null_fit_mode="fp64",
-                gene_variant_type=_DEFAULT_GENE_VARIANT,
+                chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
+                memory_limit_gib=None, memory_reserve_gib=1.0,
+                phenotype_families="auto", phenotype_covariates=None,
+                transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
                 covariance_block_size=4096, long_mask_threshold=5000, long_mask_rank=512, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
                 individual_effective_block_size=1024, device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
-                gpu_ids=None, trait_batch_size=16, continuous_transform="paper"):
-    """Run four association classes with independent complete cases per phenotype.
+                gpu_ids=None, trait_batch_size=16, continuous_transform=None,
+                grm="sparse", grm_file=None):
+    """Associate every numeric phenotype independently with existing WGS caches.
 
-    CSVs contain exact string FID/IID pairs and numeric measurements. Ordinary
-    Gaussian fitting is the default; ``phenotype_families`` may explicitly map
-    columns to gaussian or binomial. No relationship structure is inferred.
-    Associations use native TF32/FP32 on one CUDA device. Every mask is tested;
-    masks above long_mask_threshold use the configured approximate spectrum.
-    Final CSVs are saved under output_directory/<phenotype>/, with private model
-    NPZs and JSON provenance. resume reuses a completed identical verified run;
-    an interrupted or changed run requires a fresh output directory.
-
-    An existing ``cache_dataset.json`` population cache instead selects the
-    GRM-bound mixed PheWAS workflow. It preserves its exact sample axis and
-    covariate profiles, shares each genetic block across phenotype tiles, and
-    streams every result to CSV.gz. Genetic data preparation is never invoked.
-    This workflow uses ``gpu_ids``, ``trait_batch_size`` and
-    ``continuous_transform``; its CUDA workspace follows available memory.
-    Modern prepared datasets default to a 20 GiB cap and SNV gene masks;
-    population caches use live GPU memory and their established variant masks.
-    Options belonging to the modern workflow cannot silently change the bound
-    mixed-workflow settings: unsupported overrides raise before any work starts.
+    chromosomes='all' consumes all declared autosomes; a list selects a subset.
+    device=['cuda:0'] selects one GPU, while integer n selects the first n GPUs.
+    None uses physical GPU capacity with memory_reserve_gib kept for workspace.
+    Exact finite 0/1 columns are binomial in auto mode; other columns Gaussian.
+    Unlisted traits use all supplied covariates and their own complete cases.
+    grm='sparse' requires an ID-bound GRM; grm='none' selects ordinary nulls.
+    resume verifies immutable per-block CSV/model/input/source proofs and fills
+    missing blocks. A new full run (resume=False) requires a fresh output folder.
+    Both supported cache formats use genetic-major GPU phenotype tiles and
+    emit complete compressed text CSV shards and a private trait dictionary.
+    Genetic preparation is never invoked by this association entry point.
     """
-    if (Path(prepared_directory)/"cache_dataset.json").is_file():
-        if (Path(prepared_directory)/"dataset.json").exists():
-            raise ValueError("prepared directory contains ambiguous old and new dataset roots")
-        if tuple(dict.fromkeys(analyses)) != _KINDS:
-            raise ValueError("the mixed PheWAS population-cache workflow requires all four analyses")
-        if cpu_threads != 8:
-            raise ValueError("mixed PheWAS workers require eight assigned CPUs each")
-        if resume:
-            raise ValueError("mixed PheWAS uses immutable model and output receipts; choose a fresh run directory")
-        if phenotype_families is not None or phenotype_covariates is not None:
-            raise ValueError("mixed PheWAS families and covariates are bound by the cache profile sidecars")
-        if null_fit_mode != "fp64" or transform != "none":
-            raise ValueError("mixed PheWAS uses FP64 null fitting and continuous_transform for preprocessing")
-        if memory_limit_gib is not _DEFAULT_MEMORY_LIMIT and memory_limit_gib is not None:
-            raise ValueError("memory_limit_gib is not supported by the live-memory mixed PheWAS workflow")
-        if gene_variant_type is not _DEFAULT_GENE_VARIANT and gene_variant_type != "variant":
-            raise ValueError("mixed PheWAS gene_variant_type must retain the bound variant masks")
-        fixed_options = dict(covariance_block_size=(covariance_block_size,4096),
-            long_mask_threshold=(long_mask_threshold,5000),long_mask_rank=(long_mask_rank,512),
-            seed=(seed,1729),single_mac_cutoff=(single_mac_cutoff,20),
-            single_group_variants=(single_group_variants,5000),single_region_size=(single_region_size,10_000_000),
-            individual_effective_block_size=(individual_effective_block_size,1024),
-            device_cache_bytes=(device_cache_bytes,512*2**20),compact_cache_bytes=(compact_cache_bytes,64*2**20),
-            metadata_cache_bytes=(metadata_cache_bytes,256*2**20))
-        changed = [name for name,(value,expected) in fixed_options.items()
-                   if type(value) is not int or value != expected]
-        if changed:
-            raise ValueError("mixed PheWAS does not support these modern-workflow overrides: " + ", ".join(changed))
-        if type(trait_batch_size) is not int or trait_batch_size<1:
-            raise ValueError("trait_batch_size must be a positive integer")
-        if continuous_transform not in ("paper","none","rint"):
-            raise ValueError("continuous_transform must be paper, none or rint")
-        if gpu_ids is None:
-            selected = torch.device(device)
-            if selected.type != "cuda":
-                raise ValueError("mixed PheWAS requires CUDA devices")
-            gpu_ids = (0 if selected.index is None else selected.index,)
-        from .phewas_run import run_phewas
-        started=time.perf_counter()
-        workers=run_phewas(phenotype_csv,covariate_csv,prepared_directory,
-            output_directory=output_directory,gpu_ids=gpu_ids,chromosomes=chromosomes,
-            trait_batch_size=trait_batch_size,continuous_transform=continuous_transform)
-        if not isinstance(workers,list) or len(workers)!=len(gpu_ids):
-            raise RuntimeError("mixed PheWAS returned incomplete worker reports")
-        rows={kind:0 for kind in _KINDS}
-        for worker in workers:
-            counts=worker.get("association_rows",{})
-            if any(type(counts.get(kind)) is not int or counts[kind]<0 for kind in _KINDS):
-                raise RuntimeError("mixed PheWAS worker report has invalid association row counts")
-            for kind in _KINDS:rows[kind]+=counts[kind]
-        report=dict(completed=True,schema_version=1,workflow="population_cache_mixed_phewas",
-            eligible_association_tests=sum(rows.values()),association_rows=rows,workers=workers,
-            end_to_end_seconds=time.perf_counter()-started,output_directory=str(Path(output_directory).resolve()))
-        Path(output_directory).mkdir(parents=True,exist_ok=True,mode=0o700)
-        _json_write(Path(output_directory)/"report.private.json",report)
-        return report
-    if gpu_ids is not None:
-        raise ValueError("gpu_ids applies to the GRM-bound population-cache PheWAS workflow")
-    if trait_batch_size != 16 or type(trait_batch_size) is not int or continuous_transform != "paper":
-        raise ValueError("trait_batch_size and continuous_transform apply to the mixed population-cache workflow")
-    if memory_limit_gib is _DEFAULT_MEMORY_LIMIT:memory_limit_gib=20.0
-    if gene_variant_type is _DEFAULT_GENE_VARIANT:gene_variant_type="SNV"
-    if type(cpu_threads) is not int or cpu_threads < 1:
-        raise ValueError("cpu_threads must be a positive integer")
+    chromosomes = _normalise_chromosomes(chromosomes)
     if type(resume) is not bool:
         raise ValueError("resume must be a boolean")
-    if any(type(value) is not int or value<0 for value in (device_cache_bytes,compact_cache_bytes)):
-        raise ValueError("device and compact cache capacities must be nonnegative integers")
-    if type(metadata_cache_bytes) is not int or metadata_cache_bytes<1:
-        raise ValueError("metadata_cache_bytes must be a positive integer")
-    if isinstance(memory_limit_gib,bool) or not isinstance(memory_limit_gib,(int,float)) or not math.isfinite(memory_limit_gib) or not 0<memory_limit_gib<=20:
-        raise ValueError("memory_limit_gib must be finite and in (0,20]")
-    positive = (covariance_block_size,long_mask_threshold,long_mask_rank,single_mac_cutoff,
-                single_group_variants,single_region_size,individual_effective_block_size)
-    if any(type(value) is not int or value<1 for value in positive):
-        raise ValueError("block sizes, mask limits and MAC cutoff must be positive integers")
-    if type(seed) is not int or seed<0:
+    if type(cpu_threads) is not int or cpu_threads < 1:
+        raise ValueError("cpu_threads must be a positive integer")
+    for name, value, allow_none in (("memory_limit_gib", memory_limit_gib, True),
+                                     ("memory_reserve_gib", memory_reserve_gib, False)):
+        if allow_none and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or (allow_none and value == 0):
+            raise ValueError(name + " must be finite and positive" + (" or None" if allow_none else " or zero"))
+    if memory_limit_gib is not None and memory_reserve_gib >= memory_limit_gib:
+        raise ValueError("memory_reserve_gib must be below the GPU memory limit")
+    if not isinstance(analyses, (list, tuple)):
+        raise ValueError("analyses must be a sequence of analysis names")
+    kinds = tuple(dict.fromkeys(analyses))
+    if not kinds or any(k not in _KINDS for k in kinds):
+        raise ValueError("analyses must select individual, coding, noncoding or ncrna")
+    positive = (covariance_block_size, long_mask_threshold, long_mask_rank, single_mac_cutoff,
+                single_group_variants, single_region_size, individual_effective_block_size, trait_batch_size)
+    if any(type(v) is not int or v < 1 for v in positive):
+        raise ValueError("block sizes, trait tiles and MAC cutoff must be positive integers")
+    if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
-    if transform not in ("none","rint") or null_fit_mode not in ("fp64","tf32"):
+    if any(type(v) is not int or v < 0 for v in (device_cache_bytes, compact_cache_bytes)) or type(metadata_cache_bytes) is not int or metadata_cache_bytes < 1:
+        raise ValueError("cache capacities must be nonnegative; metadata capacity must be positive")
+    if transform not in ("none", "rint") or null_fit_mode not in ("fp64", "tf32"):
         raise ValueError("transform must be none or rint; null_fit_mode must be fp64 or tf32")
+    if continuous_transform not in (None, "paper", "none", "rint"):
+        raise ValueError("continuous_transform must be None, paper, none or rint")
     if gene_variant_type not in ("SNV", "Indel", "variant"):
         raise ValueError("gene_variant_type must be SNV, Indel or variant")
-    kinds = tuple(dict.fromkeys(analyses))
-    if not kinds or any(kind not in _KINDS for kind in kinds):
-        raise ValueError("analyses must select individual, coding, noncoding or ncrna")
-    if not str(device).startswith("cuda") or not torch.cuda.is_available():
-        raise ValueError("run_WGS_all requires an available CUDA device")
-    started = time.perf_counter()
-    root,manifest_path,manifest,entries,pairs = _dataset(prepared_directory,chromosomes)
-    analysis = _analysis_settings(manifest)
-    phenotypes,covariates = read_csv_inputs(phenotype_csv,covariate_csv)
-    for name in phenotypes.names:_safe_name(name)
-    families = {} if phenotype_families is None else dict(phenotype_families)
-    if set(families)-set(phenotypes.names) or any(value not in ("gaussian","binomial") for value in families.values()):
-        raise ValueError("phenotype_families must map existing columns to gaussian or binomial")
-    covariate_selection = {} if phenotype_covariates is None else dict(phenotype_covariates)
-    if set(covariate_selection) - set(phenotypes.names):
-        raise ValueError("phenotype_covariates must use existing phenotype column names")
-    for columns in covariate_selection.values():
-        if (not isinstance(columns, (list, tuple)) or any(not isinstance(name, str) for name in columns)
-                or len(set(columns)) != len(columns) or set(columns) - set(covariates.names)):
-            raise ValueError("phenotype_covariates must select distinct existing numeric covariate columns")
-    covariate_selection = {name:list(columns) for name,columns in covariate_selection.items()}
-    options = dict(memory_limit_gib=float(memory_limit_gib),genotype_block_size=128,
-        annotation_block_size=250_000,variant_tile_size=512,covariance_backend="cached",
-        cached_variant_tile_size=covariance_block_size,long_mask_threshold=long_mask_threshold,
-        long_mask_method="fastskat",long_mask_rank=long_mask_rank,long_mask_seed=seed,
-        wrapper_semantics="base",variant_type=gene_variant_type,rv_num_cutoff_max=1_000_000_000,
-        rv_num_cutoff_max_prefilter=1_000_000_000)
-    from .cache_runtime import CacheSpec
-    from .pipeline import AnalysisOptions
-    AnalysisOptions(**options)
-    specs,bindings = {},[]
-    for entry in entries:
-        coverage = _annotation_coverage(entry, gene_variant_type=gene_variant_type, analyses=kinds,
-                                        expected_sample_keys=sample_keys(pairs),expected_analysis=analysis)
-        directory = Path(entry["container_directory"])
-        digest = _sha256(directory/"manifest.json")
-        binding = _proof(directory,digest)
-        samples = np.load(directory/"samples.npy",allow_pickle=False)
-        specs[entry["metadata_directory"]] = CacheSpec(str(directory),binding,partial(_proof,directory,digest),samples)
-        bindings.append(dict(name=entry["name"],annotation_coverage=coverage,genotype_manifest_sha256=digest,
-            metadata_manifest_sha256=_sha256(Path(entry["metadata_directory"])/"manifest.json"),
-            gene_catalog_sha256=None if "gene_catalog" not in entry else _sha256(entry["gene_catalog"]),
-            promoter_intervals_sha256=None if "promoter_intervals" not in entry else _sha256(entry["promoter_intervals"])))
-    identity = dict(phenotype_sha256=_sha256(phenotype_csv),covariate_sha256=_sha256(covariate_csv),
-        implementation_sha256=_implementation_sha256(),dataset_manifest_sha256=_sha256(manifest_path),
-        sample_pairs_sha256=_sha256(_cache_path(root,manifest.get("sample_pairs","sample_pairs.npy"))),
-        prepared_bindings=bindings,chromosomes=[entry["name"] for entry in entries],analyses=list(kinds),
-        device=str(device),cpu_threads=cpu_threads,analysis_options=options,phenotype_families=families,
-        phenotype_covariates=covariate_selection,
-        transform=transform,null_fit_mode=null_fit_mode,gene_variant_type=gene_variant_type,single_mac_cutoff=single_mac_cutoff,
-        single_group_variants=single_group_variants,single_region_size=single_region_size,
+    if grm not in ("sparse", "none") or (grm == "none" and grm_file is not None):
+        raise ValueError("grm must be sparse or none; grm_file requires sparse mode")
+    population = (Path(prepared_directory)/"cache_dataset.json").is_file()
+    if population and (Path(prepared_directory)/"dataset.json").exists():
+        raise ValueError("prepared directory contains ambiguous old and new dataset roots")
+    if transform != "none":
+        if continuous_transform not in (None, transform):
+            raise ValueError("conflicting phenotype transformations")
+        continuous_transform = transform
+    if continuous_transform is None:
+        continuous_transform = "paper" if population else "none"
+    devices = _normalise_devices(device, gpu_ids)
+    options = dict(analyses=kinds, cpu_threads=cpu_threads, memory_limit_gib=memory_limit_gib,
+        memory_reserve_gib=float(memory_reserve_gib), phenotype_families=phenotype_families,
+        phenotype_covariates=phenotype_covariates, gene_variant_type=gene_variant_type,
+        covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
+        long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
+        single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
-        shared_cache_bytes=[device_cache_bytes,compact_cache_bytes,metadata_cache_bytes])
+        device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
+        metadata_cache_bytes=metadata_cache_bytes, resume=resume, grm=grm, grm_file=grm_file,
+        trait_batch_size=trait_batch_size)
+    started = time.perf_counter()
     output = Path(output_directory).resolve()
-    output.mkdir(parents=True,exist_ok=True,mode=0o700)
-    plan_path,report_path = output/"plan.private.json",output/"report.private.json"
-    if plan_path.exists():
-        previous = json.loads(plan_path.read_text(encoding="utf-8"))
-        if not resume or previous.get("input_identity")!=identity or not report_path.is_file():
-            raise ValueError("output directory contains an existing or incomplete run; use a new directory")
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        if report.get("completed") is not True:
-            raise ValueError("only a completed identical run can be reused")
-        for saved in report.get("files",[]):
-            path = output/saved["path"]
-            if not path.is_file() or _sha256(path)!=saved["sha256"]:
-                raise ValueError("completed output changed after verification")
-        return report
-    if any(output.iterdir()):raise ValueError("output directory must be empty for a new run")
-    # Build structural schedules once; every phenotype reuses the same
-    # coordinate scan and annotation catalog rather than reopening metadata.
-    schedules = [_jobs(entry,kinds,output/"_schedule",single_mac_cutoff=single_mac_cutoff,
-        single_group_variants=single_group_variants,single_region_size=single_region_size)
-        for entry in entries]
-    from .io import save_null_model
-    from .null_model import fit_gaussian_null,rank_inverse_normal
-    from .binary_null import fit_logistic_null
-    configs,models = [],[]
-    model_directory = output/"models"
-    model_directory.mkdir(mode=0o700)
-    previous_threads = torch.get_num_threads()
+    attempt_id = uuid.uuid4().hex
+    if resume and (output/"plan.private.json").is_file():
+        previous = output/"report.private.json"
+        if previous.exists():
+            previous.replace(output/f"report.previous.{attempt_id}.private.json")
+        _json_write(output/"status.private.json", dict(status="running", attempt_id=attempt_id))
     try:
-        torch.set_num_threads(cpu_threads)
-        for ordinal,name in enumerate(phenotypes.names):
-            ids,y,x,cov_names,alignment = aligned_phenotype(phenotypes,covariates,pairs,name,
-                covariate_names=covariate_selection.get(name))
-            family,before = families.get(name,"gaussian"),time.perf_counter()
-            if family=="binomial":
-                if transform!="none":raise ValueError("rint transformation requires Gaussian outcomes")
-                model = fit_logistic_null(y,covariates=x,sample_ids=ids,device="cpu",use_spa=False)
-            else:
-                if transform=="rint":y=rank_inverse_normal(y)
-                model = fit_gaussian_null(y,sample_ids=ids,covariates=x,
-                    device="cpu" if null_fit_mode=="fp64" else device,matmul_mode=null_fit_mode)
-            model_path = model_directory/f"trait_{ordinal+1:04d}.npz"
-            model.genotype_sample_ids,model.sample_pairs = ids.copy(),pairs_from_keys(ids)
-            save_null_model(model,model_path)
-            models.append(dict(index=ordinal,name=name,family=family,alignment=alignment,
-                covariate_names=list(cov_names),model_sha256=_sha256(model_path),null_fit_seconds=time.perf_counter()-before))
-            config = dict(matmul_mode="tf32",precision_control=False,statistics_execution="serial",
-                resident_genotypes=True,single_batch_optimization=True,weight_batch_optimization=True,
-                statistics_tail_optimization=True,local_mask_reuse=True,maximum_mask_variants=None,
-                individual_effective_block_size=individual_effective_block_size,
-                individual_genotype_block_size=individual_effective_block_size,analysis_options=dict(options),
-                qc_path=analysis["qc_path"],
-                annotation_catalog=analysis["annotation_catalog"],annotation_names=analysis["annotation_names"],
-                phenotypes=[dict(name=name,model=str(model_path),sample_id_rule="exact")],chromosomes=[])
-            for entry,schedule in zip(entries,schedules):
-                jobs = [dict(job,arguments=dict(job["arguments"]),
-                             output=str(output/name/Path(job["output"]).name)) for job in schedule]
-                chromosome = dict(name=entry["name"],genotype=entry["metadata_directory"],
-                    jobs=jobs)
-                if "promoter_intervals" in entry:
-                    chromosome["annotation_index"] = dict(promoter_intervals_file=entry["promoter_intervals"])
-                config["chromosomes"].append(chromosome)
-            configs.append(config)
-            del model,y,x
-    finally:torch.set_num_threads(previous_threads)
-    _json_write(plan_path,dict(schema_version=2,input_identity=identity,phenotypes=models,analyses=configs,
-        prepared_directory=str(root),output_directory=str(output)))
-    preparation_seconds = time.perf_counter()-started
-    from .phewas_runtime.runtime import run_configuration
-    report = run_configuration(configs,cache_specs=specs,device=device,cpu_threads=cpu_threads,
-        device_cache_bytes=device_cache_bytes,compact_cache_bytes=compact_cache_bytes,
-        metadata_cache_bytes=metadata_cache_bytes)
-    files = [dict(path=str(path.relative_to(output)),size=path.stat().st_size,sha256=_sha256(path))
-             for path in sorted(output.rglob("*")) if path.suffix in (".csv",".npz")]
-    report.update(completed=True,schema_version=2,phenotype_inputs=models,files=files,
-        preparation_seconds=preparation_seconds,end_to_end_seconds=time.perf_counter()-started,
-        output_directory=str(output),input_identity=identity)
-    _json_write(report_path,report)
-    return report
+        if population:
+            if null_fit_mode != "fp64":
+                raise ValueError("mixed PheWAS null fitting requires fp64")
+            from .phewas_run import run_phewas
+            workers = run_phewas(phenotype_csv, covariate_csv, prepared_directory,
+                output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
+                continuous_transform=continuous_transform, **options)
+        else:
+            from .prepared_association import run_prepared_association
+            workers = run_prepared_association(phenotype_csv, covariate_csv, prepared_directory,
+                output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
+                transform=continuous_transform, null_fit_mode=null_fit_mode, **options)
+        if not isinstance(workers, list) or len(workers) != len(devices):
+            raise RuntimeError("WGS execution returned incomplete worker reports")
+        rows = dict.fromkeys(_KINDS, 0)
+        for worker in workers:
+            counts = worker.get("association_rows", {})
+            if any(type(counts.get(kind)) is not int or counts[kind] < 0 for kind in _KINDS):
+                raise RuntimeError("worker report has invalid association row counts")
+            for kind in _KINDS:
+                rows[kind] += counts[kind]
+        dictionary_sha = None
+        if (output/"plan.private.json").is_file():
+            expected = json.loads((output/"plan.private.json").read_text())["trait_index_sha256"]
+            dictionary_sha = _sha256(output/"trait_index.private.csv")
+            if dictionary_sha != expected:
+                raise ValueError("completed phenotype dictionary differs from the bound input order")
+        report = dict(completed=True, schema_version=3, workflow="shared_cache_phewas",
+            attempt_id=attempt_id,
+            trait_index_sha256=dictionary_sha,
+            eligible_association_tests=sum(rows.values()), association_rows=rows, workers=workers,
+            gpu_ids=list(devices), end_to_end_seconds=time.perf_counter()-started,
+            output_directory=str(output))
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _json_write(output/"report.private.json", report)
+        _json_write(output/"status.private.json", dict(status="complete", attempt_id=attempt_id,
+            report_sha256=_sha256(output/"report.private.json")))
+        return report
+    except BaseException as error:
+        current = output/"report.private.json"
+        if current.exists():
+            published = json.loads(current.read_text())
+            if published.get("attempt_id") == attempt_id:
+                current.replace(output/f"report.failed.{attempt_id}.private.json")
+        if output.is_dir() and (resume or not current.exists()):
+            _json_write(output/"status.private.json", dict(status="failed", attempt_id=attempt_id,
+                error_type=type(error).__name__))
+        raise
 
 
 def main(argv=None):
@@ -599,16 +573,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Run WGS associations from FID/IID CSVs and prepared genetic data")
     for name in ("phenotype_csv","covariate_csv","prepared_directory"):parser.add_argument(name)
     parser.add_argument("--output-directory",required=True)
-    parser.add_argument("--chromosomes",nargs="+")
+    parser.add_argument("--chromosomes",nargs="+",default="all",help="all or chromosome numbers from 1 to 22")
     parser.add_argument("--analyses",nargs="+",choices=_KINDS,default=_KINDS)
-    parser.add_argument("--device",default="cuda:0")
+    parser.add_argument("--device",nargs="+",default=["cuda:0"],help="CUDA names, or one integer selecting that many GPUs")
     parser.add_argument("--gpu-ids",type=int,nargs="+",
                         help="local CUDA device IDs for an existing GRM-bound population cache")
     parser.add_argument("--trait-batch-size",type=positive_integer,default=16)
-    parser.add_argument("--continuous-transform",choices=("paper","none","rint"),default="paper")
+    parser.add_argument("--continuous-transform",choices=("paper","none","rint"),default=None)
     parser.add_argument("--cpu-threads",type=positive_integer,default=8)
     parser.add_argument("--memory-limit-gib",type=float,default=_DEFAULT_MEMORY_LIMIT)
-    parser.add_argument("--phenotype-families",help="JSON file mapping phenotype names to gaussian or binomial")
+    parser.add_argument("--memory-reserve-gib",type=float,default=1.0)
+    parser.add_argument("--phenotype-families",default="auto",help="auto, or a JSON file mapping phenotype names to gaussian or binomial")
     parser.add_argument("--phenotype-covariates",help="JSON file mapping phenotype names to selected covariate column names")
     parser.add_argument("--transform",choices=("none","rint"),default="none")
     parser.add_argument("--null-fit-mode",choices=("fp64","tf32"),default="fp64")
@@ -619,8 +594,12 @@ def main(argv=None):
         ("compact-cache-bytes",64*2**20),("metadata-cache-bytes",256*2**20)):
         parser.add_argument("--"+name,type=int,default=default)
     parser.add_argument("--resume",action="store_true")
+    parser.add_argument("--grm",choices=("sparse","none"),default="sparse")
+    parser.add_argument("--grm-file",help="ID-bound sparse GRM NPZ; otherwise use the prepared dataset sidecar")
     arguments = vars(parser.parse_args(argv))
-    if arguments["phenotype_families"] is not None:
+    if len(arguments["device"]) == 1 and arguments["device"][0].isdecimal():
+        arguments["device"] = int(arguments["device"][0])
+    if arguments["phenotype_families"] != "auto":
         arguments["phenotype_families"] = json.loads(Path(arguments["phenotype_families"]).read_text(encoding="utf-8"))
     if arguments["phenotype_covariates"] is not None:
         arguments["phenotype_covariates"] = json.loads(Path(arguments["phenotype_covariates"]).read_text(encoding="utf-8"))

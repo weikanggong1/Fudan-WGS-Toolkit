@@ -5,6 +5,11 @@ from fudan_wgs_toolkit import phewas_run as run
 
 @pytest.fixture
 def isolated_worker(tmp_path, monkeypatch):
+    from fudan_wgs_toolkit.phewas_cache import _stream_bindings
+    container = tmp_path/'container'
+    container.mkdir()
+    for name in ('data.bin', 'headers.bin', 'counts.bin'):
+        (container/name).write_bytes(b'01')
     affinity = {}
     records = []
     monkeypatch.setattr(run.os, 'sched_getaffinity',
@@ -18,7 +23,8 @@ def isolated_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(run, '_implementation_sha256', lambda: 'source-proof')
     monkeypatch.setattr(run, 'atomic_json', lambda path, value: records.append((path, value)))
     plan = dict(output_directory=str(tmp_path), cpu_offsets={'0': 8},
-                source_implementation_sha256='source-proof')
+                source_implementation_sha256='source-proof',
+                genotype_streams=_stream_bindings([dict(container_directory=str(container))]))
     return plan, affinity, records
 
 

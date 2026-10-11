@@ -32,6 +32,8 @@ def prepared_inputs(tmp_path):
     np.save(root / "sample_pairs.npy", pairs)
     np.save(root / "sample_ids.npy", sample_keys(pairs))
     np.save(container / "samples.npy", np.arange(len(pairs), dtype=np.int64))
+    for stream in ('data.bin', 'headers.bin', 'counts.bin'):
+        (container / stream).write_bytes(b'fixture')
     raw = json.dumps({"binding": {"source_kind": "bed_fixture"}}).encode()
     (container / "manifest.json").write_bytes(raw)
     (container / "COMPLETE").write_text(hashlib.sha256(raw).hexdigest())
@@ -89,51 +91,59 @@ class PositionMetadata:
 
 
 def test_public_run_shares_schedule_and_retains_independent_samples(tmp_path, monkeypatch):
-    from fudan_wgs_toolkit import run as module
+    from fudan_wgs_toolkit import run as module, prepared_association
+    from fudan_wgs_toolkit.phewas_models import prepare_phewas_model
     from fudan_wgs_toolkit.cache_runtime import portable
     from fudan_wgs_toolkit.phewas_runtime import runtime
     root, phenotype, covariate, pairs = prepared_inputs(tmp_path)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(module.torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(portable, "PortableMetadataReader", PositionMetadata)
-    seen = []
-
-    def shared(configurations, *, cache_specs, **kwargs):
-        seen.append(configurations)
+    fits, seen = [], []
+    def fit(*args, **kwargs):
+        fits.append(kwargs.copy())
+        kwargs["device"] = "cpu"
+        return prepare_phewas_model(*args, **kwargs)
+    monkeypatch.setattr(prepared_association, "prepare_phewas_model", fit)
+    def shared(configuration, *, model_repository, writer, **kwargs):
+        seen.append(configuration)
         assert kwargs["cpu_threads"] == 8
-        assert len(cache_specs) == 1
-        for configuration in configurations:
-            assert configuration["analysis_options"]["variant_type"] == "SNV"
-            assert configuration["maximum_mask_variants"] is None
-            assert configuration["analysis_options"]["rv_num_cutoff_max"] == 1_000_000_000
-            assert configuration["phenotypes"][0]["sample_id_rule"] == "exact"
-            model = load_null_model(configuration["phenotypes"][0]["model"], matmul_mode="tf32")
-            assert model.n == (6 if configuration["phenotypes"][0]["name"] == "trait_a" else 5)
-            np.testing.assert_array_equal(model.sample_pairs, pairs_from_keys(model.sample_ids))
-            for chromosome in configuration["chromosomes"]:
-                assert {job["kind"] for job in chromosome["jobs"]} == {"individual", "coding", "noncoding", "ncrna"}
-                for filename in {job["output"] for job in chromosome["jobs"]}:
-                    path = Path(filename)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("pvalue,pvalue_log10\n0.25,0.6020599913279624\n")
-                assert all(job["arguments"]["variant_type"] == "variant" for job in chromosome["jobs"] if job["kind"] == "individual")
-        return {"eligible_association_tests": 10, "csv_files": 10}
-
-    monkeypatch.setattr(runtime, "run_configuration", shared)
+        assert configuration["analysis_options"]["variant_type"] == "SNV"
+        descriptors = model_repository.descriptors()
+        assert [entry["n"] for entry in descriptors] == [6, 5]
+        for index, descriptor in enumerate(descriptors):
+            with model_repository.acquire([index], "cpu") as models:
+                np.testing.assert_array_equal(models[0].sample_ids,
+                    sample_keys(pairs[descriptor["ordered_rows"]]))
+        counts = dict.fromkeys(("individual", "coding", "noncoding", "ncrna"), 0)
+        for chromosome in configuration["chromosomes"]:
+            assert {job["kind"] for job in chromosome["jobs"]} == set(counts)
+            for job in chromosome["jobs"]:
+                args = (dict(block_identity="identity-contract", ordinal_before=0)
+                        if job["kind"] == "individual" else {})
+                existing = writer.checkpoint_tile(job["kind"], chromosome["name"],
+                    job["checkpoint_job_index"], [0, 1], **args)
+                if existing is None:
+                    existing = writer.write_tile(job["kind"], chromosome["name"],
+                        [(i, [{"pvalue": .25, "pvalue_log10": .6020599913279624}]) for i in (0, 1)],
+                        job_index=job["checkpoint_job_index"],
+                        **(dict(ordinal_after=1) if job["kind"] == "individual" else {}), **args)
+                counts[job["kind"]] += existing["rows"]
+                if job["kind"] == "individual":
+                    assert job["arguments"]["variant_type"] == "variant"
+        return dict(association_rows=counts, output=writer.finish())
+    monkeypatch.setattr(runtime, "run_batched_configuration", shared)
     PositionMetadata.opens = 0
     output = tmp_path / "results"
-    report = run_WGS_all(phenotype, covariate, root, output_directory=output, single_region_size=10)
-    assert report["completed"]
-    assert len(seen) == 1
-    assert PositionMetadata.opens == 1
-    assert len(list(output.glob("trait_*/*.csv"))) == 10
-    # Reusing an unchanged completion must not refit or rerun the shared core.
-    reused = run_WGS_all(phenotype, covariate, root, output_directory=output, single_region_size=10, resume=True)
-    assert reused == report
-    assert len(seen) == 1
-    first = next(output.glob("trait_*/*.csv"))
-    first.write_text(first.read_text() + "0.1,1\n")
-    with pytest.raises(ValueError, match="changed"):
-        run_WGS_all(phenotype, covariate, root, output_directory=output, single_region_size=10, resume=True)
+    report = run_WGS_all(phenotype, covariate, root, output_directory=output,
+        single_region_size=10, grm="none")
+    assert report["completed"] and len(seen) == 1 and PositionMetadata.opens == 1
+    assert report["eligible_association_tests"] == 10 and len(fits) == 2
+    reused = run_WGS_all(phenotype, covariate, root, output_directory=output,
+        single_region_size=10, grm="none", resume=True)
+    assert reused["association_rows"] == report["association_rows"]
+    assert len(seen) == 2 and len(fits) == 2
+    assert reused["workers"][0]["output"]["reused_blocks"] == 5
 
 
 def test_snv_gene_default_keeps_all_annotation_weight_columns(tmp_path, monkeypatch):
@@ -173,9 +183,10 @@ def test_root_annotation_settings_cannot_be_resigned_independently_of_chromosome
     # independently bound weight mapping/order or QC scientific configuration.
     commit_dataset(root, dataset)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(module.torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(portable, "PortableMetadataReader", BoundMetadata)
     with pytest.raises(ValueError, match="differs from chromosome"):
-        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results")
+        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results",grm="none")
     assert not (tmp_path/"results").exists()
 
 
@@ -189,9 +200,10 @@ def test_missing_chromosome_annotation_settings_are_rejected(tmp_path,monkeypatc
     class Missing(PositionMetadata):
         manifest=dict(deepcopy(PositionMetadata.manifest),analysis=analysis)
     monkeypatch.setattr(module.torch.cuda,"is_available",lambda:True)
+    monkeypatch.setattr(module.torch.cuda,"device_count",lambda:1)
     monkeypatch.setattr(portable,"PortableMetadataReader",Missing)
     with pytest.raises(ValueError,match="requires explicit"):
-        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results")
+        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results",grm="none")
 
 
 def test_root_sample_axis_cannot_be_reordered_independently_of_chromosome(tmp_path,monkeypatch):
@@ -201,9 +213,10 @@ def test_root_sample_axis_cannot_be_reordered_independently_of_chromosome(tmp_pa
     np.save(root/"sample_pairs.npy",pairs[::-1])
     np.save(root/"sample_ids.npy",sample_keys(pairs[::-1]))
     monkeypatch.setattr(module.torch.cuda,"is_available",lambda:True)
+    monkeypatch.setattr(module.torch.cuda,"device_count",lambda:1)
     monkeypatch.setattr(portable,"PortableMetadataReader",PositionMetadata)
     with pytest.raises(ValueError,match="chromosome sample keys differ"):
-        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results")
+        run_WGS_all(phenotype,covariate,root,output_directory=tmp_path/"results",grm="none")
     assert not (tmp_path/"results").exists()
 
 

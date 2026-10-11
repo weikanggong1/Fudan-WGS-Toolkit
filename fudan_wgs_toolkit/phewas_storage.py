@@ -1,15 +1,18 @@
 """Private immutable model stores and bounded, complete PheWAS CSV shards."""
 from __future__ import annotations
 from collections import OrderedDict
+from collections.abc import Mapping
 from contextlib import contextmanager
 import csv
 import gzip
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import time
+import uuid
 import numpy as np
 import torch
 from .binary_null import BinaryNullModel
@@ -50,6 +53,60 @@ def atomic_json(path, value):
     tmp.replace(path)
 
 
+def _trait_index_bytes(phenotype_names, families):
+    """Encode the derived index deterministically in source-column order."""
+    names = list(phenotype_names)
+    if (not names or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names) or not isinstance(families, Mapping)
+            or set(families) != set(names)
+            or any(families[name] not in ('gaussian', 'binomial') for name in names)):
+        raise ValueError('trait index requires distinct names and their exact fitted families')
+    stream = io.StringIO(newline='')
+    writer = csv.writer(stream, lineterminator='\n')
+    writer.writerow(['trait_index', 'phenotype', 'family'])
+    writer.writerows((index, name, families[name]) for index, name in enumerate(names))
+    return stream.getvalue().encode('utf-8')
+
+
+def trait_index_sha256(phenotype_names, families):
+    """Return the expected checksum without creating an output directory."""
+    return hashlib.sha256(_trait_index_bytes(phenotype_names, families)).hexdigest()
+
+
+def write_trait_index(directory, phenotype_names, families, *, expected_sha256=None):
+    """Verify or atomically repair the private, reproducible trait dictionary.
+
+    This table is derived from already verified scientific inputs. Repair never
+    changes model arrays or association blocks. An incorrect previous file or
+    link is retained privately; an interrupted unique partial cannot prevent a
+    later call in the same process from publishing the complete index.
+    """
+    payload = _trait_index_bytes(phenotype_names, families)
+    expected = hashlib.sha256(payload).hexdigest()
+    if expected_sha256 is not None and expected_sha256 != expected:
+        raise ValueError('derived trait dictionary checksum differs from the scientific plan')
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = root/'trait_index.private.csv'
+    if path.is_file() and not path.is_symlink() and digest_file(path) == expected:
+        return dict(file=path.name, sha256=expected, bytes=len(payload), repaired=False)
+    repaired = path.exists() or path.is_symlink()
+    if repaired:
+        diagnostic = root/'trait_index_invalid.private'/uuid.uuid4().hex
+        diagnostic.mkdir(parents=True, mode=0o700)
+        path.replace(diagnostic/path.name)
+    partial = path.with_name(path.name+f'.{os.getpid()}.{uuid.uuid4().hex}.partial')
+    with partial.open('xb') as stream:
+        partial.chmod(0o600)
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(partial, path)
+    if path.is_symlink() or digest_file(path) != expected:
+        raise ValueError('published trait dictionary changed during verification')
+    return dict(file=path.name, sha256=expected, bytes=len(payload), repaired=bool(repaired))
+
+
 def save_model_store(model, destination, *, sample_rows, fit_metadata, spa_model=None):
     """Save fitted arrays as mmap-compatible NPY, retaining an FP64 SPA sidecar.
 
@@ -62,7 +119,9 @@ def save_model_store(model, destination, *, sample_rows, fit_metadata, spa_model
     if destination.exists():
         raise FileExistsError('immutable fitted model store already exists')
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temp = destination.with_name(destination.name + f'.{os.getpid()}.partial')
+    # An interrupted notebook call can retry in the same process. Give each
+    # unpublished attempt its own directory while retaining earlier partials.
+    temp = destination.with_name(destination.name + f'.{os.getpid()}.{uuid.uuid4().hex}.partial')
     temp.mkdir()
     def save_state(current, directory, normal):
         directory.mkdir(exist_ok=True)

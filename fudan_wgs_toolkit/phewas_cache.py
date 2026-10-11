@@ -10,8 +10,67 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 
 import numpy as np
+
+
+_GENOTYPE_STREAM_NAMES = ("data.bin", "headers.bin", "counts.bin")
+_STREAM_STAT_FIELDS = ("dev", "ino", "size", "mtime_ns", "ctime_ns")
+
+
+def _stream_stat(path):
+    """A regular-file identity without reading the potentially large stream."""
+    try:
+        value = Path(path).stat()
+    except OSError as error:
+        raise ValueError("genotype stream is missing or inaccessible") from error
+    if not stat.S_ISREG(value.st_mode):
+        raise ValueError("genotype stream must be a regular file")
+    return dict(dev=value.st_dev, ino=value.st_ino, size=value.st_size,
+                mtime_ns=value.st_mtime_ns, ctime_ns=value.st_ctime_ns)
+
+
+def _stream_bindings(entries):
+    """Bind all three immutable genotype streams across successive attempts.
+
+    Logical absolute paths preserve deliberate cache links. ``stat`` follows
+    their targets, so replacing a stream or retargeting a link changes this
+    binding even if the new file has the same byte length. These inexpensive
+    identities complement the container manifest and per-frame checksums;
+    they do not reread or hash chromosome-sized data during continuation.
+    """
+    bindings = {}
+    for entry in entries:
+        directory = entry.get("container_directory")
+        if not isinstance(directory, (str, os.PathLike)) or not str(directory):
+            raise ValueError("genotype stream bindings require a container directory")
+        for name in _GENOTYPE_STREAM_NAMES:
+            path = os.path.abspath(Path(directory) / name)
+            bindings[path] = _stream_stat(path)
+    if not bindings:
+        raise ValueError("genotype stream bindings require at least one container")
+    return dict(sorted(bindings.items()))
+
+
+def _verify_stream_bindings(bindings):
+    """Reject missing, replaced or changed streams before accepting reuse."""
+    if not isinstance(bindings, dict) or not bindings:
+        raise ValueError("genotype stream bindings are missing")
+    expected_fields = set(_STREAM_STAT_FIELDS)
+    directories = {}
+    for path, expected in bindings.items():
+        if (not isinstance(path, str) or not Path(path).is_absolute()
+                or Path(path).name not in _GENOTYPE_STREAM_NAMES
+                or not isinstance(expected, dict) or set(expected) != expected_fields
+                or any(type(expected[key]) is not int for key in expected_fields)
+                or any(expected[key] < 0 for key in ("dev", "ino", "size"))):
+            raise ValueError("genotype stream binding has invalid identity fields")
+        directories.setdefault(str(Path(path).parent), set()).add(Path(path).name)
+        if _stream_stat(path) != expected:
+            raise ValueError("genotype stream changed after the analysis binding")
+    if any(names != set(_GENOTYPE_STREAM_NAMES) for names in directories.values()):
+        raise ValueError("genotype stream binding must include all three container streams")
 
 
 def _cache_path(root, value):
@@ -128,4 +187,5 @@ def _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_thresh
         long_mask_rank=long_mask_rank, long_mask_seed=seed, wrapper_semantics="base", variant_type="variant")
 
 
-__all__ = ["_dataset", "_cache_path", "_analysis_defaults"]
+__all__ = ["_dataset", "_cache_path", "_analysis_defaults",
+           "_stream_bindings", "_verify_stream_bindings"]

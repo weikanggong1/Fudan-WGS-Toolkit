@@ -253,13 +253,20 @@ def test_explicit_panel_and_too_large_dense_matrix_rejected_before_allocation():
 
 @pytest.mark.parametrize("kwargs", [
     {"variant_tile_size": True}, {"variant_tile_size": 4095},
-    {"panel_variant_size": 2048}, {"memory_limit_gib": 41},
+    {"panel_variant_size": 2048}, {"memory_limit_gib": 0},
     {"memory_limit_gib": float("nan")}, {"allocated_bytes": -1},
     {"free_bytes": -1},
 ])
 def test_invalid_cache_options_have_no_implicit_fallback(kwargs):
     with pytest.raises(ValueError):
         plan_cached_workspace(33, 100, 3, **kwargs)
+
+
+def test_explicit_large_gpu_workspace_budget_has_no_fixed_cap():
+    result = plan_cached_workspace(33, 100, 3, memory_limit_gib=41)
+    smaller = plan_cached_workspace(33, 100, 3, memory_limit_gib=20)
+    assert result['available_new_bytes']-smaller['available_new_bytes'] == 21*2**30
+    assert result['full_resident']
 
 
 def test_cached_backend_rejects_cpu_fp64_and_unaccepted_symmetry():

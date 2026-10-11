@@ -295,7 +295,7 @@ def _descriptor_groups(repository):
 
 
 def _thin_pipeline(gds, model, rows, options, configuration, structural=None):
-    """Use mature pipeline kernels without repeatedly rebuilding large eid maps.
+    """Use mature pipeline kernels without repeatedly rebuilding large sample maps.
 
     The broker has range/uniqueness-bound ``rows`` and the repository model is
     independently verified below. Single-model row order is retained directly.
@@ -572,6 +572,40 @@ def _gene_workspace_scope(repository, broker, required):
             yield workspace
 
 
+def _trait_tiles(group, trait_batch_size):
+    descriptors = group['descriptors']
+    for begin in range(0, len(descriptors), trait_batch_size):
+        yield descriptors[begin:begin+trait_batch_size]
+
+
+def _record_checkpoint_rows(report, receipt):
+    kind = receipt['kind']
+    report['association_rows'][kind] += receipt['rows']
+    for trait, rows in receipt['trait_rows'].items():
+        report['trait_rows'][int(trait)][kind] += rows
+    report['binary_spa_selected'] += receipt.get('binary_spa_selected', 0)
+    report['binary_spa_failed'] += receipt.get('binary_spa_failed', 0)
+    report['resumed_checkpoint_blocks'] = report.get('resumed_checkpoint_blocks', 0)+1
+
+
+def _pending_gene_groups(groups, writer, report, chromosome, job_index, kind, trait_batch_size):
+    if not getattr(writer, 'checkpoint_tiles', False):
+        return groups
+    pending = []
+    for group in groups:
+        descriptors = []
+        for tile in _trait_tiles(group, trait_batch_size):
+            receipt = writer.checkpoint_tile(kind, chromosome, job_index,
+                [d['trait_index'] for d in tile])
+            if receipt is None:
+                descriptors.extend(tile)
+            else:
+                _record_checkpoint_rows(report, receipt)
+        if descriptors:
+            pending.append(dict(group, descriptors=descriptors))
+    return pending
+
+
 def _batched_single(groups, repository, broker, metadata, options, configuration, arguments,
                     writer, report, verified, chromosome, job_index, trait_batch_size, structural):
     first = structural
@@ -596,17 +630,51 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
     progress = configuration.get('_batched_emit')
     frame_interval = configuration.get('single_progress_frame_interval', 100)
     seconds_interval = configuration.get('single_progress_seconds', 60.)
+    checkpoints = bool(getattr(writer, 'checkpoint_tiles', False))
     from ..cache_runtime.single_batches import _physical_requests
-    for request in _physical_requests(broker, selected, configuration.get('individual_genotype_block_size', 1024)):
+    for block_index, request in enumerate(_physical_requests(
+            broker, selected, configuration.get('individual_genotype_block_size', 1024))):
+        block_identity = hashlib.sha256(np.asarray(request, dtype='<i8').tobytes()).hexdigest()
+        cached_groups = []
+        all_complete = checkpoints
+        for gi, group in enumerate(groups):
+            cached = []
+            for tile in _trait_tiles(group, trait_batch_size):
+                receipt = (writer.checkpoint_tile('individual', chromosome, job_index,
+                    [d['trait_index'] for d in tile], block_index=block_index,
+                    block_identity=block_identity, ordinal_before=ordinals[gi]) if checkpoints else None)
+                cached.append(receipt)
+                if receipt is not None:
+                    _record_checkpoint_rows(report, receipt)
+                else:
+                    all_complete = False
+            cached_groups.append(cached)
+        if all_complete:
+            for gi, cached in enumerate(cached_groups):
+                after = {r['ordinal_after'] for r in cached}
+                if len(after) != 1:
+                    raise ValueError('Single checkpoint cohort ordinal advancement differs across trait tiles')
+                ordinals[gi] = after.pop()
+            report['resumed_single_physical_requests'] = report.get('resumed_single_physical_requests', 0)+1
+            continue
         raw = broker.read_states(request, minimum_mac_bound=mac)
         for gi, group in enumerate(groups):
+            cached = cached_groups[gi]
+            if checkpoints and all(r is not None for r in cached):
+                after = {r['ordinal_after'] for r in cached}
+                if len(after) != 1:
+                    raise ValueError('Single checkpoint cohort ordinal advancement differs across trait tiles')
+                ordinals[gi] = after.pop()
+                continue
             axis = broker.reader_view(group['rows'])
             rows = axis._axis.samples
             block = broker.trait_block(raw, rows, minimum_mac=mac)
             prepared = None
+            ordinal_before = ordinals[gi]
             try:
-                for begin in range(0, len(group['descriptors']), trait_batch_size):
-                    tile = group['descriptors'][begin:begin+trait_batch_size]
+                for tile_index, tile in enumerate(_trait_tiles(group, trait_batch_size)):
+                    if cached[tile_index] is not None:
+                        continue
                     with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
                         pipelines = []
                         for model, descriptor in zip(models, tile):
@@ -615,26 +683,38 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                         if len(models) != len(tile):
                             raise ValueError('repository acquire must retain the requested model order/count')
                         if prepared is None:
-                            state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinals[gi], mac_cutoff=mac)
-                            if state is None:
-                                break
-                            prepared = pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac)
-                            if prepared is None:
-                                break
-                            prepared.pop('model')
-                        broker._guard(pipelines[0]._workspace_estimate(models[0], prepared['genotype'].shape[1], individual=True)
-                                      + 4*models[0].n*len(models))
-                        def correction(index, model, genotype, score, variance):
-                            from ..binary import binary_single_phewas
-                            return binary_single_phewas(model, genotype,
-                                spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
-                                normal_score=score, normal_variance=variance,
-                                p_filter_cutoff=options.p_filter_cutoff,
-                                tol=options.spa_tol, max_iter=options.spa_max_iter)
-                        outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
-                            mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
+                            state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinal_before, mac_cutoff=mac)
+                            prepared = (None if state is None else
+                                pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac))
+                            if prepared is not None:
+                                prepared.pop('model')
+                            for receipt in cached:
+                                if receipt is not None and receipt['ordinal_after'] != ordinals[gi]:
+                                    raise ValueError('Single checkpoint ordinal differs from the current verified genetic block')
+                        if prepared is None:
+                            outputs = [[] for _ in tile]
+                        else:
+                            broker._guard(pipelines[0]._workspace_estimate(models[0], prepared['genotype'].shape[1], individual=True)
+                                          + 4*models[0].n*len(models))
+                            def correction(index, model, genotype, score, variance):
+                                from ..binary import binary_single_phewas
+                                return binary_single_phewas(model, genotype,
+                                    spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
+                                    normal_score=score, normal_variance=variance,
+                                    p_filter_cutoff=options.p_filter_cutoff,
+                                    tol=options.spa_tol, max_iter=options.spa_max_iter)
+                            outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
+                                mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
+                        if checkpoints:
+                            writer.write_tile('individual', chromosome,
+                                [(d['trait_index'], result) for d, result in zip(tile, outputs)],
+                                job_index=job_index, block_index=block_index,
+                                block_identity=block_identity, ordinal_before=ordinal_before,
+                                ordinal_after=ordinals[gi])
+                        else:
+                            for descriptor, result in zip(tile, outputs):
+                                writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
                         for descriptor, result in zip(tile, outputs):
-                            writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
                             report['association_rows']['individual'] += len(result)
                             report['trait_rows'][descriptor['trait_index']]['individual'] += len(result)
                             if descriptor['family'] == 'binomial':
@@ -678,15 +758,19 @@ def _job_host_memory_scope(configuration, factory, *, kind, chromosome_index, jo
 
 class _StagedGeneWriter:
     """Keep one already assembled gene job private until preparation succeeds."""
-    def __init__(self):
+    def __init__(self, writer=None):
         self.pending = []
+        self.checkpoint_tiles = bool(getattr(writer, 'checkpoint_tiles', False))
 
     def write(self, *args, **kwargs):
-        self.pending.append((args, kwargs))
+        self.pending.append(('write', args, kwargs))
+
+    def write_tile(self, *args, **kwargs):
+        self.pending.append(('write_tile', args, kwargs))
 
     def publish(self, writer):
-        for args, kwargs in self.pending:
-            writer.write(*args, **kwargs)
+        for method, args, kwargs in self.pending:
+            getattr(writer, method)(*args, **kwargs)
         self.pending.clear()
 
 
@@ -712,7 +796,7 @@ def _execute_batched_job(attempt, *, configuration, host_memory_lease_factory,
     baseline = _scientific_counter_snapshot(report)
     count = 0
     while True:
-        staged = _StagedGeneWriter()
+        staged = _StagedGeneWriter(writer)
         deferred = None
         try:
             with _job_host_memory_scope(configuration, host_memory_lease_factory, kind=kind,
@@ -766,6 +850,7 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                   writer, report, verified, chromosome, job_index, trait_batch_size, structural, kind):
     descriptors = [descriptor for group in groups for descriptor in group['descriptors']]
     positions = {descriptor['trait_index']: i for i, descriptor in enumerate(descriptors)}
+    binary_counts = {d['trait_index']: dict(selected=0, failed=0) for d in descriptors}
     selector = _thin_pipeline(structural.genotype, structural.models[0], structural.union_rows,
                               options, configuration, structural)
     selector.models = [SimpleNamespace(use_spa=d['family'] == 'binomial') for d in descriptors]
@@ -841,8 +926,12 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                             rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
                                             p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
                                             max_iter=options.spa_max_iter, return_diagnostics=True)
-                                        report['binary_spa_selected'] += int(diagnostic['spa_selected'].sum())
-                                        report['binary_spa_failed'] += int(diagnostic['spa'].failed.sum())
+                                        selected = int(diagnostic['spa_selected'].sum())
+                                        failed = int(diagnostic['spa'].failed.sum())
+                                        report['binary_spa_selected'] += selected
+                                        report['binary_spa_failed'] += failed
+                                        binary_counts[descriptor['trait_index']]['selected'] += selected
+                                        binary_counts[descriptor['trait_index']]['failed'] += failed
                                         if diagnostic['variant_covariance_constructed']:
                                             raise RuntimeError('binary burden path must not construct a variant covariance')
                                     else:
@@ -885,10 +974,23 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
             result = {category: rows[number] for category, rows in outputs.items()}
         else:
             result = outputs[number]
-        writer.write(kind, descriptor['trait_index'], chromosome, result, job_index=job_index)
+        if not getattr(writer, 'checkpoint_tiles', False):
+            writer.write(kind, descriptor['trait_index'], chromosome, result, job_index=job_index)
         count = sum(len(rows) for rows in result.values()) if isinstance(result, dict) else len(result)
         report['association_rows'][kind] += count
         report['trait_rows'][descriptor['trait_index']][kind] += count
+    if getattr(writer, 'checkpoint_tiles', False):
+        for group in groups:
+            for tile in _trait_tiles(group, trait_batch_size):
+                values = []
+                for descriptor in tile:
+                    number = positions[descriptor['trait_index']]
+                    result = ({category: rows[number] for category, rows in outputs.items()}
+                              if isinstance(outputs, dict) else outputs[number])
+                    values.append((descriptor['trait_index'], result))
+                writer.write_tile(kind, chromosome, values, job_index=job_index,
+                    binary_counts={name: sum(binary_counts[d['trait_index']][name] for d in tile)
+                                   for name in ('selected', 'failed')})
 
 
 def run_batched_configuration(configuration, *, model_repository, reader_factory, writer,
@@ -1027,9 +1129,15 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                                 if emit:
                                     emit(dict(event='started', chromosome_index=ci, job_index=ji, kind=kind))
                                 function = _batched_single if kind == 'individual' else _batched_gene
+                                checkpoint_job_index = job.get('checkpoint_job_index', ji)
+                                pending_groups = (groups if kind == 'individual' else
+                                    _pending_gene_groups(groups, writer, report, reference['name'],
+                                                         checkpoint_job_index, kind, trait_batch_size))
                                 def attempt(job_configuration, current_writer):
-                                    args = (groups, model_repository, broker, metadata, options, job_configuration, arguments,
-                                        current_writer, report, verified, reference['name'], ji, trait_batch_size, structural)
+                                    if not pending_groups:
+                                        return
+                                    args = (pending_groups, model_repository, broker, metadata, options, job_configuration, arguments,
+                                        current_writer, report, verified, reference['name'], checkpoint_job_index, trait_batch_size, structural)
                                     if kind == 'individual':
                                         function(*args)
                                     else:

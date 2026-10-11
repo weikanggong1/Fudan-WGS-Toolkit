@@ -8,6 +8,7 @@ contain private participant/phenotype metadata and belong in a private folder.
 from __future__ import annotations
 
 import collections
+from collections.abc import Mapping
 import csv
 import hashlib
 import json
@@ -70,9 +71,16 @@ def _json(path, value):
 def _header(path):
     with Path(path).open(newline="", encoding="utf-8-sig") as stream:
         value = next(csv.reader(stream), None)
-    if not value or value[0] != "eid" or len(value) != len(set(value)):
-        raise ValueError("CSV requires a unique header and first column eid")
+    if not value or any(not name for name in value) or len(value) != len(set(value)):
+        raise ValueError("CSV requires a unique nonempty header")
+    if ("FID" in value or "IID" in value) and value[:2] != ["FID", "IID"]:
+        raise ValueError("Numeric-axis CSV identity columns must start with FID,IID")
     return value
+
+
+def _identity_width(header):
+    """New CSVs use FID/IID; old numeric single-ID exports stay readable."""
+    return 2 if header[:2] == ["FID", "IID"] else 1
 
 
 def _ids(values):
@@ -116,11 +124,38 @@ def _source_manifest(path, output, digest_key):
     return value, value[digest_key]
 
 
-def _metadata(profiles, names, covariate_names, dictionary=None):
+def _metadata(profiles, names, covariate_names, dictionary=None, *,
+              phenotype_families="auto", phenotype_covariates=None):
+    """Resolve only caller-declared trait options; omitted entries stay generic."""
+    if phenotype_families == "auto" or phenotype_families is None:
+        families = {}
+    elif isinstance(phenotype_families, Mapping):
+        families = dict(phenotype_families)
+    else:
+        raise ValueError("phenotype_families must be auto or a trait-to-family mapping")
+    if phenotype_covariates is None:
+        selected_covariates = {}
+    elif isinstance(phenotype_covariates, Mapping):
+        selected_covariates = dict(phenotype_covariates)
+    else:
+        raise ValueError("phenotype_covariates must be a trait-to-column-list mapping")
+    if (set(families) | set(selected_covariates)) - set(names):
+        raise ValueError("trait options name a column absent from the phenotype CSV")
+    for name, family in families.items():
+        if family not in ("auto", "gaussian", "binomial", "binary"):
+            raise ValueError("phenotype families must be auto, gaussian or binomial")
+        families[name] = None if family == "auto" else ("binomial" if family == "binary" else family)
+    for name, columns in selected_covariates.items():
+        if (not isinstance(columns, (list, tuple)) or any(not isinstance(c, str) for c in columns)
+                or len(columns) != len(set(columns)) or not set(columns) <= set(covariate_names)):
+            raise ValueError("selected covariates must be distinct column names from the covariate CSV")
+        selected_covariates[name] = list(columns)
+    if profiles is not None and (families or selected_covariates):
+        raise ValueError("explicit profile files cannot be combined with trait option mappings")
     if profiles is None:
-        records = [{"phenotype": name, "model_family": None,
-                    "profile": "all_covariates_generic",
-                    "covariate_columns": ";".join(covariate_names)} for name in names]
+        records = [{"phenotype": name, "model_family": families.get(name),
+                    "profile": "explicit_trait_covariates" if name in selected_covariates else "all_covariates_generic",
+                    "covariate_columns": ";".join(selected_covariates.get(name, covariate_names))} for name in names]
     else:
         with Path(profiles).open(newline="", encoding="utf-8-sig") as stream:
             reader = csv.DictReader(stream)
@@ -137,8 +172,9 @@ def _metadata(profiles, names, covariate_names, dictionary=None):
         row = by_name[name]
         if row["model_family"] not in ("gaussian", "binomial") and profiles is not None:
             raise ValueError("Unsupported phenotype model family")
-        columns = row["covariate_columns"].split(";")
-        if not columns or len(columns) != len(set(columns)) or not set(columns) <= set(covariate_names):
+        columns = row["covariate_columns"].split(";") if row["covariate_columns"] else []
+        if ((not columns and profiles is not None) or len(columns) != len(set(columns))
+                or not set(columns) <= set(covariate_names)):
             raise ValueError("Invalid selected covariate columns")
         indices = [covariate_names.index(column) for column in columns]
         key = tuple(indices)
@@ -164,8 +200,9 @@ def _parse(path, cache_ids, target, *, families=None, infer_families=False,
            chunk_rows=8192, emit=None, phase=None):
     import pandas as pd  # Existing project dependency; only needed for preparation.
     header = _header(path)
-    dtypes = {name: np.float64 for name in header[1:]}
-    dtypes["eid"] = str
+    identity_width = _identity_width(header)
+    dtypes = {name: np.float64 for name in header[identity_width:]}
+    dtypes.update({name: str for name in header[:identity_width]})
     present = np.zeros(len(cache_ids), dtype=bool)
     seen = set()
     lookup_order = np.argsort(cache_ids)
@@ -180,11 +217,13 @@ def _parse(path, cache_ids, target, *, families=None, infer_families=False,
         reader = pd.read_csv(stream, dtype=dtypes, chunksize=chunk_rows,
                              float_precision="round_trip", encoding="utf-8-sig")
         for chunk in reader:
-            chunk_ids = _ids(chunk["eid"].to_numpy(dtype=str))
+            if identity_width == 2 and not np.all(chunk["FID"].to_numpy(dtype=str) == "0"):
+                raise ValueError("Numeric-axis caches require FID='0'; family identities cannot be discarded")
+            chunk_ids = _ids(chunk[header[identity_width - 1]].to_numpy(dtype=str))
             if len(np.unique(chunk_ids)) != len(chunk_ids) or any(int(v) in seen for v in chunk_ids):
                 raise ValueError("CSV sample IDs must be globally unique")
             seen.update(map(int, chunk_ids))
-            numeric = chunk.iloc[:, 1:].to_numpy(dtype=np.float64)
+            numeric = chunk.iloc[:, identity_width:].to_numpy(dtype=np.float64)
             if numeric.shape != (len(chunk_ids), target.shape[1]) or np.any(np.isinf(numeric)):
                 raise ValueError("Invalid numeric CSV shape or infinite value")
             if infer_families:
@@ -223,7 +262,8 @@ def _release(array):
 
 def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profiles=None,
                          phenotype_dictionary=None, phenotype_manifest=None,
-                         covariate_manifest=None, chunk_rows=8192, emit=None):
+                         covariate_manifest=None, chunk_rows=8192, emit=None,
+                         phenotype_families="auto", phenotype_covariates=None):
     """Create immutable raw float64 arrays in cache sample order.
 
     ``output`` must not exist.  No intercept, RINT, residualization, ancestry
@@ -245,11 +285,14 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
     axis = _ids(np.load(sample_ids, allow_pickle=False))
     if len(axis) == 0 or len(np.unique(axis)) != len(axis):
         raise ValueError("Cache sample axis is empty or contains duplicates")
-    phenotype_names, covariate_names = _header(phenotypes)[1:], _header(covariates)[1:]
-    if not phenotype_names or not covariate_names:
-        raise ValueError("Both CSV files must have numeric columns")
+    phenotype_header, covariate_header = _header(phenotypes), _header(covariates)
+    phenotype_names = phenotype_header[_identity_width(phenotype_header):]
+    covariate_names = covariate_header[_identity_width(covariate_header):]
+    if not phenotype_names:
+        raise ValueError("The phenotype CSV must have at least one numeric column")
     traits, profile_indices, dictionary = _metadata(profiles, phenotype_names, covariate_names,
-                                                    phenotype_dictionary)
+        phenotype_dictionary, phenotype_families=phenotype_families,
+        phenotype_covariates=phenotype_covariates)
     pm, expected_p = _source_manifest(phenotype_manifest, phenotypes, "output_sha256")
     cm, expected_c = _source_manifest(covariate_manifest, covariates, "covariate_output_sha256")
     sources = {"phenotypes": _binding(phenotypes, expected_p),
@@ -273,15 +316,17 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                                       shape=(len(axis), len(covariate_names)))
         y[:] = np.nan
         x[:] = np.nan
+        infer_families = any(trait["family"] is None for trait in traits)
         p_parse, p_present = _parse(phenotypes, axis, y, families=[r["family"] for r in traits],
-                                   infer_families=profiles is None,
+                                   infer_families=infer_families,
                                    chunk_rows=chunk_rows, emit=emit, phase="phenotypes")
-        if profiles is None:
+        if infer_families:
             for trait, family in zip(traits, p_parse.pop("inferred_families")):
-                trait["family"] = family
-            if dictionary is not None and any(row.get("model_family") != trait["family"]
-                                              for row, trait in zip(dictionary, traits)):
-                raise ValueError("Phenotype dictionary family differs from inferred numeric family")
+                if trait["family"] is None:
+                    trait["family"] = family
+        if profiles is None and dictionary is not None and any(row.get("model_family") != trait["family"]
+                                          for row, trait in zip(dictionary, traits)):
+            raise ValueError("Phenotype dictionary family differs from the assigned numeric family")
         c_parse, c_present = _parse(covariates, axis, x, chunk_rows=chunk_rows,
                                    emit=emit, phase="covariates")
         for parsed, original in ((p_parse, pm), (c_parse, cm)):
@@ -314,8 +359,11 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         metadata = {"traits": traits, "covariate_names": covariate_names,
                     "profile_covariate_indices": profile_indices,
                     "phenotype_dictionary": dictionary, "quality": trait_counts,
-                    "profile_scope": "all_covariates_generic" if profiles is None else "explicit_profiles",
-                    "family_assignment": "inferred_exact_01_from_all_source_rows" if profiles is None else "declared_by_profile"}
+                    "profile_scope": ("explicit_profiles" if profiles is not None else
+                        "explicit_trait_covariates" if phenotype_covariates else "all_covariates_generic"),
+                    "family_assignment": ("declared_by_profile" if profiles is not None else
+                        "auto_with_explicit_overrides" if isinstance(phenotype_families, Mapping) and phenotype_families else
+                        "inferred_exact_01_from_all_source_rows")}
         _json(output / "traits.private.json", metadata)
         artifacts = {}
         for path in sorted(output.glob("*.npy")):
@@ -350,6 +398,10 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                     "array_dtype": "float64", "array_order": "C", "sample_order": "input_cache_axis",
                     "cohort_scope": "all_supplied_cache_samples; analysis cohort not locked",
                     "sources": sources, "artifacts": artifacts, "anonymous_summary": anonymous}
+        if profiles is None:
+            manifest["trait_options"] = {
+                "phenotype_families": dict(phenotype_families) if isinstance(phenotype_families, Mapping) else "auto",
+                "phenotype_covariates": {name: list(columns) for name, columns in (phenotype_covariates or {}).items()}}
         _json(output / "manifest.private.json", manifest)
         _json(output / "summary.anonymous.json", anonymous)
         _json(output / "status.anonymous.json", {"status": "complete",

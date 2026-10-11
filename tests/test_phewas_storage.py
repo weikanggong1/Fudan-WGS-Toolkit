@@ -56,6 +56,49 @@ def test_gaussian_store_and_nested_repository_preserve_projection(tmp_path):
     assert repository.pinned[(0, 'cpu')] == 0
 
 
+def test_interrupted_model_store_retries_in_same_process_without_overwriting_partial_or_complete(tmp_path, monkeypatch):
+    """Inject interruption during array publication, then retry the same PID."""
+    import os
+    import fudan_wgs_toolkit.phewas_storage as storage
+    n = 20
+    model = fit_gaussian_null(np.sin(np.arange(n)), sample_ids=np.arange(n).astype(str),
+        covariates=np.column_stack((np.ones(n), np.linspace(-1, 1, n))),
+        device='cpu', matmul_mode='fp64')
+    destination = tmp_path/'model'
+    original_save, calls, pid = storage.np.save, 0, os.getpid()
+    def interrupted_save(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError('injected array-write interruption')
+        return original_save(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(storage.np, 'save', interrupted_save)
+        with pytest.raises(OSError, match='injected array-write interruption'):
+            save_model_store(model, destination, sample_rows=np.arange(n), fit_metadata={})
+    assert not destination.exists()
+    partials = list(tmp_path.glob(f'model.{pid}.*.partial'))
+    assert len(partials) == 1
+    interrupted_bytes = {p.relative_to(partials[0]): p.read_bytes()
+                         for p in partials[0].rglob('*') if p.is_file()}
+    assert interrupted_bytes
+    entry = save_model_store(model, destination, sample_rows=np.arange(n), fit_metadata={})
+    assert os.getpid() == pid
+    assert {p.relative_to(partials[0]): p.read_bytes()
+            for p in partials[0].rglob('*') if p.is_file()} == interrupted_bytes
+    restored = load_model_store(destination)
+    g = torch.tensor((np.arange(n) % 3)[:, None], dtype=torch.float64)
+    for actual, expected in zip(restored.score_covariance(g), model.score_covariance(g)):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    before = {p.relative_to(destination): digest_file(p)
+              for p in destination.rglob('*') if p.is_file()}
+    with pytest.raises(FileExistsError, match='immutable fitted model store'):
+        save_model_store(model, destination, sample_rows=np.arange(n), fit_metadata={'retry': True})
+    assert {p.relative_to(destination): digest_file(p)
+            for p in destination.rglob('*') if p.is_file()} == before
+    assert entry['sha256'] == digest_file(destination/'model.private.json')
+
+
 def test_csv_shards_cover_all_traits_fields_and_significance_levels(tmp_path):
     writer = StreamingCSVWriter(tmp_path, max_rows_per_shard=3, minimum_free_bytes=0)
     for trait in range(5):

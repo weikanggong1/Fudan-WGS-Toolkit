@@ -202,7 +202,7 @@ def test_corrupt_ledger_cannot_reduce_the_shared_future_budget(host,field,value)
 
 
 def _competing_child(directory,connection,hold):
-    # Forked contract is CPU-only and uses real PID/start/boot/fcntl ownership.
+    # Spawned contract is CPU-only and uses real PID/start/boot/fcntl ownership.
     resources.read_host_memory=lambda:dict(current_bytes=0,limit_bytes=2*G,
         inactive_file_bytes=0,effective_current_bytes=0,scope="cgroup_v2")
     gate=resources.HostMemoryGate(directory,host_limit_gib=2,reserve_gib=.125)
@@ -219,7 +219,7 @@ def _competing_child(directory,connection,hold):
 
 @pytest.mark.skipif(not hasattr(os,"fork"),reason="Linux process ownership and flock required")
 def test_real_cross_process_lease_cannot_double_admit_and_reaps_dead_owner(tmp_path):
-    context=mp.get_context("fork")
+    context=mp.get_context("spawn")
     first_rx,first_tx=context.Pipe(duplex=False)
     second_rx,second_tx=context.Pipe(duplex=False)
     third_rx,third_tx=context.Pipe(duplex=False)
@@ -227,16 +227,17 @@ def test_real_cross_process_lease_cannot_double_admit_and_reaps_dead_owner(tmp_p
     second=context.Process(target=_competing_child,args=(str(tmp_path),second_tx,False))
     try:
         first.start()
-        assert first_rx.poll(10)
+        # Spawn imports the numerical runtime on a shared filesystem.
+        assert first_rx.poll(60)
         assert first_rx.recv()=="admitted"
-        second.start();second.join(10)
+        second.start();second.join(60)
         assert not second.is_alive() and second.exitcode==0
         assert second_rx.poll(2) and second_rx.recv()=="deferred"
         # Kill only the disposable child created by this test; its old lease
         # remains on disk, then is reaped using exact process identity.
         first.kill();first.join(5)
         third=context.Process(target=_competing_child,args=(str(tmp_path),third_tx,False))
-        third.start();third.join(10)
+        third.start();third.join(60)
         assert not third.is_alive() and third.exitcode==0
         assert third_rx.poll(2) and third_rx.recv()=="admitted"
     finally:

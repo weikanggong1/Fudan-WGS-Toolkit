@@ -11,7 +11,8 @@ def test_all_trait_schedule_restores_published_ptv_categories_from_legacy_catalo
              category='all_categories',include_ptv=False),
         dict(kind='noncoding',gene_name='GENE_EXAMPLE',category='all_categories'),
         dict(kind='ncrna',gene_name='GENE_RNA',start=2,end=9)]))
-    entry=dict(name='1',gene_catalog=str(catalog),container_directory='cache',metadata_directory='metadata')
+    entry=dict(name='1',gene_catalog=str(catalog),container_directory='cache',metadata_directory='metadata',
+               _maximum_position=10)
     monkeypatch.setattr('fudan_wgs_toolkit.phewas_run._dataset',lambda *args:
         (tmp_path,tmp_path/'cache_dataset.json',dict(annotation_catalog={}),[entry],np.arange(4)))
     config=build_configuration(tmp_path)

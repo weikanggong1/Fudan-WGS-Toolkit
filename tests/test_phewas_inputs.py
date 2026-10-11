@@ -23,11 +23,11 @@ def inputs(tmp_path, *, binary_bad=False, duplicate=False):
     ids = tmp_path / "axis.npy"
     np.save(ids, [1000003, 1000001, 1000002, 1000004], allow_pickle=False)
     p, c, profiles = [tmp_path / name for name in ("p.csv", "c.csv", "profiles.csv")]
-    table(p, [["eid", "continuous", "binary"],
+    table(p, [["sample_id", "continuous", "binary"],
               [1000001, "0.10000000000000002", 1],
               [1000002, "", 0], [1000003, 3, 2 if binary_bad else 1],
               [1000001 if duplicate else 1000005, 5, 0]])
-    table(c, [["eid", "age", "extra"], [1000002, 20, 2],
+    table(c, [["sample_id", "age", "extra"], [1000002, 20, 2],
               [1000003, 30, ""], [1000001, 10, 1], [1000005, 50, 5]])
     # Deliberately different profile order: align by exact phenotype label.
     table(profiles, [["phenotype", "model_family", "profile", "covariate_columns"],
@@ -120,7 +120,7 @@ def test_optional_profiles_use_all_covariates_and_single_parse_family_inference(
 def test_optional_profiles_inference_covers_noncache_rows_and_empty_columns(tmp_path):
     args = inputs(tmp_path)
     args["profiles"] = None
-    table(args["phenotypes"], [["eid", "only_binary_in_cache", "empty"],
+    table(args["phenotypes"], [["sample_id", "only_binary_in_cache", "empty"],
               [1000001, 0, ""], [1000002, 1, ""], [1000005, 2, ""]])
     summary = module.prepare_phewas_inputs(**args)
     assert summary["families"]["gaussian"]["traits"] == 2
@@ -129,3 +129,42 @@ def test_optional_profiles_inference_covers_noncache_rows_and_empty_columns(tmp_
     assert loaded.trait(0)["family"] == "gaussian"
     assert loaded.trait(1)["y_raw"].size == 0
     loaded.close()
+
+
+def test_numeric_cache_standard_pairs_preserve_covariates_and_trait_rows(tmp_path):
+    args = inputs(tmp_path)
+    for name in ('phenotypes', 'covariates'):
+        with args[name].open(newline='') as stream:
+            rows = list(csv.reader(stream))
+        table(args[name], [['FID', 'IID', *rows[0][1:]],
+                           *[['0', row[0], *row[1:]] for row in rows[1:]]])
+    module.prepare_phewas_inputs(**args)
+    loaded = module.PhewasInputs(args['output'])
+    assert loaded.trait(0)['sample_indices'].tolist() == [0, 1]
+    assert loaded.trait(1)['sample_indices'].tolist() == [1, 2]
+    assert loaded.trait(0)['covariate_names'] == ['age']
+    loaded.close()
+
+
+def test_identity_only_covariate_file_supports_intercept_only_models(tmp_path):
+    args = inputs(tmp_path)
+    args['profiles'] = None
+    table(args['covariates'], [['FID', 'IID'], ['0', '1000001'], ['0', '1000002'],
+                              ['0', '1000003']])
+    result = module.prepare_phewas_inputs(**args)
+    assert result['covariate_count'] == 0
+    loaded = module.PhewasInputs(args['output'])
+    assert loaded.trait(0)['sample_indices'].tolist() == [0, 1]
+    assert loaded.trait(1)['sample_indices'].tolist() == [0, 1, 2]
+    assert loaded.trait(1)['covariates'].shape == (3, 0)
+    assert loaded.trait(1)['covariate_names'] == []
+    loaded.close()
+
+
+@pytest.mark.parametrize('fid,iid', [('family_a', '1000001'), ('0', '01000001')])
+def test_numeric_axis_never_discards_family_or_leading_zero_identity(tmp_path, fid, iid):
+    args = inputs(tmp_path)
+    table(args['phenotypes'], [['FID', 'IID', 'continuous', 'binary'], [fid, iid, 3, 1]])
+    with pytest.raises(ValueError):
+        module.prepare_phewas_inputs(**args)
+    assert not (args['output']/'manifest.private.json').exists()
