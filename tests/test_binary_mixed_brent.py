@@ -76,12 +76,12 @@ def test_objective_never_factorizes_a_samples_by_samples_matrix(monkeypatch):
 
     def guarded(matrix, *args, **kwargs):
         seen.append(tuple(matrix.shape))
-        assert matrix.shape != (len(working), len(working))
+        assert matrix.shape[-2:] != (len(working), len(working))
         return original(matrix, *args, **kwargs)
 
     monkeypatch.setattr(torch.linalg, "cholesky", guarded)
     binary_null._block_binomial_reml(kinship, working, weights, x, .5)
-    assert (2, 2) in seen and (3, 3) in seen
+    assert any(shape[-2:] == (2, 2) for shape in seen) and (3, 3) in seen
 
 
 def test_brent_visits_official_ten_log_intervals_and_preserves_kinship(monkeypatch):

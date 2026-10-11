@@ -7,6 +7,7 @@ and disk-cache readers are separate; the sample axis returned here is explicit.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import ExitStack
 import copy
 import hashlib
 import json
@@ -167,7 +168,26 @@ def continuous_paper_transform(phenotype, covariates, *, device="cpu"):
 def prepare_phewas_model(phenotype, sample_ids, covariates, *, family="auto",
                           kinship=None, continuous_transform="paper",
                           device="cpu", association_mode="tf32", use_spa=True,
-                          tol=1e-5, maxiter=500, max_block_size=2048):
+                          tol=1e-5, maxiter=500, max_block_size=2048,
+                          fit_structure_cache=None):
+    """Prepare one independent trait with optional bounded shared geometry.
+
+    All leases release on successful return and on validation/fit failure.
+    Each trait retains its own complete cases and numerical fitted state.
+    """
+    with ExitStack() as leases:
+        return _prepare_phewas_model(phenotype, sample_ids, covariates,
+            family=family, kinship=kinship, continuous_transform=continuous_transform,
+            device=device, association_mode=association_mode, use_spa=use_spa,
+            tol=tol, maxiter=maxiter, max_block_size=max_block_size,
+            fit_structure_cache=fit_structure_cache, _structure_leases=leases)
+
+
+def _prepare_phewas_model(phenotype, sample_ids, covariates, *, family="auto",
+                          kinship=None, continuous_transform="paper",
+                          device="cpu", association_mode="tf32", use_spa=True,
+                          tol=1e-5, maxiter=500, max_block_size=2048,
+                          fit_structure_cache=None, _structure_leases=None):
     """Prepare one independent trait, dropping only that trait's missing rows.
 
     ``covariates`` includes an explicit intercept. The caller supplies a shared
@@ -205,7 +225,13 @@ def prepare_phewas_model(phenotype, sample_ids, covariates, *, family="auto",
         raise ValueError("continuous_transform must be paper, none or rint")
     if kinship is not None and not isinstance(kinship, SparseKinshipData):
         raise TypeError("kinship must be an explicitly ID-bound SparseKinshipData")
-    grm = None if kinship is None else kinship.subset(ids)
+    if kinship is None:
+        grm = None
+    elif fit_structure_cache is None:
+        grm = kinship.subset(ids)
+    else:
+        grm = _structure_leases.enter_context(
+            fit_structure_cache.acquire_kinship_subset(kinship, ids))
     metadata = dict(family=family, n=len(rows), excluded_missing_count=len(phenotype)-len(rows),
                     has_kinship=grm is not None, null_fit_mode="fp64",
                     association_mode=mode, independent_trait=True,
@@ -224,7 +250,8 @@ def prepare_phewas_model(phenotype, sample_ids, covariates, *, family="auto",
         parameters = {} if grm is None else grm.fit_parameters()
         model = fit_gaussian_null(y_fit, sample_ids=ids, covariates=x,
             device=device, matmul_mode="fp64", tol=tol, maxiter=maxiter,
-            max_block_size=max_block_size, variance_normalization="unit", **parameters)
+            max_block_size=max_block_size, variance_normalization="unit",
+            fit_structure_cache=fit_structure_cache, **parameters)
         model.set_matmul_mode(mode)
         # RINT keeps the original trait SD, so variance components can be much
         # smaller than an absolute AI tolerance. Fit in unit-variance units and
@@ -251,7 +278,8 @@ def prepare_phewas_model(phenotype, sample_ids, covariates, *, family="auto",
         else:
             fitted = fit_logistic_mixed_null(y, x, sample_ids=ids, device=device,
                 use_spa=use_spa, maxiter=maxiter, tol=tol,
-                max_block_size=max_block_size, **grm.fit_parameters())
+                max_block_size=max_block_size, fit_structure_cache=fit_structure_cache,
+                **grm.fit_parameters())
         fitted.null_fit_source_sha256 = _fitted_binary_sha256(fitted)
         spa_model = fitted if use_spa else None
         # Keep the fitted FP64 SPA tensors distinct: a normal TF32 conversion

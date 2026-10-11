@@ -82,59 +82,109 @@ class KinshipSpectrum:
     blocks: list[tuple[torch.Tensor, torch.Tensor]]
 
     @classmethod
-    def from_sparse(cls, diagonal, edge_rows=(), edge_cols=(), edge_values=(), *, device="cpu", max_block_size=2048, dtype=torch.float64):
-        d = np.asarray(diagonal, dtype=np.float64)
-        if d.ndim != 1 or not len(d) or not np.isfinite(d).all() or (d < 0).any():
-            raise ValueError("kinship diagonal must be a finite nonnegative vector")
-        rows = np.asarray(edge_rows, dtype=np.int64)
-        cols = np.asarray(edge_cols, dtype=np.int64)
-        vals = np.asarray(edge_values, dtype=np.float64)
-        if rows.shape != cols.shape or rows.shape != vals.shape or rows.ndim != 1:
-            raise ValueError("kinship edge arrays must have equal one-dimensional shapes")
-        if ((rows < 0) | (rows >= len(d)) | (cols < 0) | (cols >= len(d))).any() or not np.isfinite(vals).all():
-            raise ValueError("kinship edge indices or values are invalid")
-        parent = {}
-        def find(i):
-            parent.setdefault(i, i)
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
-        edges = {}
-        for r, c, v in zip(rows.tolist(), cols.tolist(), vals.tolist()):
-            if r == c:
-                raise ValueError("diagonal entries must be supplied separately")
-            if v == 0:
-                continue
-            key = (min(r, c), max(r, c))
-            if key in edges and edges[key] != v:
-                raise ValueError("inconsistent symmetric kinship entries")
-            edges[key] = v
-            parent[find(r)] = find(c)
-        groups = {}
-        for i in parent:
-            groups.setdefault(find(i), []).append(i)
-        eigenvalues = torch.as_tensor(d.copy(), dtype=dtype, device=device)
-        blocks = []
-        grouped_edges = {}
-        for (r, c), value in edges.items():
-            grouped_edges.setdefault(find(r), []).append((r, c, value))
-        for root, group in groups.items():
-            group.sort()
-            if len(group) > max_block_size:
-                raise ValueError("relatedness block exceeds max_block_size; increase the limit only after checking memory")
-            loc = {i: j for j, i in enumerate(group)}
-            block = np.diag(d[group])
-            for r, c, value in grouped_edges[root]:
-                block[loc[r], loc[c]] = block[loc[c], loc[r]] = value
-            tensor = torch.as_tensor(block, dtype=dtype, device=device)
-            eigen, rotation = torch.linalg.eigh(tensor)
-            if float(eigen.min()) < -1e-10:
-                raise ValueError("kinship matrix is not positive semidefinite")
-            idx = torch.as_tensor(group, dtype=torch.int64, device=device)
-            eigenvalues[idx] = eigen.clamp_min(0)
-            blocks.append((idx, rotation))
-        return cls(eigenvalues, blocks)
+    def from_sparse(cls, diagonal, edge_rows=(), edge_cols=(), edge_values=(), *, device="cpu", max_block_size=2048, dtype=torch.float64,
+                    eigh_batch_bytes=64 * 1024**2):
+        # Held error tracebacks must not own failed partial spectra or a
+        # complete solver chunk after the constructor has unwound.
+        completed = False
+        blocks = None
+        try:
+            from ._fit_structure_cache import available_cuda_bytes, guard_cuda_workspace
+            if type(eigh_batch_bytes) is not int or eigh_batch_bytes <= 0:
+                raise ValueError("eigh_batch_bytes must be a positive integer")
+            d = np.asarray(diagonal, dtype=np.float64)
+            if d.ndim != 1 or not len(d) or not np.isfinite(d).all() or (d < 0).any():
+                raise ValueError("kinship diagonal must be a finite nonnegative vector")
+            rows = np.asarray(edge_rows, dtype=np.int64)
+            cols = np.asarray(edge_cols, dtype=np.int64)
+            vals = np.asarray(edge_values, dtype=np.float64)
+            if rows.shape != cols.shape or rows.shape != vals.shape or rows.ndim != 1:
+                raise ValueError("kinship edge arrays must have equal one-dimensional shapes")
+            if ((rows < 0) | (rows >= len(d)) | (cols < 0) | (cols >= len(d))).any() or not np.isfinite(vals).all():
+                raise ValueError("kinship edge indices or values are invalid")
+            parent = {}
+            def find(i):
+                parent.setdefault(i, i)
+                while parent[i] != i:
+                    parent[i] = parent[parent[i]]
+                    i = parent[i]
+                return i
+            edges = {}
+            for r, c, v in zip(rows.tolist(), cols.tolist(), vals.tolist()):
+                if r == c:
+                    raise ValueError("diagonal entries must be supplied separately")
+                if v == 0:
+                    continue
+                key = (min(r, c), max(r, c))
+                if key in edges and edges[key] != v:
+                    raise ValueError("inconsistent symmetric kinship entries")
+                edges[key] = v
+                parent[find(r)] = find(c)
+            groups = {}
+            for i in parent:
+                groups.setdefault(find(i), []).append(i)
+            itemsize = torch.empty((), dtype=dtype).element_size()
+            guard_cuda_workspace(len(d) * itemsize, device, context="GRM spectrum diagonal")
+            eigenvalues = torch.as_tensor(d.copy(), dtype=dtype, device=device)
+            grouped_edges = {}
+            for (r, c), value in edges.items():
+                grouped_edges.setdefault(find(r), []).append((r, c, value))
+            grouped_sizes = {}
+            ordered_groups = list(groups.items())
+            for position, (root, group) in enumerate(ordered_groups):
+                group.sort()
+                if len(group) > max_block_size:
+                    raise ValueError("relatedness block exceeds max_block_size; increase the limit only after checking memory")
+                grouped_sizes.setdefault(len(group), []).append((position, root, group))
+            blocks = [None] * len(ordered_groups)
+            for size, members in grouped_sizes.items():
+                # Input, output rotations, layout/solver allowance, eigenvalues and
+                # indices are bounded per chunk. A large single family retains the
+                # existing max_block_size route; never build a population N*N array.
+                per_block = 6 * size * size * itemsize + size * (2 * itemsize + 8)
+                offset = 0
+                while offset < len(members):
+                    available = available_cuda_bytes(device)
+                    workspace = eigh_batch_bytes if available is None else min(eigh_batch_bytes, available)
+                    width = max(1, workspace // per_block)
+                    width = min(width, len(members) - offset)
+                    guard_cuda_workspace(width * per_block, device, context="batched GRM block eigh")
+                    chunk = members[offset:offset + width]
+                    matrices = np.zeros((width, size, size), dtype=np.float64)
+                    for batch, (_, root, group) in enumerate(chunk):
+                        loc = {i: j for j, i in enumerate(group)}
+                        matrices[batch, np.arange(size), np.arange(size)] = d[group]
+                        for r, c, value in grouped_edges[root]:
+                            matrices[batch, loc[r], loc[c]] = matrices[batch, loc[c], loc[r]] = value
+                    tensor = torch.as_tensor(matrices, dtype=dtype, device=device)
+                    # Preserve the scalar LAPACK/cuSOLVER route for a singleton;
+                    # genuine same-size groups use the library batch dimension.
+                    eigen, rotation = torch.linalg.eigh(tensor[0] if width == 1 else tensor)
+                    if width == 1:
+                        eigen, rotation = eigen.unsqueeze(0), rotation.unsqueeze(0)
+                    if float(eigen.min()) < -1e-10:
+                        raise ValueError("kinship matrix is not positive semidefinite")
+                    for batch, (position, _, group) in enumerate(chunk):
+                        idx = torch.as_tensor(group, dtype=torch.int64, device=device)
+                        eigenvalues[idx] = eigen[batch].clamp_min(0)
+                        # All slices in this chunk share only the batched rotation
+                        # allocation; each disjoint block retains its original axis.
+                        blocks[position] = (idx, rotation[batch])
+                    del tensor, matrices, eigen, rotation
+                    offset += width
+            result = cls(eigenvalues, blocks)
+            completed = True
+            return result
+        finally:
+            if not completed and blocks is not None:
+                blocks.clear()
+            # Successful return owns the same tensors through result; setting
+            # local references to None never mutates the returned spectrum.
+            diagonal = edge_rows = edge_cols = edge_values = None
+            d = rows = cols = vals = eigenvalues = blocks = None
+            matrices = tensor = eigen = rotation = idx = result = None
+            parent = edges = groups = grouped_edges = grouped_sizes = None
+            ordered_groups = members = chunk = group = loc = find = None
 
     def rotate(self, values, *, inverse=False, matmul_mode="fp64"):
         dtype = torch.float32 if validate_mode(matmul_mode) == "tf32" else torch.float64
@@ -491,7 +541,31 @@ class GaussianNullModel:
 def fit_gaussian_null(phenotype, *, sample_ids=None, covariates=None, kinship_diagonal=None,
                       edge_rows=(), edge_cols=(), edge_values=(), device="cpu", tol=1e-5,
                       maxiter=500, max_block_size=2048, trace_callback=None, matmul_mode="fp64",
-                      variance_normalization="none"):
+                      variance_normalization="none", fit_structure_cache=None):
+    """Fit one independent Gaussian model, optionally leasing exact GRM geometry.
+
+    Cache reuse never includes phenotype-dependent variances, projections or
+    convergence state. Null-fit arithmetic and stopping rules stay unchanged.
+    """
+    parameters = dict(sample_ids=sample_ids, covariates=covariates,
+        kinship_diagonal=kinship_diagonal, edge_rows=edge_rows, edge_cols=edge_cols,
+        edge_values=edge_values, device=device, tol=tol, maxiter=maxiter,
+        max_block_size=max_block_size, trace_callback=trace_callback,
+        matmul_mode=matmul_mode, variance_normalization=variance_normalization)
+    if fit_structure_cache is None or kinship_diagonal is None:
+        return _fit_gaussian_null(phenotype, **parameters)
+    ids = np.arange(len(phenotype)).astype(str) if sample_ids is None else np.asarray(sample_ids).astype(str)
+    dtype = torch.float32 if validate_mode(matmul_mode) == "tf32" else torch.float64
+    with fit_structure_cache.acquire_spectrum(ids, kinship_diagonal, edge_rows,
+            edge_cols, edge_values, device=device, dtype=dtype,
+            max_block_size=max_block_size) as spectrum:
+        return _fit_gaussian_null(phenotype, _kinship_spectrum=spectrum, **parameters)
+
+
+def _fit_gaussian_null(phenotype, *, sample_ids=None, covariates=None, kinship_diagonal=None,
+                      edge_rows=(), edge_cols=(), edge_values=(), device="cpu", tol=1e-5,
+                      maxiter=500, max_block_size=2048, trace_callback=None, matmul_mode="fp64",
+                      variance_normalization="none", _kinship_spectrum=None):
     """Fit intercept/covariate Gaussian null model using GMMAT AI REML.
 
     covariates must explicitly contain an intercept if one is wanted. None
@@ -568,7 +642,9 @@ def fit_gaussian_null(phenotype, *, sample_ids=None, covariates=None, kinship_di
                                  torch.stack((dispersion, dispersion * 0)), cov, kin, inv, inv[:, None] * x, 0, True, phenotype=y, has_kinship=False, fitted_values=mm(x, alpha0), working_phenotype=y, matmul_mode=matmul_mode))
     if len(kinship_diagonal) != n:
         raise ValueError("kinship diagonal does not match phenotype")
-    kin = KinshipSpectrum.from_sparse(kinship_diagonal, edge_rows, edge_cols, edge_values, device=device, max_block_size=max_block_size, dtype=dtype)
+    kin = _kinship_spectrum if _kinship_spectrum is not None else KinshipSpectrum.from_sparse(
+        kinship_diagonal, edge_rows, edge_cols, edge_values, device=device,
+        max_block_size=max_block_size, dtype=dtype)
     eigen = kin.eigenvalues
     yr = kin.rotate(y, matmul_mode=matmul_mode)
     xr = kin.rotate(x, matmul_mode=matmul_mode)

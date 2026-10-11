@@ -700,57 +700,210 @@ def fit_logistic_null(phenotype,covariates=None,*,sample_ids=None,device="cuda",
     return model
 
 
+_BINARY_FAMILY_BATCH_BYTES = 64 * 1024**2
+_BINARY_FAMILY_BATCH_COUNT = 4096
+
+
+def _binary_family_batch_width(device, remaining, per_block_bytes, *, context):
+    """Bound independent-family batches by explicit new tensors and live CUDA.
+
+    A single supported family may exceed the batching target; its actual
+    bytes must still pass the same runtime CUDA cap/reserve guard. Library
+    workspaces use that reserve, rather than an invented NNZ multiplier.
+    """
+    from ._fit_structure_cache import available_cuda_bytes, guard_cuda_workspace
+    width = min(remaining, _BINARY_FAMILY_BATCH_COUNT,
+                max(1, _BINARY_FAMILY_BATCH_BYTES // per_block_bytes))
+    available = available_cuda_bytes(device)
+    if available is not None:
+        if available < per_block_bytes:
+            guard_cuda_workspace(per_block_bytes, device, context=context)
+        width = min(width, max(1, available // per_block_bytes))
+    guard_cuda_workspace(width * per_block_bytes, device, context=context)
+    return width
+
+
+def _binary_family_apply(diagonal, blocks, batches, value):
+    """Apply independent dense family matrices without a samples-square slab."""
+    from ._fit_structure_cache import guard_cuda_workspace
+    element_bytes = max(diagonal.element_size(), value.element_size())
+    guard_cuda_workspace(value.numel() * element_bytes, value.device,
+                         context="binary family apply output")
+    result = diagonal.reshape((-1,) + (1,) * (value.ndim - 1)) * value
+    # The fitting kernels pass vectors or matrices. Retain the original
+    # higher-dimensional behavior for callers of this private operator.
+    if value.ndim not in (1, 2):
+        try:
+            trailing = int(np.prod(value.shape[1:]))
+            for rows, matrix in blocks:
+                guard_cuda_workspace(2 * len(rows) * trailing * element_bytes,
+                                     value.device, context="binary family apply fallback")
+                result[rows] = matrix @ value[rows]
+        except Exception:
+            result = None
+            raise
+        return result
+    columns = 1 if value.ndim == 1 else value.shape[1]
+    if not columns:
+        return result
+    try:
+        for _, rows, matrices in batches:
+            size = rows.shape[1]
+            begin = 0
+            while begin < len(rows):
+                width = _binary_family_batch_width(value.device, len(rows) - begin,
+                    2 * size * columns * element_bytes, context="binary family apply batch")
+                stop = begin + width
+                selected = product = rhs = None
+                try:
+                    selected = value[rows[begin:stop]]
+                    rhs = selected.unsqueeze(-1) if value.ndim == 1 else selected
+                    product = torch.bmm(matrices[begin:stop], rhs)
+                    result[rows[begin:stop]] = product.squeeze(-1) if value.ndim == 1 else product
+                finally:
+                    selected = product = rhs = None
+                begin = stop
+    except Exception:
+        result = None
+        raise
+    return result
+
+
 class _BlockKinship:
     """Validated PSD kinship, with no dense samples-by-samples allocation."""
     def __init__(self, diagonal, edge_rows, edge_cols, edge_values, *, device,
-                 max_block_size):
+                 max_block_size, spectrum=None):
         from .null_model import KinshipSpectrum
-        spectrum = KinshipSpectrum.from_sparse(
-            diagonal, edge_rows, edge_cols, edge_values, device=device,
-            max_block_size=max_block_size, dtype=torch.float64)
-        self.diagonal = torch.tensor(np.asarray(diagonal), dtype=torch.float64, device=device)
-        self.blocks = []
-        self.grouped = torch.zeros(len(self.diagonal), dtype=torch.bool, device=device)
-        for rows, rotation in spectrum.blocks:
-            values = spectrum.eigenvalues[rows]
-            matrix = (rotation * values[None, :]) @ rotation.T
-            self.blocks.append((rows, (matrix + matrix.T) / 2))
-            self.grouped[rows] = True
-        self.mean_diagonal = self.diagonal.mean()
-        if not bool(torch.isfinite(self.mean_diagonal)) or float(self.mean_diagonal) <= 0:
-            raise ValueError("mixed binary GRM must have positive mean diagonal")
+        from ._fit_structure_cache import guard_cuda_workspace
+        if spectrum is None:
+            spectrum = KinshipSpectrum.from_sparse(
+                diagonal, edge_rows, edge_cols, edge_values, device=device,
+                max_block_size=max_block_size, dtype=torch.float64)
+        self.diagonal = self.grouped = self.mean_diagonal = None
+        self.blocks = [None] * len(spectrum.blocks)
+        self._batches = []
+        groups = {}
+        for index, (rows, _) in enumerate(spectrum.blocks):
+            groups.setdefault(len(rows), []).append(index)
+        try:
+            guard_cuda_workspace(len(diagonal) * 9, device, context="binary kinship vectors")
+            self.diagonal = torch.tensor(np.asarray(diagonal), dtype=torch.float64, device=device)
+            if (spectrum.eigenvalues.shape != self.diagonal.shape
+                    or spectrum.eigenvalues.dtype != torch.float64
+                    or spectrum.eigenvalues.device != self.diagonal.device):
+                raise ValueError("binary shared spectrum must match the FP64 sample axis and device")
+            self.grouped = torch.zeros(len(self.diagonal), dtype=torch.bool, device=device)
+            for size, indices in groups.items():
+                begin = 0
+                while begin < len(indices):
+                    # Rotation, scaled rotation and matrix; rows and values.
+                    width = _binary_family_batch_width(self.diagonal.device,
+                        len(indices) - begin, 3 * size * size * 8 + 2 * size * 8,
+                        context="binary kinship reconstruction batch")
+                    chosen = indices[begin:begin + width]
+                    rows = rotations = values = matrix = None
+                    try:
+                        rows = torch.stack([spectrum.blocks[i][0] for i in chosen])
+                        rotations = torch.stack([spectrum.blocks[i][1] for i in chosen])
+                        values = spectrum.eigenvalues[rows]
+                        matrix = torch.bmm(rotations * values[:, None, :], rotations.transpose(-2, -1))
+                        rotations = values = None
+                        matrix = (matrix + matrix.transpose(-2, -1)) / 2
+                        self._batches.append((chosen, rows, matrix))
+                        for offset, index in enumerate(chosen):
+                            self.blocks[index] = (spectrum.blocks[index][0], matrix[offset])
+                        self.grouped[rows] = True
+                    finally:
+                        rows = rotations = values = matrix = None
+                    begin += width
+            self.mean_diagonal = self.diagonal.mean()
+            if not bool(torch.isfinite(self.mean_diagonal)) or float(self.mean_diagonal) <= 0:
+                raise ValueError("mixed binary GRM must have positive mean diagonal")
+        except Exception:
+            self.blocks.clear()
+            self._batches.clear()
+            self.diagonal = self.grouped = self.mean_diagonal = None
+            raise
 
     def apply(self, value):
-        result = self.diagonal.reshape((-1,) + (1,) * (value.ndim - 1)) * value
-        for rows, matrix in self.blocks:
-            result[rows] = matrix @ value[rows]
-        return result
+        return _binary_family_apply(self.diagonal, self.blocks, self._batches, value)
 
 
 class _BlockPrecision:
     """Inverse of diag(1/W)+tau*K, retaining only disjoint family blocks."""
     def __init__(self, kinship, weights, tau, *, compute_logdet=False):
-        self.diagonal = 1 / (1 / weights + tau * kinship.diagonal)
-        self.blocks = []
-        self.kinship = kinship
-        self.logdet = None
-        if compute_logdet:
-            self.logdet = -torch.log(self.diagonal[~kinship.grouped]).sum()
-        for rows, matrix in kinship.blocks:
-            covariance = torch.diag(1 / weights[rows]) + tau * matrix
-            factor = torch.linalg.cholesky(covariance)
-            inverse = torch.cholesky_inverse(factor)
-            inverse = (inverse + inverse.T) / 2
-            self.blocks.append((rows, inverse))
-            self.diagonal[rows] = inverse.diagonal()
+        from ._fit_structure_cache import guard_cuda_workspace
+        self.diagonal = self.logdet = self.kinship = None
+        self.blocks, self._batches = [], []
+        logterms = None
+        try:
+            element_bytes = max(kinship.diagonal.element_size(), weights.element_size())
+            guard_cuda_workspace(3 * weights.numel() * element_bytes, weights.device,
+                                 context="binary precision diagonal")
+            self.diagonal = 1 / (1 / weights + tau * kinship.diagonal)
+            self.blocks = [None] * len(kinship.blocks)
+            self._batches = []
+            self.kinship = kinship
+            self.logdet = None
+            logterms = [None] * len(kinship.blocks) if compute_logdet else None
             if compute_logdet:
-                self.logdet = self.logdet + 2 * torch.log(factor.diagonal()).sum()
+                guard_cuda_workspace(weights.numel() * (2 * element_bytes + 1) + element_bytes,
+                                     weights.device, context="binary precision singleton logdet")
+                self.logdet = -torch.log(self.diagonal[~kinship.grouped]).sum()
+            for indices, rows, matrices in kinship._batches:
+                size = rows.shape[1]
+                begin = 0
+                while begin < len(indices):
+                    # Covariance, factor, inverse; symmetrization has the same
+                    # three-matrix peak after the first two are released.
+                    matrix_bytes = size * size * element_bytes
+                    per_block = max(3 * matrix_bytes + (element_bytes if compute_logdet else 0),
+                                    matrix_bytes + 2 * size * element_bytes,
+                                    2 * matrix_bytes + size * element_bytes + 2 * element_bytes
+                                    if compute_logdet else 0)
+                    width = _binary_family_batch_width(weights.device,
+                        len(indices) - begin, per_block, context="binary precision factor batch")
+                    stop = begin + width
+                    covariance = factor = inverse = batch_log = None
+                    try:
+                        covariance = tau * matrices[begin:stop]
+                        covariance.diagonal(dim1=-2, dim2=-1).add_(1 / weights[rows[begin:stop]])
+                        # Keep the same Cholesky/inverse algorithms and hard
+                        # failure semantics. One call checks this family batch.
+                        factor = torch.linalg.cholesky(covariance)
+                        if compute_logdet:
+                            batch_log = 2 * torch.log(factor.diagonal(dim1=-2, dim2=-1)).sum(-1)
+                        inverse = torch.cholesky_inverse(factor)
+                        covariance = factor = None
+                        inverse = (inverse + inverse.transpose(-2, -1)) / 2
+                        chosen = indices[begin:stop]
+                        self._batches.append((chosen, rows[begin:stop], inverse))
+                        for offset, index in enumerate(chosen):
+                            self.blocks[index] = (kinship.blocks[index][0], inverse[offset])
+                            if compute_logdet:
+                                logterms[index] = batch_log[offset]
+                        self.diagonal[rows[begin:stop]] = inverse.diagonal(dim1=-2, dim2=-1)
+                    finally:
+                        covariance = factor = inverse = batch_log = None
+                    begin = stop
+            if compute_logdet:
+                # Preserve the original family-order scalar accumulation.
+                for term in logterms:
+                    self.logdet = self.logdet + term
+        except Exception:
+            self.blocks.clear()
+            self._batches.clear()
+            self.diagonal = self.logdet = self.kinship = None
+            raise
+        finally:
+            # A held constructor traceback must not extend caller-owned
+            # geometry/weight lifetimes after a failed stage. Successful
+            # precision objects keep the geometry through self.kinship.
+            kinship = weights = tau = rows = matrices = term = None
+            covariance = factor = inverse = batch_log = logterms = None
 
     def apply(self, value):
-        result = self.diagonal.reshape((-1,) + (1,) * (value.ndim - 1)) * value
-        for rows, inverse in self.blocks:
-            result[rows] = inverse @ value[rows]
-        return result
+        return _binary_family_apply(self.diagonal, self.blocks, self._batches, value)
 
     def trace_kinship(self):
         value = (self.diagonal[~self.kinship.grouped]
@@ -917,7 +1070,7 @@ def fit_logistic_mixed_null(phenotype, covariates=None, *, sample_ids=None,
                             kinship_diagonal, edge_rows=(), edge_cols=(),
                             edge_values=(), device="cpu", use_spa=True,
                             maxiter=500, tol=1e-5, max_block_size=2048,
-                            trace_callback=None):
+                            trace_callback=None, fit_structure_cache=None):
     """Fit one logistic mixed null using GMMAT's PQL/AI REML equations.
 
     The aligned PSD GRM is diagonal plus disjoint small family blocks. The
@@ -935,6 +1088,10 @@ def fit_logistic_mixed_null(phenotype, covariates=None, *, sample_ids=None,
     may subsequently use the independent non-SPA TF32 state. Equations and the
     finite-tolerance return convention follow GMMAT R/glmmkin.R:278-418,655-702,
     https://github.com/hanchenphd/GMMAT/blob/master/R/glmmkin.R.
+
+    ``fit_structure_cache`` may lease a verified immutable GRM spectrum across
+    exactly matching ordered samples. Working weights, precision, coefficients
+    and variance components remain private to this fit.
     """
     if not 0 < tol < 1 or type(maxiter) is not int or maxiter < 2:
         raise ValueError("invalid mixed logistic tolerance or iteration limit")
@@ -946,8 +1103,28 @@ def fit_logistic_mixed_null(phenotype, covariates=None, *, sample_ids=None,
     y, x, ids = ordinary.phenotype, ordinary.x, ordinary.sample_ids
     if len(kinship_diagonal) != len(y):
         raise ValueError("kinship diagonal does not match the aligned phenotype")
+    from contextlib import nullcontext
+    lease = (nullcontext(None) if fit_structure_cache is None else
+             fit_structure_cache.acquire_spectrum(ids, kinship_diagonal,
+                 edge_rows, edge_cols, edge_values, device=device,
+                 dtype=torch.float64, max_block_size=max_block_size))
+    with lease as spectrum:
+        return _fit_logistic_mixed_from_ordinary(ordinary,
+            kinship_diagonal=kinship_diagonal, edge_rows=edge_rows,
+            edge_cols=edge_cols, edge_values=edge_values, device=device,
+            use_spa=use_spa, maxiter=maxiter, tol=tol,
+            max_block_size=max_block_size, trace_callback=trace_callback,
+            spectrum=spectrum)
+
+
+def _fit_logistic_mixed_from_ordinary(ordinary, *, kinship_diagonal, edge_rows,
+                                    edge_cols, edge_values, device, use_spa,
+                                    maxiter, tol, max_block_size, trace_callback,
+                                    spectrum):
+    """Original per-trait PQL/AI/Brent state within the shared-structure lease."""
+    y, x, ids = ordinary.phenotype, ordinary.x, ordinary.sample_ids
     kinship = _BlockKinship(kinship_diagonal, edge_rows, edge_cols, edge_values,
-                           device=device, max_block_size=max_block_size)
+                           device=device, max_block_size=max_block_size, spectrum=spectrum)
     n = len(y)
 
     def state(working, weights, tau):

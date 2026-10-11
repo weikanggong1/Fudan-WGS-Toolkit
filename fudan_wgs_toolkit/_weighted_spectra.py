@@ -76,9 +76,11 @@ def eigensolver_context(mode='torch',*,memory_limit=40*2**30):
                 _SOLVER_LOCK.release()
 
 def _complete_eigvalsh(matrices):
-    if not _SOLVER_LOCK.acquire(blocking=False):
-        raise RuntimeError('weighted eigensolver belongs to another active pipeline thread')
+    acquired = False
     try:
+        if not _SOLVER_LOCK.acquire(blocking=False):
+            raise RuntimeError('weighted eigensolver belongs to another active pipeline thread')
+        acquired = True
         if _SOLVER is None or not matrices.is_cuda:
             spectra=torch.linalg.eigvalsh(matrices,UPLO='U')
             backend='torch.linalg.eigvalsh'
@@ -93,7 +95,11 @@ def _complete_eigvalsh(matrices):
         _METRICS['actual_backend_matrices'][backend]=_METRICS['actual_backend_matrices'].get(backend,0)+count
         return spectra,backend
     finally:
-        _SOLVER_LOCK.release()
+        # A caller may keep the exception/traceback for its private audit.
+        # Drop our argument and output owners before that traceback escapes.
+        matrices = spectra = None
+        if acquired:
+            _SOLVER_LOCK.release()
 
 def _pinned_statistics():
     from . import statistics
@@ -115,26 +121,29 @@ def workspace_unit_bytes(covariance):
     return 3*covariance.numel()*covariance.element_size()+4*covariance.shape[0]
 
 def _batch_capacity(covariance,remaining):
-    budget=WEIGHTED_BATCH_LIMIT_BYTES
-    if covariance.is_cuda:
-        from fudan_wgs_toolkit import tf32
-        start=time.perf_counter()
-        allocated=torch.cuda.memory_allocated(covariance.device)
-        reserved=torch.cuda.memory_reserved(covariance.device)
-        with torch.cuda.device(covariance.device):free,_=torch.cuda.mem_get_info()
-        _METRICS['workspace_query_host_seconds']+=time.perf_counter()-start
-        _METRICS['live_workspace_queries']+=1
-        available=tf32._product_workspace_availability(allocated=allocated,reserved=reserved,free=free,
-            limit=tf32._memory_limit_bytes,reserve=tf32._memory_reserve_bytes)['available_bytes']
-        budget=min(budget,available)
-    unit=workspace_unit_bytes(covariance)
-    capacity=min(remaining,budget//max(unit,1))
-    if capacity<1:
-        _METRICS['workspace_rejections']+=1
-        raise MemoryError('full FP32 weighted eigensolve batch cannot fit fresh live/process workspace; no truncation/precision retry')
-    _METRICS['max_estimated_batch_workspace_bytes']=max(_METRICS['max_estimated_batch_workspace_bytes'],capacity*unit)
-    _METRICS['max_weighted_tensor_bytes']=max(_METRICS['max_weighted_tensor_bytes'],capacity*covariance.numel()*covariance.element_size())
-    return capacity
+    try:
+        budget=WEIGHTED_BATCH_LIMIT_BYTES
+        if covariance.is_cuda:
+            from fudan_wgs_toolkit import tf32
+            start=time.perf_counter()
+            allocated=torch.cuda.memory_allocated(covariance.device)
+            reserved=torch.cuda.memory_reserved(covariance.device)
+            with torch.cuda.device(covariance.device):free,_=torch.cuda.mem_get_info()
+            _METRICS['workspace_query_host_seconds']+=time.perf_counter()-start
+            _METRICS['live_workspace_queries']+=1
+            available=tf32._product_workspace_availability(allocated=allocated,reserved=reserved,free=free,
+                limit=tf32._memory_limit_bytes,reserve=tf32._memory_reserve_bytes)['available_bytes']
+            budget=min(budget,available)
+        unit=workspace_unit_bytes(covariance)
+        capacity=min(remaining,budget//max(unit,1))
+        if capacity<1:
+            _METRICS['workspace_rejections']+=1
+            raise MemoryError('full FP32 weighted eigensolve batch cannot fit fresh live/process workspace; no truncation/precision retry')
+        _METRICS['max_estimated_batch_workspace_bytes']=max(_METRICS['max_estimated_batch_workspace_bytes'],capacity*unit)
+        _METRICS['max_weighted_tensor_bytes']=max(_METRICS['max_weighted_tensor_bytes'],capacity*covariance.numel()*covariance.element_size())
+        return capacity
+    finally:
+        covariance = None
 
 def scale_exact_spectra(solved,mapping,exact,pivots):
     """Vectorize original independent FP64 scalars; no changed reductions."""
@@ -154,51 +163,58 @@ def native_weighted_spectra(covariance, weights):
     without a tolerance or annotation grouping approximation. Dense weighted
     matrices and eigvalsh remain FP32. Only spectrum scalar scaling uses FP64.
     """
-    if not _SOLVER_LOCK.acquire(blocking=False):
-        raise RuntimeError('weighted spectra belong to another active pipeline thread')
-    _SOLVER_LOCK.release()
-    original=_pinned_statistics()
-    _native_weight_relations=original._native_weight_relations
-    _STATISTICS_METADATA=original._STATISTICS_METADATA
-    record_gpu_eigen_route=original.record_gpu_eigen_route
-    _METRICS['calls']+=1
-    rows = weights.T.contiguous()
-    with _profile('weight_relations'):
-        exact, pivots, related = _native_weight_relations(rows)
-    representatives, mapping = [], []
-    for j in range(len(rows)):
-        found = next((i for i in representatives if related[i][j]), None)
-        if found is None:
-            representatives.append(j); found = j
-        mapping.append(found)
-    # Bound only weighted-matrix materialization; eigensolver workspace is
-    # additionally covered by the pipeline's process allocation limit.
-    if covariance.dtype!=torch.float32 or covariance.ndim!=2 or covariance.shape[0]!=covariance.shape[1] or covariance.shape[0]!=rows.shape[1] or covariance.device!=weights.device:
-        raise ValueError('weighted spectrum candidate requires aligned square FP32 covariance')
-    per_matrix = covariance.numel() * covariance.element_size()
     solved = {}
-    start=0
-    while start<len(representatives):
-        batch_size=_batch_capacity(covariance,len(representatives)-start)
-        indices = representatives[start:start + batch_size]
-        w = rows[indices]
-        with _profile('weighted_matrix_build'):
-            matrices = covariance[None, :, :] * w[:, :, None] * w[:, None, :]
-        with _profile('eigvalsh'):
-            spectra,backend = _complete_eigvalsh(matrices)
-        if backend in ('torch.linalg.eigvalsh','torch.linalg.eigvalsh:magma_retry'):
-            record_gpu_eigen_route(matrices)
-        _record_batch_size(len(indices))
-        _METRICS['eigen_api_calls']+=1
-        for index, spectrum in zip(indices, spectra):
-            solved[index] = spectrum
-        start+=len(indices)
-    _STATISTICS_METADATA["native_complete_spectra"] += len(representatives)
-    _STATISTICS_METADATA["native_spectra_reused"] += len(rows) - len(representatives)
-    _METRICS['complete_representative_spectra']+=len(representatives)
-    _METRICS['exact_relation_reused_spectra']+=len(rows)-len(representatives)
-    with _profile('spectrum_scaling'):
-        return scale_exact_spectra(solved,mapping,exact,pivots)
+    try:
+        if not _SOLVER_LOCK.acquire(blocking=False):
+            raise RuntimeError('weighted spectra belong to another active pipeline thread')
+        _SOLVER_LOCK.release()
+        original=_pinned_statistics()
+        _native_weight_relations=original._native_weight_relations
+        _STATISTICS_METADATA=original._STATISTICS_METADATA
+        record_gpu_eigen_route=original.record_gpu_eigen_route
+        _METRICS['calls']+=1
+        rows = weights.T.contiguous()
+        with _profile('weight_relations'):
+            exact, pivots, related = _native_weight_relations(rows)
+        representatives, mapping = [], []
+        for j in range(len(rows)):
+            found = next((i for i in representatives if related[i][j]), None)
+            if found is None:
+                representatives.append(j); found = j
+            mapping.append(found)
+        # Bound only weighted-matrix materialization; eigensolver workspace is
+        # additionally covered by the pipeline's process allocation limit.
+        if covariance.dtype!=torch.float32 or covariance.ndim!=2 or covariance.shape[0]!=covariance.shape[1] or covariance.shape[0]!=rows.shape[1] or covariance.device!=weights.device:
+            raise ValueError('weighted spectrum candidate requires aligned square FP32 covariance')
+        per_matrix = covariance.numel() * covariance.element_size()
+        start=0
+        while start<len(representatives):
+            batch_size=_batch_capacity(covariance,len(representatives)-start)
+            indices = representatives[start:start + batch_size]
+            w = rows[indices]
+            with _profile('weighted_matrix_build'):
+                matrices = covariance[None, :, :] * w[:, :, None] * w[:, None, :]
+            with _profile('eigvalsh'):
+                spectra,backend = _complete_eigvalsh(matrices)
+            if backend in ('torch.linalg.eigvalsh','torch.linalg.eigvalsh:magma_retry'):
+                record_gpu_eigen_route(matrices)
+            _record_batch_size(len(indices))
+            _METRICS['eigen_api_calls']+=1
+            for index, spectrum in zip(indices, spectra):
+                solved[index] = spectrum
+            start+=len(indices)
+        _STATISTICS_METADATA["native_complete_spectra"] += len(representatives)
+        _STATISTICS_METADATA["native_spectra_reused"] += len(rows) - len(representatives)
+        _METRICS['complete_representative_spectra']+=len(representatives)
+        _METRICS['exact_relation_reused_spectra']+=len(rows)-len(representatives)
+        with _profile('spectrum_scaling'):
+            return scale_exact_spectra(solved,mapping,exact,pivots)
+    finally:
+        # Keep audited exceptions without retaining this caller's inputs or
+        # complete weighted matrices after the failed stage has unwound.
+        solved.clear()
+        covariance = weights = rows = exact = pivots = related = None
+        w = matrices = spectra = spectrum = None
 
 
 def execution_metadata(*,reset=False):

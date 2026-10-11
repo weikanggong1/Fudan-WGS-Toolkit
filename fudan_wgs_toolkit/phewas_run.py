@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from .phewas_inputs import PhewasInputs, prepare_phewas_inputs
 from .phewas_models import SparseKinshipData, prepare_phewas_model
+from ._fit_structure_cache import FitStructureCache
 from .phewas_storage import (ModelRepository, StreamingCSVWriter, atomic_json, digest_file,
                              save_model_store, trait_index_sha256, verify_file, write_trait_index)
 from .run import _implementation_sha256
@@ -605,6 +606,7 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                                               if plan.get('cohort_rows') else None)
     assigned = list(range(worker_id, inputs.manifest['trait_count'], worker_count)) if trait_indices is None else list(trait_indices)
     started, successes, errors = time.time(), [], []
+    structures = FitStructureCache() if context is None else None
     try:
         for index in assigned:
             target = models/f'trait_{index:04d}'
@@ -628,10 +630,12 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
             before = time.perf_counter()
             try:
                 trait = inputs.trait(int(index), cohort_indices=cohort)
-                x, design = _design(trait['covariates'], trait['covariate_names'])
-                fitted = prepare_phewas_model(trait['y_raw'], trait['sample_ids'], x,
-                    family=trait['family'], kinship=kinship, continuous_transform=plan.get('continuous_transform', 'paper'),
-                    device=device, association_mode='tf32', use_spa=True)
+                with structures.acquire_design(trait['sample_ids'], trait['covariates'],
+                        trait['covariate_names'], _design) as (x, design):
+                    fitted = prepare_phewas_model(trait['y_raw'], trait['sample_ids'], x,
+                        family=trait['family'], kinship=kinship, continuous_transform=plan.get('continuous_transform', 'paper'),
+                        device=device, association_mode='tf32', use_spa=True,
+                        fit_structure_cache=structures)
                 if not fitted.model.converged:
                     raise ArithmeticError('null fit did not converge')
                 rows = trait['sample_indices'][fitted.sample_indices]
@@ -666,10 +670,13 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                       model_fit_source_implementation_sha256=fit_binding['source_implementation_sha256'],
                       consumer_source_implementation_sha256=plan['source_implementation_sha256'],
                       null_fit_compatibility_sha256=plan.get('null_fit_compatibility_sha256'),
-                      model_import_sha256=plan.get('model_import_sha256'))
+                      model_import_sha256=plan.get('model_import_sha256'),
+                      fit_structure_cache=None if structures is None else structures.stats())
         atomic_json(output/f'fit_worker_{worker_id}.complete.private.json', result)
         return result
     finally:
+        if structures is not None:
+            structures.close()
         inputs.close()
 
 
