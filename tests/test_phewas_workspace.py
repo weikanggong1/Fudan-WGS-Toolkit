@@ -37,6 +37,150 @@ def entry(bytes):
     return SimpleNamespace(bytes=bytes)
 
 
+def test_repository_policy_uses_explicit_cap_and_restores_nested_state(monkeypatch):
+    repository = ModelRepository([], workspace_bytes=0)
+    repository.models[(0, 'cuda:0')] = entry(300)
+    repository.models[(1, 'cuda:0')] = entry(300)
+    repository.pinned[(0, 'cuda:0')] = 1
+    simulated_cuda(monkeypatch, repository)
+    device = torch.device('cuda:0')
+    with repository.memory_policy(device, limit_bytes=500, reserve_bytes=0):
+        repository._admit(device, extra_bytes=100)
+        assert list(repository.models) == [(0, 'cuda:0')]
+        with pytest.raises(MemoryError):
+            with repository.memory_policy(device, limit_bytes=350, reserve_bytes=0):
+                repository._admit(device, extra_bytes=100)
+        assert repository._memory_policies[device] == (500, 0)
+    assert repository._memory_policies == {}
+    assert repository.pinned[(0, 'cuda:0')] == 1
+
+
+def test_repository_none_policy_matches_live_reserve_and_preserves_cap(monkeypatch):
+    from fudan_wgs_toolkit import tf32
+    repository = ModelRepository([], workspace_bytes=0)
+    state = simulated_cuda(monkeypatch, repository)
+    state['external'] = 300
+    with repository.memory_policy('cuda:0', limit_bytes=None, reserve_bytes=600):
+        expected = tf32._product_workspace_availability(
+            allocated=300, reserved=300, free=700, limit=1000, reserve=600)
+        repository._admit('cuda:0', extra_bytes=expected['available_bytes'])
+        with pytest.raises(MemoryError):
+            repository._admit('cuda:0', extra_bytes=expected['available_bytes']+1)
+
+
+@pytest.mark.parametrize('sparse', [False, True])
+def test_binary_derivation_estimates_real_precision_and_projection_peak(sparse):
+    from fudan_wgs_toolkit.phewas_storage import _binary_derivation_peak_bytes
+    n, q = 11, 3
+    precision = torch.ones(n, dtype=torch.float64)
+    if sparse:
+        precision = torch.sparse_coo_tensor(torch.arange(n).repeat(2, 1),
+            precision, (n, n)).coalesce()
+    source = SimpleNamespace(_tensors=(torch.ones((n, q), dtype=torch.float64),
+        torch.ones(n, dtype=torch.float64), torch.full((n,), .5, dtype=torch.float64),
+        torch.eye(q, dtype=torch.float64), precision, torch.zeros(q, dtype=torch.float64), None))
+    precision_bytes = 20*n if sparse else 4*n
+    expected = 16*n*q+8*n+4*q*q+precision_bytes+4*q
+    assert _binary_derivation_peak_bytes(source) == expected
+    assert _binary_derivation_peak_bytes(source, spa=True) == 16*n*q
+
+
+def test_binary_source_upload_estimate_includes_sparse_coalesce_and_validation():
+    from fudan_wgs_toolkit.phewas_storage import _binary_source_peak_bytes
+    n, q, nnz = 100, 3, 500
+    arrays = {name: dict(shape=list(shape), dtype=np.dtype(dtype).str) for name, shape, dtype in (
+        ('x', (n, q), 'float64'), ('scaled_residuals', (n,), 'float64'),
+        ('fitted_probability', (n,), 'float64'), ('fixed_effect_covariance', (q, q), 'float64'),
+        ('precision_indices', (2, nnz), 'int64'), ('precision_values', (nnz,), 'float64'))}
+    stored = 8*(n*q+2*n+q*q)+24*nnz
+    from fudan_wgs_toolkit.tensor_validation import finite_check_scratch_bytes
+    assert _binary_source_peak_bytes(dict(arrays=arrays)) == stored+max(
+        48*nnz, 11*max(n*q, nnz)+2, 8*n*q+finite_check_scratch_bytes((n, q), element_size=8))
+
+
+def test_binary_source_miss_admits_peak_before_loading_any_tensor(tmp_path, monkeypatch):
+    import json
+    from fudan_wgs_toolkit import phewas_storage as storage
+    source_path = tmp_path/'source'
+    (source_path/'spa').mkdir(parents=True)
+    metadata = dict(arrays={name: dict(shape=list(shape), dtype='<f8') for name, shape in (
+        ('x', (4, 2)), ('scaled_residuals', (4,)), ('fitted_probability', (4,)),
+        ('fixed_effect_covariance', (2, 2)), ('precision', (4,)))})
+    (source_path/'spa'/'state.private.json').write_text(json.dumps(metadata))
+    repository = ModelRepository([], workspace_bytes=0)
+    repository.entries = [dict(path=str(source_path))]
+    repository._descriptors = [dict(family='binomial', spa_available=True)]
+    def admit(device, **kwargs):
+        assert kwargs == dict(fitted_bytes=storage._binary_source_peak_bytes(metadata),
+                             phase='binary_fitted_source')
+        raise MemoryError('source peak cannot fit')
+    monkeypatch.setattr(repository, '_admit', admit)
+    monkeypatch.setattr(storage, 'load_spa_source', lambda *args, **kwargs:
+                        pytest.fail('source tensors loaded before admission'))
+    with pytest.raises(MemoryError, match='source peak cannot fit'):
+        with repository._acquire_binary_source(0, 'cuda:0'):
+            pytest.fail('rejected source yielded state')
+    assert repository.spa_sources == {} and repository.spa_pinned == {}
+
+
+@pytest.mark.parametrize('spa', [False, True])
+def test_binary_derivation_rejects_before_allocation_and_unpins_source(monkeypatch, spa):
+    repository = ModelRepository([], workspace_bytes=0)
+    repository._descriptors = [dict(family='binomial', spa_available=True)]
+    calls = []
+    source = SimpleNamespace(_tensors=(torch.ones((4, 2), dtype=torch.float64),
+        torch.ones(4, dtype=torch.float64), torch.full((4,), .5, dtype=torch.float64),
+        torch.eye(2, dtype=torch.float64), torch.ones(4, dtype=torch.float64), None, None),
+        normal=lambda: pytest.fail('normal allocated before admission'),
+        spa=lambda: pytest.fail('SPA allocated before admission'))
+    repository.spa_sources[(0, 'cuda:0')] = source
+    def admit(device, **kwargs):
+        calls.append(kwargs)
+        if kwargs['phase'].endswith('_derivation'):
+            assert repository.spa_pinned[(0, 'cuda:0')] == 1
+            assert kwargs['fitted_bytes'] > 0
+            raise MemoryError('derived peak cannot fit')
+    monkeypatch.setattr(repository, '_admit', admit)
+    context = repository.acquire_spa(0, 'cuda:0') if spa else repository.acquire([0], 'cuda:0')
+    with pytest.raises(MemoryError, match='derived peak cannot fit'):
+        with context:
+            pytest.fail('rejected derivation yielded a model')
+    assert calls[-1]['phase'] == ('binary_spa_derivation' if spa else 'binary_normal_derivation')
+    assert repository.spa_pinned[(0, 'cuda:0')] == 0
+    assert repository.spa_sources[(0, 'cuda:0')] is source
+
+
+@pytest.mark.parametrize('budget', [None, 40.])
+def test_batched_runtime_installs_cap_and_reserve_then_restores_policy_on_error(monkeypatch, budget):
+    from fudan_wgs_toolkit import tf32
+    monkeypatch.setattr(tf32, '_memory_limit_bytes', tf32._memory_limit_bytes)
+    monkeypatch.setattr(tf32, '_memory_reserve_bytes', tf32._memory_reserve_bytes)
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'init', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda device: None)
+    monkeypatch.setattr(torch.cuda, 'get_device_properties', lambda device: SimpleNamespace(total_memory=80*2**30))
+    monkeypatch.setattr(runtime.cli, '_weighted_eigensolver_settings', lambda *args: {'effective': 'torch'})
+    repository = ModelRepository([], workspace_bytes=0)
+    repository._descriptors = [descriptor(0, np.arange(1))]
+    aborted = []
+    @contextmanager
+    def reader(reference, spec):
+        limit = None if budget is None else int(budget*2**30)
+        assert repository._memory_policies[torch.device('cuda:0')] == (limit, 123)
+        assert tf32._memory_limit_bytes == int((80. if budget is None else budget)*2**30)
+        assert tf32._memory_reserve_bytes == 123
+        raise RuntimeError('reader deliberately unavailable')
+        yield
+    before = torch.get_num_threads()
+    with pytest.raises(RuntimeError, match='reader deliberately unavailable'):
+        runtime.run_batched_configuration({'chromosomes': [{'name': 'fixture'}]},
+            model_repository=repository, reader_factory=reader, memory_limit_gib=budget,
+            memory_reserve_bytes=123, writer=SimpleNamespace(write=lambda *args: None,
+                                                            abort=lambda: aborted.append(True)))
+    assert repository._memory_policies == {} and aborted == [True]
+    assert torch.get_num_threads() == before and not runtime._LOCK.locked()
+
+
 def test_dynamic_reservation_evicts_only_device_owned_unpinned_models_and_sources(monkeypatch):
     repository = ModelRepository([], workspace_bytes=0)
     repository.models = OrderedDict([

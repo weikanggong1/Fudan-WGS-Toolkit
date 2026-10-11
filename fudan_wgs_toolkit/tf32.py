@@ -73,19 +73,23 @@ def validate_split_k(split_k):
     return split_k
 
 
-def configure_tf32(*,memory_limit_gib=20,split_k=0,**obsolete):
+def configure_tf32(*,memory_limit_gib=20,memory_reserve_bytes=256*2**20,split_k=0,**obsolete):
     """Configure native products; preflight is not an allocator guarantee.
 
     memory_limit_gib bounds estimated process allocations. Only split_k=0 is
     accepted. Old component, fusion and tile controls are intentionally rejected.
     """
-    global _memory_limit_bytes
+    global _memory_limit_bytes,_memory_reserve_bytes
     if obsolete:raise TypeError('Obsolete TF32 component/fusion/tile settings are unsupported')
     validate_split_k(split_k)
     if isinstance(memory_limit_gib,bool) or not isinstance(memory_limit_gib,(int,float)) or not math.isfinite(memory_limit_gib) or memory_limit_gib<=0:
         raise ValueError('memory_limit_gib must be a positive finite number')
+    if type(memory_reserve_bytes) is not int or memory_reserve_bytes<0:
+        raise ValueError('memory_reserve_bytes must be a nonnegative integer')
     _memory_limit_bytes=int(memory_limit_gib*2**30)
+    _memory_reserve_bytes=memory_reserve_bytes
     return {'raw_tf32_default_split_k':0,'tf32_memory_limit_bytes':_memory_limit_bytes,
+            'tf32_memory_reserve_bytes':_memory_reserve_bytes,
             'matrix_backend':'triton_explicit_native_tf32','vector_backend':'CUDA FP32 GEMV/dot'}
 
 

@@ -53,6 +53,29 @@ def test_invalid_budget_rejected(limit):
     with pytest.raises(ValueError,match='memory_limit_gib'):tf32.configure_tf32(memory_limit_gib=limit)
 
 
+@pytest.mark.parametrize('reserve',[True,-1,1.5,None])
+def test_invalid_live_reserve_rejected(reserve):
+    with pytest.raises(ValueError,match='memory_reserve_bytes'):
+        tf32.configure_tf32(memory_reserve_bytes=reserve)
+
+
+def test_configured_live_reserve_reaches_guard_without_reducing_process_cap(monkeypatch):
+    monkeypatch.setattr(tf32, '_memory_limit_bytes', tf32._memory_limit_bytes)
+    monkeypatch.setattr(tf32, '_memory_reserve_bytes', tf32._memory_reserve_bytes)
+    configured=tf32.configure_tf32(memory_limit_gib=80,memory_reserve_bytes=512)
+    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:100)
+    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:100)
+    monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
+    monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(520,80*2**30))
+    left=SimpleNamespace(shape=(2,2),dtype=torch.float32,device='cuda:0')
+    right=SimpleNamespace(shape=(2,2),dtype=torch.float32,device='cuda:0')
+    with pytest.raises(MemoryError,match='binding=live_free'):
+        tf32._guard_product_workspace(left,right,mode='tf32')
+    snapshot=tf32.execution_metadata()['tf32_memory_guard']['last_rejection']
+    assert configured['tf32_memory_reserve_bytes']==snapshot['reserve_bytes']==512
+    assert snapshot['cap_available_bytes']==80*2**30-100
+
+
 def test_available_ignores_negative_unused_reservation():
     assert tf32._available_product_workspace(allocated=100,reserved=90,free=50,limit=1000,reserve=10)==40
 

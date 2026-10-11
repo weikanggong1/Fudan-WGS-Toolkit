@@ -1188,7 +1188,11 @@ def association_test(
     number_weights = burden_weights.shape[1]
     has_very_rare = bool(very_rare.any())
     all_very_rare = has_very_rare and not bool(common.any())
-    rare_covariance = (v if all_very_rare else v[very_rare][:, very_rare]) if has_very_rare else None
+    # Native mode prepares this only after the full burden product is reduced.
+    # The explicit FP64 path retains its established covariance lifetime.
+    rare_covariance = None
+    if not native and has_very_rare:
+        rare_covariance = v if all_very_rare else v[very_rare][:, very_rare]
     burden_variances = rare_variances = None
     if matmul_mode != "fp64":
         # One matrix product across annotation columns. Native quadratic forms
@@ -1197,13 +1201,20 @@ def association_test(
         from ._burden import ieee_burden_product
         products = ieee_burden_product(v, burden_weights) if native else matmul(v, burden_weights, mode=matmul_mode)
         burden_variances = (burden_weights * products).sum(dim=0)
+        if native:
+            del products
         _STATISTICS_METADATA["burden_matrix_products"] += 1
         if all_very_rare:
             rare_variances = burden_variances
         elif has_very_rare:
+            if native:
+                rare_covariance = v[very_rare][:, very_rare]
             rare_weights = burden_weights[very_rare]
             rare_products = ieee_burden_product(rare_covariance, rare_weights) if native else matmul(rare_covariance, rare_weights, mode=matmul_mode)
             rare_variances = (rare_weights * rare_products).sum(dim=0)
+            if native:
+                del rare_products, rare_weights
+                rare_covariance = None
             _STATISTICS_METADATA["rare_burden_matrix_products"] += 1
     pvalues = torch.empty((3, number_weights), dtype=torch.float64, device=u.device)
     if _skat_pvalues is not None:

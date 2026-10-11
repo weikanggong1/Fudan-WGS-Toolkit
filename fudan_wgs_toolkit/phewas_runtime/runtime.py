@@ -913,11 +913,14 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
     """
     if type(trait_batch_size) is not int or trait_batch_size < 1 or type(cpu_threads) is not int or cpu_threads < 1:
         raise ValueError('trait_batch_size and cpu_threads must be positive integers')
+    if type(memory_reserve_bytes) is not int or memory_reserve_bytes < 0:
+        raise ValueError('memory_reserve_bytes must be a nonnegative integer')
     if not callable(reader_factory) or not callable(getattr(writer, 'write', None)):
         raise ValueError('portable reader_factory and streaming writer are required')
     if not _LOCK.acquire(blocking=False):
         raise RuntimeError('PheWAS context is already running')
     previous_threads = torch.get_num_threads()
+    repository_policy = ExitStack()
     try:
         if torch.device(device).type != 'cuda' or not torch.cuda.is_available():
             raise ValueError('native batched PheWAS production requires CUDA')
@@ -961,7 +964,12 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         for descriptor in descriptors:
             if descriptor['family'] == 'binomial' and not callable(getattr(model_repository, 'acquire_spa', None)):
                 raise ValueError('formal binary analysis requires a fitted FP64 SPA repository')
-        configured = configure_tf32(split_k=0, memory_limit_gib=budget)
+        configured = configure_tf32(split_k=0, memory_limit_gib=budget,
+                                    memory_reserve_bytes=memory_reserve_bytes)
+        policy = getattr(model_repository, 'memory_policy', None)
+        if callable(policy):
+            repository_policy.enter_context(policy(device, limit_bytes=(None if memory_limit_gib is None else int(budget*2**30)),
+                                                  reserve_bytes=memory_reserve_bytes))
         tf32_metadata(reset=True); single_metadata(reset=True); statistics_execution_metadata(reset=True)
         start = time.perf_counter()
         kinds = ('individual', 'coding', 'noncoding', 'ncrna')
@@ -1058,9 +1066,12 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         raise
     finally:
         try:
-            torch.set_num_threads(previous_threads)
+            repository_policy.close()
         finally:
-            _LOCK.release()
+            try:
+                torch.set_num_threads(previous_threads)
+            finally:
+                _LOCK.release()
 
 
 def run_configuration(analyses, *, cache_specs, device='cuda:0', device_cache_bytes=512*2**20,

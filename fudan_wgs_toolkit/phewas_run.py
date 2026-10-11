@@ -84,13 +84,28 @@ def _reuse_context(plan):
     components = proof.get('components', {})
     required = {'binary_null.py:complete_module', 'phewas_models.py:complete_module',
         'phewas_inputs.py:complete_module', 'rint.py:complete_module', 'numerics.py:complete_module',
-        'tf32.py:complete_module', 'tensor_validation.py:complete_module',
+        'tensor_validation.py:complete_module',
         'null_model.py:fit_gaussian_null', 'null_model.py:KinshipSpectrum',
         'null_model.py:rank_inverse_normal', 'null_model.py:_r_sum',
         'null_model.py:GaussianNullModel.dataclass_fields',
         'null_model.py:GaussianNullModel.set_matmul_mode_except_new_cache_clear', 'phewas_run.py:_design'}
     if not isinstance(components, dict) or not required <= components.keys():
         raise ValueError('null-fit compatibility receipt lacks required scientific components')
+    if 'tf32.py:complete_module' not in components:
+        policy = proof.get('tf32_resource_policy_compatibility', {})
+        if ('tf32.py:numerical_component' not in components
+                or not isinstance(policy, dict)
+                or policy.get('kind') != 'configure_tf32_reserve_only'
+                or policy.get('resource_policy_only') is not True
+                or policy.get('numerical_component_ast_identical') is not True
+                or policy.get('configure_tf32_resource_additions_verified') is not True
+                or policy.get('complete_tf32_module_identical') is not False
+                or policy.get('changed_tf32_definitions') != ['configure_tf32']
+                or not _hash(policy.get('baseline_null_fit_compatibility_sha256'))
+                or not _hash(policy.get('baseline_consumer_source_implementation_sha256'))
+                or policy.get('model_fit_source_implementation_sha256') != fit_source
+                or policy.get('consumer_source_implementation_sha256') != consumer):
+            raise ValueError('null-fit compatibility receipt lacks strict TF32 numerical/resource-policy proof')
     joined = hashlib.sha256()
     for name, record in sorted(components.items()):
         if (not isinstance(record, dict) or record.get('identical') is not True

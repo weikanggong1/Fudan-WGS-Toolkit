@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from .binary_null import BinaryNullModel
 from .null_model import GaussianNullModel, KinshipSpectrum
+from .tensor_validation import finite_check_scratch_bytes
 
 
 _VERIFIED_FILES = {}
@@ -217,6 +218,56 @@ def load_spa_source(directory, *, device, tensor_cache):
         has_kinship=meta['has_kinship'], iterations=meta['iterations'], provenance=meta['fit_method'])
 
 
+def _binary_source_peak_bytes(metadata):
+    """Source upload plus its validation/projection or sparse-coalescing peak.
+
+    Array shapes/dtypes come from the immutable source manifest. X deduplication
+    may make this conservative; admission must precede loading any new arrays.
+    The live reserve remains available for CUDA library-internal workspaces.
+    """
+    fields = {'x', 'scaled_residuals', 'fitted_probability', 'fixed_effect_covariance',
+              'precision', 'precision_indices', 'precision_values', 'coefficients'}
+    arrays = {name: spec for name, spec in metadata['arrays'].items() if name in fields}
+    sizes = {name: int(np.prod(spec['shape']))*np.dtype(spec['dtype']).itemsize
+             for name, spec in arrays.items()}
+    n, q = arrays['x']['shape']
+    # The compact source admission uses full isfinite, which can hold abs and
+    # three boolean tensors. Later projection checks use the bounded helper.
+    validation = max((int(np.prod(spec['shape']))*(np.dtype(spec['dtype']).itemsize+3)+2
+                      for name, spec in arrays.items() if name != 'precision_indices'), default=0)
+    sparse = sizes.get('precision_indices', 0)+sizes.get('precision_values', 0)
+    # Coalescing can retain input/output indices and values plus sort buffers.
+    # Constructor SX and Xcov checks are sequential, each uses one FP64 N*Q.
+    projection_check = 8*n*q+finite_check_scratch_bytes((n, q), element_size=8)
+    return sum(sizes.values())+max(2*sparse, validation, projection_check)
+
+
+def _tensor_storage_bytes(tensor, *, dtype=None):
+    if tensor is None:
+        return 0
+    element_size = tensor.element_size() if dtype is None else torch.finfo(dtype).bits//8
+    if tensor.layout == torch.strided:
+        return tensor.numel()*element_size
+    # Fitted binary sources are coalesced COO; never estimate dense N-by-N.
+    return tensor.indices().numel()*tensor.indices().element_size()+tensor.values().numel()*element_size
+
+
+def _binary_derivation_peak_bytes(source, *, spa=False):
+    """NEW bytes only: FP64 SX plus temporary normal casts or SPA Xcov.
+
+    The immutable FP64 source is already allocated and counted by the allocator.
+    FP32 sparse casts conservatively include their indices even if Torch aliases
+    them. Normal xw aliases SX.T and SPA state aliases every other source array.
+    """
+    x, residual, probability, covariance, precision, coefficients, _ = source._tensors
+    projection = 8*x.numel()
+    if spa:
+        return 2*projection
+    normal = sum(_tensor_storage_bytes(value, dtype=torch.float32)
+                 for value in (x, residual, probability, covariance, precision, coefficients))
+    return projection+normal+4*x.numel()
+
+
 class _WorkspaceReservation:
     """Future CUDA bytes, excluding tensors that are already allocated."""
     def __init__(self, repository, device, required_bytes, reserve_bytes, cache_release):
@@ -259,6 +310,7 @@ class ModelRepository:
         self.entries = list(entries)
         self.workspace_bytes = workspace_bytes
         self._workspace_reservations = []
+        self._memory_policies = {}
         self._workspace_metrics = dict(workspace_admissions=0, workspace_evictions=0,
             workspace_cache_release_calls=0, workspace_required_bytes_highwater=0,
             workspace_additional_bytes_highwater=0, workspace_phase_counts={})
@@ -301,8 +353,32 @@ class ModelRepository:
         # Separate live contexts represent distinct future allocations. The
         # ordinary bank headroom is retained when their combined need is small.
         required = max(self.workspace_bytes, sum(r.required_bytes for r in current))
-        reserve = max((r.reserve_bytes for r in current), default=0)
+        policy = self._memory_policies.get(device, (None, 0))
+        reserve = max(policy[1], max((r.reserve_bytes for r in current), default=0))
         return required, reserve, current
+
+    @contextmanager
+    def memory_policy(self, device, *, limit_bytes=None, reserve_bytes=256*2**20):
+        """Use the caller's process cap and live reserve during this run.
+
+        None retains admission against current physical/live CUDA capacity.
+        Nested contexts restore the previous policy on every exit.
+        """
+        if limit_bytes is not None:
+            self._validate_bytes(limit_bytes, 'limit_bytes')
+            if not limit_bytes:
+                raise ValueError('limit_bytes must be positive or None')
+        self._validate_bytes(reserve_bytes, 'reserve_bytes')
+        device = torch.device(device)
+        previous = self._memory_policies.get(device)
+        self._memory_policies[device] = (limit_bytes, reserve_bytes)
+        try:
+            yield
+        finally:
+            if previous is None:
+                self._memory_policies.pop(device)
+            else:
+                self._memory_policies[device] = previous
 
     def _admit(self, device, *, extra_bytes=0, fitted_bytes=0, phase='fitted_state', protect=()):
         """Evict owned, unpinned state until physical/live CUDA space admits NEW bytes.
@@ -329,7 +405,9 @@ class ModelRepository:
             free, total = torch.cuda.mem_get_info(device)
             allocated = torch.cuda.memory_allocated(device)
             unused = max(0, torch.cuda.memory_reserved(device)-allocated)
-            available = max(0, min(int(free)+unused, int(total)-allocated)-reserve)
+            limit = self._memory_policies.get(device, (None, 0))[0]
+            cap = int(total) if limit is None else min(int(total), limit)
+            available = max(0, min(int(free)+unused-reserve, cap-allocated))
             if required <= available:
                 return
             if self._evict_one(device=device, protect=protect):
@@ -398,6 +476,8 @@ class ModelRepository:
             for i in indices:
                 if self._descriptors[i]['family'] == 'binomial':
                     source = contexts.enter_context(self._acquire_binary_source(int(i), device))
+                    self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source),
+                                phase='binary_normal_derivation')
                     models.append(source.normal())
                     continue
                 key = (int(i), str(device))
@@ -432,10 +512,7 @@ class ModelRepository:
         key = (int(index), str(device))
         if key not in self.spa_sources:
             meta = json.loads((Path(self.entries[index]['path'])/'spa'/'state.private.json').read_text())
-            fields = {'x', 'scaled_residuals', 'fitted_probability', 'fixed_effect_covariance',
-                      'precision', 'precision_indices', 'precision_values', 'coefficients'}
-            estimated = sum(int(np.prod(v['shape']))*np.dtype(v['dtype']).itemsize
-                            for k, v in meta['arrays'].items() if k in fields)
+            estimated = _binary_source_peak_bytes(meta)
             if torch.device(device).type == 'cuda':
                 self._admit(device, fitted_bytes=estimated, phase='binary_fitted_source')
             from .binary_null import ImmutableFittedBinarySource
@@ -454,6 +531,8 @@ class ModelRepository:
     @contextmanager
     def acquire_spa(self, index, device):
         with self._acquire_binary_source(int(index), device) as source:
+            self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source, spa=True),
+                        phase='binary_spa_derivation')
             model = source.spa()
             try:
                 yield model

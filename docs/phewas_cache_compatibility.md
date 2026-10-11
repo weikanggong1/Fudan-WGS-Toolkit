@@ -113,6 +113,14 @@ python -m fudan_wgs_toolkit.phewas_run \
 
 旧混合模型路线使用可用 GPU 内存、全部 variant gene masks 和固定的成熟统计设置。可显式使用 `memory_limit_gib=None`、`gene_variant_type="variant"`；现代路线专属参数的非默认值会在启动前报错，避免参数被静默忽略。现代 `dataset.json` 路线默认保留 20 GiB、SNV 以及精确 FID/IID 输入，其专属参数仍按主接口文档生效。
 
+### 2026-10-11：关联工作区预算修复
+
+混合模型多表型运行的 `memory_limit_gib=None` 不设置人为显存上限，仍按实际 CUDA 可用空间检查每次分配。Burden 的 IEEE FP32 矩阵乘法现在继承调用方预算和 `memory_reserve_bytes`；此前子函数自身默认的 20 GiB 限制可能在其他模型已占用超过该值时拒绝一个很小的乘法。显式设置正数上限只会收紧统一预算。
+
+二值模型的 FP64 源上传、FP32 normal 状态派生和 FP64 SPA 状态派生分别在分配前估算新增工作区；已存在的源张量不重复计为新增分配。模型库和矩阵乘法使用同一调用方上限与安全余量。原有 TF32 计算、Burden IEEE FP32 计算、拟合参数、样本轴、结果顺序和文件格式保持不变。
+
+工作区拒绝信息记录 required、available、allocated、reserved、CUDA free、limit、reserve 及实际约束类型。allocator 缓存与新增工作区分别计量；该检查不把库内部空间估算当作精确显存峰值。针对性预算与状态恢复测试见 `tests/test_burden_memory_budget.py`、`tests/test_phewas_workspace.py` 和 `tests/test_tf32_memory_guard.py`。这些测试的覆盖范围与真实数据运行证据分别报告。
+
 ## 本次模型与 Single 修正
 
 二分类混合模型在 AI 更新不能收敛时，对同一 GRM 和同一模型的方差参数执行有界 Brent 搜索；方差在零边界时重新拟合边界状态，保留混合模型来源。极端线性预测值沿原 logit 的边界分支处理，拟合诊断记录边界次数和优化路径。普通关联状态与显著结果的 FP64 SPA 状态来自同一次拟合，SPA 失败计数写入 worker 报告。
