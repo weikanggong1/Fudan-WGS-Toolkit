@@ -15,7 +15,8 @@ import threading
 import time
 import hashlib
 import gc
-from types import SimpleNamespace
+import weakref
+from types import MethodType, SimpleNamespace
 import numpy as np
 import torch
 
@@ -37,6 +38,33 @@ from .single import (process_single_batches, process_single_shared_genotype,
                      execution_metadata as single_metadata)
 
 _LOCK = threading.Lock()
+
+
+def _gpu_memory_diagnostics(device, repository=None, broker=None):
+    """Low-cost allocator/cache snapshots; reserved space is not a live leak."""
+    target = torch.device(device)
+    result = dict(device_type=target.type,
+                  scope='owned process allocator/cache endpoint; not a peak or NVML card total')
+    if target.type == 'cuda':
+        allocated = int(torch.cuda.memory_allocated(target))
+        reserved = int(torch.cuda.memory_reserved(target))
+        result.update(allocated_bytes=allocated, reserved_bytes=reserved,
+                      unused_reserved_bytes=max(0, reserved-allocated))
+    if repository is not None:
+        for name, attribute in (('resident_normal_models', 'models'),
+                                ('resident_binary_sources', 'spa_sources'),
+                                ('shared_design_entries', 'tensor_cache')):
+            bank = getattr(repository, attribute, None)
+            if bank is not None:
+                result[name] = len(bank)
+    if broker is not None:
+        metrics = broker.metrics
+        for key in ('current_gpu_csr_cache_bytes', 'current_sample_axis_device_bytes',
+                    'current_compact_cache_bytes', 'current_sample_axis_host_bytes',
+                    'current_raw_state_cache_bytes', 'current_raw_state_cache_slabs'):
+            if key in metrics:
+                result[key] = metrics[key]
+    return result
 
 
 def _resolved_budget(value, device):
@@ -214,13 +242,71 @@ def _load_models(configs, device):
     return models, rows
 
 
+def _annotation_metadata_source(pipeline):
+    genotype = pipeline.genotype
+    return genotype._broker._reader if isinstance(genotype, SharedTraitReader) else genotype
+
+
+def _shared_annotation_categories(self):
+    """Publish the mature uint8 decode only after a complete successful scan."""
+    shared = self._shared_annotation_state
+    with shared['lock']:
+        if shared['codes'] is None:
+            self._category_codes = None
+            try:
+                codes = PheWASPipeline._annotation_categories(self)
+            except BaseException:
+                # The mature loader fills its array in place. A failed block
+                # must never authorize a partial category array on a retry.
+                self._category_codes = None
+                raise
+            codes.flags.writeable = False
+            shared['codes'] = codes
+        self._category_codes = shared['codes']
+        return self._category_codes
+
+
 def _share_annotations(pipelines):
     first = pipelines[0]
+    shared = None
+    if isinstance(first, PheWASPipeline):
+        shared = getattr(first, '_shared_annotation_state', None)
+        if shared is None:
+            codes = first._category_codes
+            if codes is not None:
+                codes.flags.writeable = False
+            shared = dict(source=_annotation_metadata_source(first), options=first.options,
+                          catalog=dict(first.annotation_catalog), names=tuple(first.annotation_names),
+                          codes=codes, lock=threading.Lock())
+        for pipeline in pipelines:
+            if (_annotation_metadata_source(pipeline) is not shared['source']
+                    or pipeline.options != shared['options']
+                    or pipeline.annotation_catalog != shared['catalog']
+                    or tuple(pipeline.annotation_names) != shared['names']):
+                raise ValueError('shared annotations require identical metadata source and options')
+        for pipeline in pipelines:
+            pipeline._shared_annotation_state = shared
+            # A strong instance-bound method would create a cycle retaining
+            # each short-lived selector's models/reader until cyclic GC.
+            pipeline._annotation_categories = MethodType(_shared_annotation_categories, weakref.proxy(pipeline))
+            pipeline._category_codes = shared['codes']
     for pipeline in pipelines[1:]:
         pipeline._base_masks = first._base_masks
         pipeline._category_codes = first._category_codes
         pipeline._annotation_indexes = first._annotation_indexes
         pipeline._coding_masks_cache = first._coding_masks_cache
+
+
+def _reader_metadata_diagnostics(metadata):
+    """Allowlisted endpoint counters; never copy reader paths or sample keys."""
+    values = metadata.reader_metadata
+    result = {}
+    for key in ('metadata_reads', 'metadata_read_seconds', 'metadata_checked_files',
+                'metadata_checksum_verification_seconds', 'metadata_checksums_enabled'):
+        value = values.get(key)
+        if isinstance(value, (int, float, bool)) and math.isfinite(value):
+            result[key] = value
+    return result
 
 
 def _single(pipelines, broker, arguments, configs):
@@ -350,6 +436,7 @@ def _thin_pipeline(gds, model, rows, options, configuration, structural=None):
     p.single_batch_optimization = True
     p.individual_effective_block_size = configuration.get('individual_effective_block_size', 1024)
     p.host_memory_guard = configuration.get('host_memory_guard')
+    p.host_memory_set_future = configuration.get('_host_memory_set_future')
     p.hybrid_mask_sizes, p.hybrid_union_M = [], 0
     p.maximum_mask_variants = configuration.get('maximum_mask_variants')
     if structural is not None:
@@ -369,6 +456,19 @@ def _check_model(model, descriptor, metadata, verified):
         if not np.array_equal(np.asarray(identifiers, dtype=str), actual):
             raise ValueError('fitted model IDs differ from the portable ordered sample binding')
         verified.add(index)
+
+
+def _prepare_host_guard(pipeline, model, selected_m, materialized_bytes=0):
+    """Replace future preparation bytes using only initialized owned arrays."""
+    guard = getattr(pipeline, 'host_memory_guard', None)
+    if guard is None:
+        return
+    if callable(getattr(pipeline, 'host_memory_set_future', None)):
+        guard(n=model.n, m=int(selected_m), phase='prepare',
+              materialized_bytes=int(materialized_bytes))
+    else:
+        # Injected/older guards retain their original three-argument contract.
+        guard(n=model.n, m=int(selected_m), phase='prepare')
 
 
 def _prepare_shared_gene(pipeline, indices, broker):
@@ -404,7 +504,8 @@ def _prepare_shared_gene(pipeline, indices, broker):
         if len(columns):
             # Compact CPU parts are already host allocations; obtain/extend
             # the owner lease before retaining them, not only before dense G.
-            pipeline._hybrid_host_guard(model, len(physical)+len(columns))
+            _prepare_host_guard(pipeline, model, len(physical)+len(columns),
+                sum(part.dosage.numel()*part.dosage.element_size() for part in parts))
             compact = block.select_columns(columns)
             # This handoff contains exact six-state-derived minor dosage, not
             # phenotype/model data. CPU conversion/imputation retains FP32.
@@ -425,7 +526,8 @@ def _prepare_shared_gene(pipeline, indices, broker):
     if maximum is not None and count > maximum:
         pipeline.skipped_sets.append(dict(eligible_variants=count, reason='eligible_M_exceeds_configured_limit'))
         return None
-    pipeline._hybrid_host_guard(model, count)
+    parts_bytes = sum(part.dosage.numel()*part.dosage.element_size() for part in parts)
+    _prepare_host_guard(pipeline, model, count, parts_bytes)
     host = np.empty((model.n, count), dtype=np.float32, order='F')
     group = np.asarray(groups, dtype=np.int64)
     order = np.argsort(group, kind='stable')
@@ -433,12 +535,18 @@ def _prepare_shared_gene(pipeline, indices, broker):
     inverse[order] = np.arange(count)
     begin = 0
     for part in parts:
-        end = begin + part.shape[1]
-        dense = part.trait_dense(pipeline.trait_rows[0], options.imputation,
-                                frequency_mode='reference', dtype=torch.float32)[0]
-        host[:, inverse[begin:end]] = dense.numpy()
-        begin = end
-        del dense
+        # The host lease includes one 128-column conversion, never a full
+        # physical frame. Only filled host columns qualify as materialized.
+        for local in range(0, part.shape[1], 128):
+            stop = min(local+128, part.shape[1])
+            compact_part = part.select_columns(np.arange(local, stop, dtype=np.int64))
+            end = begin+stop-local
+            dense = compact_part.trait_dense(pipeline.trait_rows[0], options.imputation,
+                                            frequency_mode='reference', dtype=torch.float32)[0]
+            host[:, inverse[begin:end]] = dense.numpy()
+            begin = end
+            del dense, compact_part
+            _prepare_host_guard(pipeline, model, count, parts_bytes+4*model.n*begin)
     physical = np.asarray(physical, dtype=np.int64)[order]
     maf = np.asarray(frequencies, dtype=np.float64)[order]
     from ..pipeline import _cmac_scalar_sum
@@ -675,52 +783,60 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                 for tile_index, tile in enumerate(_trait_tiles(group, trait_batch_size)):
                     if cached[tile_index] is not None:
                         continue
-                    with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
-                        pipelines = []
-                        for model, descriptor in zip(models, tile):
-                            _check_model(model, descriptor, metadata, verified)
-                            pipelines.append(_thin_pipeline(axis, model, rows, options, configuration, structural))
-                        if len(models) != len(tile):
-                            raise ValueError('repository acquire must retain the requested model order/count')
-                        if prepared is None:
-                            state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinal_before, mac_cutoff=mac)
-                            prepared = (None if state is None else
-                                pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac))
-                            if prepared is not None:
-                                prepared.pop('model')
-                            for receipt in cached:
-                                if receipt is not None and receipt['ordinal_after'] != ordinals[gi]:
-                                    raise ValueError('Single checkpoint ordinal differs from the current verified genetic block')
-                        if prepared is None:
-                            outputs = [[] for _ in tile]
-                        else:
-                            broker._guard(pipelines[0]._workspace_estimate(models[0], prepared['genotype'].shape[1], individual=True)
-                                          + 4*models[0].n*len(models))
-                            def correction(index, model, genotype, score, variance):
-                                from ..binary import binary_single_phewas
-                                return binary_single_phewas(model, genotype,
-                                    spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
-                                    normal_score=score, normal_variance=variance,
-                                    p_filter_cutoff=options.p_filter_cutoff,
-                                    tol=options.spa_tol, max_iter=options.spa_max_iter)
-                            outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
-                                mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
-                        if checkpoints:
-                            writer.write_tile('individual', chromosome,
-                                [(d['trait_index'], result) for d, result in zip(tile, outputs)],
-                                job_index=job_index, block_index=block_index,
-                                block_identity=block_identity, ordinal_before=ordinal_before,
-                                ordinal_after=ordinals[gi])
-                        else:
+                    models, model, state, outputs = None, None, None, None
+                    pipelines = []
+                    try:
+                        with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
+                            pipelines = []
+                            for model, descriptor in zip(models, tile):
+                                _check_model(model, descriptor, metadata, verified)
+                                pipelines.append(_thin_pipeline(axis, model, rows, options, configuration, structural))
+                            if len(models) != len(tile):
+                                raise ValueError('repository acquire must retain the requested model order/count')
+                            if prepared is None:
+                                state, ordinals[gi] = pipelines[0]._prepare_individual_block(block, ordinal_before, mac_cutoff=mac)
+                                prepared = (None if state is None else
+                                    pipelines[0]._prepare_individual_trait(state, 0, mac_cutoff=mac))
+                                state = None
+                                if prepared is not None:
+                                    prepared.pop('model')
+                                for receipt in cached:
+                                    if receipt is not None and receipt['ordinal_after'] != ordinals[gi]:
+                                        raise ValueError('Single checkpoint ordinal differs from the current verified genetic block')
+                            if prepared is None:
+                                outputs = [[] for _ in tile]
+                            else:
+                                broker._guard(pipelines[0]._workspace_estimate(models[0], prepared['genotype'].shape[1], individual=True)
+                                              + 4*models[0].n*len(models))
+                                def correction(index, model, genotype, score, variance):
+                                    from ..binary import binary_single_phewas
+                                    return binary_single_phewas(model, genotype,
+                                        spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
+                                        normal_score=score, normal_variance=variance,
+                                        p_filter_cutoff=options.p_filter_cutoff,
+                                        tol=options.spa_tol, max_iter=options.spa_max_iter)
+                                outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
+                                    mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
+                            if checkpoints:
+                                writer.write_tile('individual', chromosome,
+                                    [(d['trait_index'], result) for d, result in zip(tile, outputs)],
+                                    job_index=job_index, block_index=block_index,
+                                    block_identity=block_identity, ordinal_before=ordinal_before,
+                                    ordinal_after=ordinals[gi])
+                            else:
+                                for descriptor, result in zip(tile, outputs):
+                                    writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
                             for descriptor, result in zip(tile, outputs):
-                                writer.write('individual', descriptor['trait_index'], chromosome, result, job_index=job_index)
-                        for descriptor, result in zip(tile, outputs):
-                            report['association_rows']['individual'] += len(result)
-                            report['trait_rows'][descriptor['trait_index']]['individual'] += len(result)
-                            if descriptor['family'] == 'binomial':
-                                report['binary_spa_selected'] += sum(row['spa_selected'] for row in result)
-                                report['binary_spa_failed'] += sum(row['spa_failed'] for row in result)
-                        del outputs, pipelines, models, model
+                                report['association_rows']['individual'] += len(result)
+                                report['trait_rows'][descriptor['trait_index']]['individual'] += len(result)
+                                if descriptor['family'] == 'binomial':
+                                    report['binary_spa_selected'] += sum(row['spa_selected'] for row in result)
+                                    report['binary_spa_failed'] += sum(row['spa_failed'] for row in result)
+                    finally:
+                        for pipeline in pipelines:
+                            pipeline.models = []
+                        pipelines.clear()
+                        models, model, state, outputs = None, None, None, None
             finally:
                 del prepared, block
                 axis.close()
@@ -737,11 +853,11 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
 
 @contextmanager
 def _job_host_memory_scope(configuration, factory, *, kind, chromosome_index, job_index):
-    """Lease host workspace for one complete gene job and release on all exits.
+    """Lease host workspace for one accepted gene cohort and release on all exits.
 
     A nonblocking growth rejection propagates to the dispatcher's job retry.
     Gene preparation/statistics precede every writer call, so a rejected
-    preparation never publishes partial gene output. Retrying writer failures
+    preparation never publishes partial cohort output. Retrying writer failures
     requires the writer's own transactional contract and is not done here.
     """
     if kind == 'individual' or factory is None:
@@ -753,11 +869,25 @@ def _job_host_memory_scope(configuration, factory, *, kind, chromosome_index, jo
             raise TypeError('host memory lease must provide a callable guard')
         current = dict(configuration)
         current['host_memory_guard'] = guard
-        yield current
+        set_future = getattr(lease, 'set_future', None)
+        if callable(set_future):
+            def replace_future(required_bytes, *, phase):
+                # A rejected real lease is already removed or retired by its
+                # gate. Idempotent cleanup must not mask the original pressure
+                # exception; every new nonzero request remains strictly checked.
+                if required_bytes == 0 and getattr(lease, 'closed', False):
+                    return 0.
+                return set_future(required_bytes, phase=phase)
+            current['_host_memory_set_future'] = replace_future
+        try:
+            yield current
+        finally:
+            if callable(set_future):
+                replace_future(0, phase='job_released')
 
 
 class _StagedGeneWriter:
-    """Keep one already assembled gene job private until preparation succeeds."""
+    """Keep one cohort private until its preparation and computation succeed."""
     def __init__(self, writer=None):
         self.pending = []
         self.checkpoint_tiles = bool(getattr(writer, 'checkpoint_tiles', False))
@@ -774,14 +904,18 @@ class _StagedGeneWriter:
         self.pending.clear()
 
 
-def _scientific_counter_snapshot(report):
-    return {key: deepcopy(report[key]) for key in
-            ('association_rows', 'trait_rows', 'binary_spa_selected', 'binary_spa_failed', 'job_groups')
-            if key in report}
+def _scientific_counter_snapshot(report, trait_indices=None):
+    snapshot = {key: deepcopy(report[key]) for key in
+                ('association_rows', 'binary_spa_selected', 'binary_spa_failed', 'job_groups') if key in report}
+    if 'trait_rows' in report:
+        selected = report['trait_rows'] if trait_indices is None else trait_indices
+        snapshot['trait_rows'] = {key: deepcopy(report['trait_rows'][key]) for key in selected}
+    return snapshot
 
 
 def _execute_batched_job(attempt, *, configuration, host_memory_lease_factory,
-                         kind, chromosome_index, job_index, writer, report, emit=None):
+                         kind, chromosome_index, job_index, writer, report, emit=None, trait_indices=None,
+                         host_cache_recovery=None):
     """Retry temporary gene admission only after every owning context unwinds.
 
     Results and accepted-row counters are rolled back between failed attempts.
@@ -793,40 +927,54 @@ def _execute_batched_job(attempt, *, configuration, host_memory_lease_factory,
     if kind == 'individual':
         attempt(configuration, writer)
         return
-    baseline = _scientific_counter_snapshot(report)
+    if host_cache_recovery is not None and not callable(host_cache_recovery):
+        raise TypeError('host_cache_recovery must be a context factory or None')
+    baseline = _scientific_counter_snapshot(report, trait_indices)
     count = 0
-    while True:
-        staged = _StagedGeneWriter(writer)
-        deferred = None
-        try:
-            with _job_host_memory_scope(configuration, host_memory_lease_factory, kind=kind,
-                    chromosome_index=chromosome_index, job_index=job_index) as current:
-                attempt(current, staged)
-        except HostMemoryDeferred as error:
-            # Keep only anonymous integers. The exception and its traceback
-            # would otherwise retain the partial genotype/model stack.
-            deferred = dict(required_bytes=error.required_bytes, available_bytes=error.available_bytes)
-            for key, value in baseline.items():
-                report[key] = deepcopy(value)
-            staged.pending.clear()
-        if deferred is None:
-            staged.publish(writer)
-            return
-        # This point is outside the except block and the lease context. Release
-        # cyclic frames before waiting; verified reader/model caches may remain.
-        del staged
-        gc.collect()
-        count += 1
-        report['host_memory_deferrals'] = report.get('host_memory_deferrals', 0)+1
-        delay = min(configuration.get('host_memory_retry_seconds', 5.)*2**min(count-1, 8),
-                    configuration.get('host_memory_retry_max_seconds', 60.))
-        if emit:
-            emit(dict(event='host_memory_deferred', attempt=count, retry_after_seconds=delay,
-                      **deferred))
-        wait_started = time.perf_counter()
-        time.sleep(delay)
-        report['host_memory_retry_wait_seconds'] = (report.get('host_memory_retry_wait_seconds', 0.)
-                                                   +time.perf_counter()-wait_started)
+    with ExitStack() as recovery:
+        while True:
+            staged = _StagedGeneWriter(writer)
+            deferred = None
+            try:
+                with _job_host_memory_scope(configuration, host_memory_lease_factory, kind=kind,
+                        chromosome_index=chromosome_index, job_index=job_index) as current:
+                    attempt(current, staged)
+            except HostMemoryDeferred as error:
+                # Keep only anonymous integers. The exception and its traceback
+                # would otherwise retain the partial genotype/model stack.
+                deferred = dict(required_bytes=error.required_bytes, available_bytes=error.available_bytes)
+                # Expected pressure is reported through integers, not retained
+                # exception frames containing partially prepared CPU/GPU arrays.
+                error.__traceback__ = error.__context__ = error.__cause__ = None
+                for key, value in baseline.items():
+                    if key == 'trait_rows' and trait_indices is not None:
+                        for trait, counters in value.items():
+                            report['trait_rows'][trait] = deepcopy(counters)
+                    else:
+                        report[key] = deepcopy(value)
+                staged.pending.clear()
+            if deferred is None:
+                staged.publish(writer)
+                return
+            # This point is outside the except block and the lease context.
+            # Release partial arrays first, then optional cache owners. Keep
+            # metadata LRU admission suspended across this cohort's retries so
+            # repeated annotation reads cannot recreate the original pressure.
+            del staged
+            gc.collect()
+            if count == 0 and host_cache_recovery is not None:
+                recovery.enter_context(host_cache_recovery())
+            count += 1
+            report['host_memory_deferrals'] = report.get('host_memory_deferrals', 0)+1
+            delay = min(configuration.get('host_memory_retry_seconds', 5.)*2**min(count-1, 8),
+                        configuration.get('host_memory_retry_max_seconds', 60.))
+            if emit:
+                emit(dict(event='host_memory_deferred', attempt=count, retry_after_seconds=delay,
+                          **deferred))
+            wait_started = time.perf_counter()
+            time.sleep(delay)
+            report['host_memory_retry_wait_seconds'] = (report.get('host_memory_retry_wait_seconds', 0.)
+                                                       +time.perf_counter()-wait_started)
 
 
 def _phewas_result_fields(value):
@@ -861,109 +1009,123 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
             axis = broker.reader_view(group['rows'])
             try:
                 for mi, indices in enumerate(masks):
-                    anchor = group['descriptors'][0]
-                    with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
-                        _check_model(models[0], anchor, metadata, verified)
-                        prototype = _thin_pipeline(axis, models[0], axis._axis.samples, options, configuration, structural)
-                        prepared = _prepare_shared_gene(prototype, indices, broker)
-                        q = models[0].x.shape[1]
-                    prototype.models = []
-                    del models
-                    if prepared is None:
-                        continue
-                    host = prepared['_genotype_host']
-                    genotype, burdens = host, None
-                    n, m = host.shape
-                    has_gaussian = any(d['family'] == 'gaussian' for d in group['descriptors'])
-                    score_new = 4*(n*min(m, 512)+n*min(trait_batch_size, len(group['descriptors']))
-                                   +m*min(trait_batch_size, len(group['descriptors']))) + 64*2**20
-                    tail_new = _gene_tail_new_bytes(n, m, options) if has_gaussian else 0
-                    host_peak = (max(_gene_host_covariance_new_bytes(n, m, q, options),
-                                     4*m*m+tail_new, score_new) if has_gaussian else score_new)
-                    with _gene_workspace_scope(repository, broker, host_peak) as workspace:
-                        # Materialize only if the live device can admit original
-                        # fitted ordinary covariance products plus this one G.
-                        if m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda':
-                            # Relatedness may vary between traits in one cohort;
-                            # two genotype copies cover the original block path.
-                            device_peak = max(8*host.size+32*m*m+256*2**20,
-                                              4*m*m+tail_new, score_new)
-                            try:
-                                workspace.set_required(4*host.size+device_peak, phase='gene_genotype_upload')
-                            except MemoryError:
-                                # Preserve the established bounded-host route
-                                # when full G plus pinned state cannot fit.
-                                pass
-                            else:
-                                genotype = torch.as_tensor(host, device=broker.device)
-                                workspace.set_required(device_peak, phase='gene_genotype_resident')
-                        tile_peak = (device_peak if isinstance(genotype, torch.Tensor) and genotype.is_cuda
-                                     else host_peak)
-                        for begin in range(0, len(group['descriptors']), trait_batch_size):
-                            workspace.set_required(tile_peak, phase='gene_trait_tile')
-                            tile = group['descriptors'][begin:begin+trait_batch_size]
-                            with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
-                                if len(models) != len(tile):
-                                    raise ValueError('repository acquire must retain requested model count')
-                                for model, descriptor in zip(models, tile):
-                                    _check_model(model, descriptor, metadata, verified)
-                                gaussian_indices = [i for i, model in enumerate(models) if model.family == 'gaussian']
-                                scores = (_shared_gene_scores(genotype, [models[i] for i in gaussian_indices], broker)
-                                          if gaussian_indices else None)
-                                gauss_columns = {i: j for j, i in enumerate(gaussian_indices)}
-                                for ti, (descriptor, model) in enumerate(zip(tile, models)):
-                                    p = _thin_pipeline(axis, model, axis._axis.samples, options, configuration, structural)
-                                    if model.family == 'binomial':
-                                        from ..binary import prepare_binary_burdens, staar_binary_phewas
-                                        if burdens is None:
-                                            burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
-                                                prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,
-                                                rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
-                                        value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
-                                            prepared['annotations'], prepared['names'],
-                                            spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
-                                            prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
-                                            rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
-                                            p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
-                                            max_iter=options.spa_max_iter, return_diagnostics=True)
-                                        selected = int(diagnostic['spa_selected'].sum())
-                                        failed = int(diagnostic['spa'].failed.sum())
-                                        report['binary_spa_selected'] += selected
-                                        report['binary_spa_failed'] += failed
-                                        binary_counts[descriptor['trait_index']]['selected'] += selected
-                                        binary_counts[descriptor['trait_index']]['failed'] += failed
-                                        if diagnostic['variant_covariance_constructed']:
-                                            raise RuntimeError('binary burden path must not construct a variant covariance')
-                                    else:
-                                        cov_new = (4*host.size*(2 if model.spectrum.blocks else 1)
-                                                   +32*m*m+256*2**20
-                                                   if isinstance(genotype, torch.Tensor) and genotype.is_cuda
-                                                   else _gene_host_covariance_new_bytes(n, m, model.x.shape[1], options))
-                                        workspace.set_required(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
-                                        if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
-                                            copies = 2 if model.spectrum.blocks else 1
-                                            broker._guard(4*host.size*copies + 32*host.shape[1]**2 + 256*2**20)
-                                            covariance = _gaussian_covariance(model, genotype)
+                    prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                    try:
+                        anchor = group['descriptors'][0]
+                        with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
+                            _check_model(models[0], anchor, metadata, verified)
+                            prototype = _thin_pipeline(axis, models[0], axis._axis.samples, options, configuration, structural)
+                            prepared = _prepare_shared_gene(prototype, indices, broker)
+                            q = models[0].x.shape[1]
+                        prototype.models = []
+                        del models
+                        set_future = configuration.get('_host_memory_set_future')
+                        if callable(set_future):
+                            set_future(0, phase='gene_host_ready')
+                        if prepared is None:
+                            continue
+                        host = prepared['_genotype_host']
+                        genotype, burdens = host, None
+                        n, m = host.shape
+                        has_gaussian = any(d['family'] == 'gaussian' for d in group['descriptors'])
+                        score_new = 4*(n*min(m, 512)+n*min(trait_batch_size, len(group['descriptors']))
+                                       +m*min(trait_batch_size, len(group['descriptors']))) + 64*2**20
+                        tail_new = _gene_tail_new_bytes(n, m, options) if has_gaussian else 0
+                        host_peak = (max(_gene_host_covariance_new_bytes(n, m, q, options),
+                                         4*m*m+tail_new, score_new) if has_gaussian else score_new)
+                        with _gene_workspace_scope(repository, broker, host_peak) as workspace:
+                            # Materialize only if the live device can admit original
+                            # fitted ordinary covariance products plus this one G.
+                            if m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda':
+                                # Relatedness may vary between traits in one cohort;
+                                # two genotype copies cover the original block path.
+                                device_peak = max(8*host.size+32*m*m+256*2**20,
+                                                  4*m*m+tail_new, score_new)
+                                try:
+                                    workspace.set_required(4*host.size+device_peak, phase='gene_genotype_upload')
+                                except MemoryError:
+                                    # Preserve the established bounded-host route
+                                    # when full G plus pinned state cannot fit.
+                                    pass
+                                else:
+                                    genotype = torch.as_tensor(host, device=broker.device)
+                                    workspace.set_required(device_peak, phase='gene_genotype_resident')
+                            tile_peak = (device_peak if isinstance(genotype, torch.Tensor) and genotype.is_cuda
+                                         else host_peak)
+                            for begin in range(0, len(group['descriptors']), trait_batch_size):
+                                workspace.set_required(tile_peak, phase='gene_trait_tile')
+                                tile = group['descriptors'][begin:begin+trait_batch_size]
+                                with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
+                                    if len(models) != len(tile):
+                                        raise ValueError('repository acquire must retain requested model count')
+                                    for model, descriptor in zip(models, tile):
+                                        _check_model(model, descriptor, metadata, verified)
+                                    gaussian_indices = [i for i, model in enumerate(models) if model.family == 'gaussian']
+                                    scores = (_shared_gene_scores(genotype, [models[i] for i in gaussian_indices], broker)
+                                              if gaussian_indices else None)
+                                    gauss_columns = {i: j for j, i in enumerate(gaussian_indices)}
+                                    for ti, (descriptor, model) in enumerate(zip(tile, models)):
+                                        p = _thin_pipeline(axis, model, axis._axis.samples, options, configuration, structural)
+                                        if model.family == 'binomial':
+                                            from ..binary import prepare_binary_burdens, staar_binary_phewas
+                                            if burdens is None:
+                                                burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
+                                                    prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,
+                                                    rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
+                                            value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
+                                                prepared['annotations'], prepared['names'],
+                                                spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
+                                                prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
+                                                rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
+                                                p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
+                                                max_iter=options.spa_max_iter, return_diagnostics=True)
+                                            selected = int(diagnostic['spa_selected'].sum())
+                                            failed = int(diagnostic['spa'].failed.sum())
+                                            report['binary_spa_selected'] += selected
+                                            report['binary_spa_failed'] += failed
+                                            binary_counts[descriptor['trait_index']]['selected'] += selected
+                                            binary_counts[descriptor['trait_index']]['failed'] += failed
+                                            if diagnostic['variant_covariance_constructed']:
+                                                raise RuntimeError('binary burden path must not construct a variant covariance')
+                                            del diagnostic
                                         else:
-                                            # Cached/tiled covariance is fitted-model specific;
-                                            # only G IO and phenotype-score GEMM are shared.
-                                            if p._supports_long_tf32_products(model):
-                                                _, covariance = p._long_mask_products(model, host)
+                                            cov_new = (4*host.size*(2 if model.spectrum.blocks else 1)
+                                                       +32*m*m+256*2**20
+                                                       if isinstance(genotype, torch.Tensor) and genotype.is_cuda
+                                                       else _gene_host_covariance_new_bytes(n, m, model.x.shape[1], options))
+                                            workspace.set_required(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
+                                            if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
+                                                copies = 2 if model.spectrum.blocks else 1
+                                                broker._guard(4*host.size*copies + 32*host.shape[1]**2 + 256*2**20)
+                                                covariance = _gaussian_covariance(model, genotype)
                                             else:
-                                                covariance = _blocked_gaussian_covariance(model, host, broker,
-                                                    variant_tile_size=options.variant_tile_size or 512)
-                                        # Its input covariance is now allocated.
-                                        # Reserve only NEW STAAR/tail bytes here.
-                                        workspace.set_required(tail_new, phase='gene_tail')
-                                        payload = {key: value for key, value in prepared.items() if not key.startswith('_')}
-                                        payload.update(score=scores[:, gauss_columns[ti]], covariance=covariance,
-                                                       cmac=prepared['cmac'])
-                                        value = p._evaluate_prepared(payload, model)
-                                        del covariance, payload
-                                    result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
-                                    del p, model
-                                del scores, models
-                    del prepared, host, genotype, burdens
+                                                # Cached/tiled covariance is fitted-model specific;
+                                                # only G IO and phenotype-score GEMM are shared.
+                                                if p._supports_long_tf32_products(model):
+                                                    redundant_score, covariance = p._long_mask_products(model, host)
+                                                    del redundant_score
+                                                else:
+                                                    covariance = _blocked_gaussian_covariance(model, host, broker,
+                                                        variant_tile_size=options.variant_tile_size or 512)
+                                            # Its input covariance is now allocated.
+                                            # Reserve only NEW STAAR/tail bytes here.
+                                            workspace.set_required(tail_new, phase='gene_tail')
+                                            payload = {key: value for key, value in prepared.items() if not key.startswith('_')}
+                                            payload.update(score=scores[:, gauss_columns[ti]], covariance=covariance,
+                                                           cmac=prepared['cmac'])
+                                            value = p._evaluate_prepared(payload, model)
+                                            del covariance, payload
+                                        result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
+                                        del p, model, value
+                                    del scores, models
+                        del prepared, host, genotype, burdens
+                    finally:
+                        if prototype is not None:
+                            prototype.models = []
+                        prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                        set_future = configuration.get('_host_memory_set_future')
+                        if callable(set_future):
+                            set_future(0, phase='gene_mask_released')
             finally:
                 axis.close()
         return result
@@ -997,6 +1159,9 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                               device='cuda:0', trait_batch_size=32, memory_limit_gib=None,
                               cpu_threads=1, cache_specs=None, device_cache_bytes=512*2**20,
                               compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20,
+                              sample_axis_cache_bytes=64*2**20,
+                              sample_axis_host_cache_bytes=64*2**20, job_state_cache_bytes=0,
+                              job_state_cache_live_fraction=.25, device_cache_live_fraction=None,
                               memory_reserve_bytes=256*2**20, emit=None,
                               host_memory_lease_factory=None):
     """Run a cache-only frame/job-major independent multi-phenotype analysis.
@@ -1015,8 +1180,21 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
     """
     if type(trait_batch_size) is not int or trait_batch_size < 1 or type(cpu_threads) is not int or cpu_threads < 1:
         raise ValueError('trait_batch_size and cpu_threads must be positive integers')
-    if type(memory_reserve_bytes) is not int or memory_reserve_bytes < 0:
-        raise ValueError('memory_reserve_bytes must be a nonnegative integer')
+    for name, value in (('memory_reserve_bytes', memory_reserve_bytes),
+                        ('device_cache_bytes', device_cache_bytes),
+                        ('compact_cache_bytes', compact_cache_bytes),
+                        ('metadata_cache_bytes', metadata_cache_bytes),
+                        ('sample_axis_cache_bytes', sample_axis_cache_bytes),
+                        ('sample_axis_host_cache_bytes', sample_axis_host_cache_bytes),
+                        ('job_state_cache_bytes', job_state_cache_bytes)):
+        if type(value) is not int or value < 0:
+            raise ValueError(name+' must be a nonnegative integer')
+    for name, value in (('job_state_cache_live_fraction', job_state_cache_live_fraction),
+                        ('device_cache_live_fraction', device_cache_live_fraction)):
+        if value is None and name == 'device_cache_live_fraction':
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(name+' must be positive, finite and at most 1')
     if not callable(reader_factory) or not callable(getattr(writer, 'write', None)):
         raise ValueError('portable reader_factory and streaming writer are required')
     if not _LOCK.acquire(blocking=False):
@@ -1049,6 +1227,17 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             raise ValueError('single_progress_frame_interval must be a positive integer')
         if isinstance(progress_seconds, bool) or not isinstance(progress_seconds, (int, float)) or not math.isfinite(progress_seconds) or progress_seconds <= 0:
             raise ValueError('single_progress_seconds must be positive and finite')
+        gene_progress = configuration.get('gene_progress_seconds', 60.)
+        raw_capacity = configuration.get('job_state_cache_bytes',
+            configuration.get('gene_raw_state_cache_bytes', job_state_cache_bytes))
+        raw_fraction = configuration.get('job_state_cache_live_fraction',
+            configuration.get('gene_raw_state_cache_live_fraction', job_state_cache_live_fraction))
+        if isinstance(gene_progress, bool) or not isinstance(gene_progress, (int, float)) or not math.isfinite(gene_progress) or gene_progress <= 0:
+            raise ValueError('gene_progress_seconds must be positive and finite')
+        if type(raw_capacity) is not int or raw_capacity < 0:
+            raise ValueError('gene_raw_state_cache_bytes must be a nonnegative integer')
+        if isinstance(raw_fraction, bool) or not isinstance(raw_fraction, (int, float)) or not math.isfinite(raw_fraction) or not 0 < raw_fraction <= 1:
+            raise ValueError('gene_raw_state_cache_live_fraction must be positive, finite and at most 1')
         for name, default in (('host_memory_retry_seconds', 5.), ('host_memory_retry_max_seconds', 60.)):
             delay = configuration.get(name, default)
             if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not math.isfinite(delay) or not 0 < delay <= 60:
@@ -1102,6 +1291,9 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                                                 if interval_file is not None else None)
                         with SharedStateBroker(metadata, resources['container'], device=device, memory_limit_gib=budget,
                                 device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
+                                device_cache_live_fraction=device_cache_live_fraction,
+                                sample_axis_cache_bytes=sample_axis_cache_bytes,
+                                sample_axis_host_cache_bytes=sample_axis_host_cache_bytes,
                                 own_reader=False, own_container=False, portable_axis=resources.get('portable_axis', False),
                                 memory_reserve_bytes=memory_reserve_bytes) as broker:
                             verified = set()
@@ -1133,23 +1325,48 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                                 pending_groups = (groups if kind == 'individual' else
                                     _pending_gene_groups(groups, writer, report, reference['name'],
                                                          checkpoint_job_index, kind, trait_batch_size))
-                                def attempt(job_configuration, current_writer):
-                                    if not pending_groups:
-                                        return
-                                    args = (pending_groups, model_repository, broker, metadata, options, job_configuration, arguments,
-                                        current_writer, report, verified, reference['name'], checkpoint_job_index, trait_batch_size, structural)
-                                    if kind == 'individual':
-                                        function(*args)
-                                    else:
-                                        function(*args, kind)
-                                _execute_batched_job(attempt, configuration=configuration,
-                                    host_memory_lease_factory=host_memory_lease_factory, kind=kind,
-                                    chromosome_index=ci, job_index=ji, writer=writer, report=report, emit=emit)
+                                with ExitStack() as job_resources:
+                                    raw_cache = getattr(broker, 'raw_state_cache', None)
+                                    if kind != 'individual' and callable(raw_cache):
+                                        job_resources.enter_context(raw_cache(
+                                            raw_capacity, live_fraction=raw_fraction))
+                                    last_cohort_progress = before
+                                    cohort_groups = ([pending_groups] if kind == 'individual' else
+                                                     [[group] for group in pending_groups])
+                                    for cohort_index, current_groups in enumerate(cohort_groups):
+                                        if not current_groups:
+                                            continue
+                                        def attempt(job_configuration, current_writer):
+                                            args = (current_groups, model_repository, broker, metadata, options, job_configuration,
+                                                arguments, current_writer, report, verified, reference['name'],
+                                                checkpoint_job_index, trait_batch_size, structural)
+                                            if kind == 'individual':
+                                                function(*args)
+                                            else:
+                                                function(*args, kind)
+                                        _execute_batched_job(attempt, configuration=configuration,
+                                            host_memory_lease_factory=host_memory_lease_factory, kind=kind,
+                                            chromosome_index=ci, job_index=ji, writer=writer, report=report, emit=emit,
+                                            trait_indices=[d['trait_index'] for group in current_groups
+                                                           for d in group['descriptors']],
+                                            host_cache_recovery=metadata.pressure_recovery)
+                                        now = time.perf_counter()
+                                        if (emit and kind != 'individual' and
+                                                now-last_cohort_progress >= gene_progress):
+                                            emit(dict(event='cohort_finished', chromosome_index=ci, job_index=ji,
+                                                      kind=kind, cohort_index=cohort_index,
+                                                      pending_cohorts=len(cohort_groups),
+                                                      completed_rows=report['association_rows'][kind],
+                                                      gpu_memory=_gpu_memory_diagnostics(device, model_repository, broker)))
+                                            last_cohort_progress = now
                                 report['job_groups'] += 1
                                 if emit:
                                     emit(dict(event='finished', chromosome_index=ci, job_index=ji, kind=kind,
-                                              wall_seconds=time.perf_counter()-before))
-                            report['chromosome_readers'].append(dict(broker=broker.metrics, metadata=dict(metadata.metrics)))
+                                              wall_seconds=time.perf_counter()-before,
+                                              gpu_memory=_gpu_memory_diagnostics(device, model_repository, broker)))
+                            report['chromosome_readers'].append(dict(broker=broker.metrics,
+                                metadata=dict(metadata.metrics),
+                                reader_metadata=_reader_metadata_diagnostics(metadata)))
                             axis.close()
                 report['dense_product_audit'] = audit.report()
         if report['job_groups'] == 0:
@@ -1161,6 +1378,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             tf32_configuration=configured, weighted_eigensolver_execution=dict(solver, **solver_state),
             peak_gpu_mib=torch.cuda.max_memory_allocated(device)/2**20,
             peak_gpu_reserved_mib=torch.cuda.max_memory_reserved(device)/2**20,
+            gpu_memory=_gpu_memory_diagnostics(device, model_repository),
             cpu_thread_control=dict(requested=cpu_threads, effective=torch.get_num_threads(), previous=previous_threads,
                                     restored=True, scope='pytorch_intraop'),
             output=writer.finish())

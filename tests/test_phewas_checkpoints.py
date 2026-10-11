@@ -39,6 +39,18 @@ def test_checkpoint_requires_complete_scientific_binding(tmp_path):
         CheckpointCSVWriter(tmp_path, binding={'source_implementation_sha256': 'only-source'}, resume=True)
 
 
+def test_same_invocation_retry_reuses_committed_tile_without_enabling_old_run_resume(tmp_path):
+    writer = CheckpointCSVWriter(tmp_path, binding=BINDING, resume=False)
+    first = writer.write_tile('coding', '21', [(0, [row()])], job_index=3)
+    assert writer.checkpoint_tile('coding', '21', 3, [0]) == first
+    assert writer.write_tile('coding', '21', [(0, [row(.9)])], job_index=3) == first
+    report = writer.finish()
+    assert report['computed_blocks'] == 1 and report['rows'] == {'coding': 1}
+    assert all_rows(tmp_path, report)[0]['WGS-O'] == '0.25'
+    with pytest.raises(FileExistsError, match='resume=True'):
+        CheckpointCSVWriter(tmp_path, binding=BINDING, resume=False)
+
+
 def test_interrupted_gene_tiles_resume_on_new_worker_without_duplicates_or_new_source(tmp_path):
     writer = CheckpointCSVWriter(tmp_path, binding=BINDING)
     first = writer.write_tile('coding', '21', [(0, [row()]), (1, [row(.5)])], job_index=7,

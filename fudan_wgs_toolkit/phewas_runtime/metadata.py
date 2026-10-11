@@ -1,5 +1,6 @@
 """Bounded shared metadata reads; no phenotype or association state is cached."""
 from collections import OrderedDict
+from contextlib import contextmanager
 import hashlib
 import numpy as np
 
@@ -12,6 +13,7 @@ class SharedMetadataReader:
         self._cache, self._bytes = OrderedDict(), 0
         self._pinned = {}
         self._samples = None
+        self._cache_admission = True
         self.metrics = dict(reads=0, hits=0, evictions=0, highwater_bytes=0)
 
     def __getattr__(self, name):
@@ -42,7 +44,7 @@ class SharedMetadataReader:
             a = np.asarray(value)
             if a.dtype.hasobject:
                 size += sum(len(str(x).encode()) + 64 for x in a.flat)
-        if size <= self.capacity:
+        if self._cache_admission and size <= self.capacity:
             while self._cache and self._bytes + size > self.capacity:
                 _, (_, old_size) = self._cache.popitem(last=False)
                 self._bytes -= old_size
@@ -97,3 +99,25 @@ class SharedMetadataReader:
         self._pinned.clear()
         self._samples = None
         self._bytes = 0
+
+    @contextmanager
+    def pressure_recovery(self):
+        """Drop only optional LRU owners and avoid refilling during one retry.
+
+        Pinned fields, canonical samples, underlying mmaps and caller-owned
+        views remain valid. Released bytes are diagnostic, never admission
+        credit: the host gate re-reads actual live pressure before allocating.
+        """
+        previous = self._cache_admission
+        entries, retained = len(self._cache), self._bytes
+        self._cache.clear()
+        self._bytes = 0
+        self._cache_admission = False
+        try:
+            self.metrics['evictions'] += entries
+            self.metrics['pressure_evictions'] = self.metrics.get('pressure_evictions', 0)+entries
+            self.metrics['pressure_evicted_estimated_bytes'] = (
+                self.metrics.get('pressure_evicted_estimated_bytes', 0)+retained)
+            yield
+        finally:
+            self._cache_admission = previous

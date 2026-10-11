@@ -700,7 +700,7 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
     entries = _all_models(plan, worker_count)
     from .phewas_runtime.runtime import run_batched_configuration
     from .phewas_resources import HostMemoryGate
-    repository = ModelRepository(entries)
+    repository = ModelRepository(entries, binary_normal_cache=plan.get('binary_normal_cache', 'derived_fp64'))
     if plan.get('public_api_options'):
         from .phewas_checkpoints import CheckpointCSVWriter
         binding = dict(source_implementation_sha256=plan['source_implementation_sha256'],
@@ -752,6 +752,11 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
             device_cache_bytes=plan.get('device_cache_bytes', 512*2**20),
             compact_cache_bytes=plan.get('compact_cache_bytes', 64*2**20),
             metadata_cache_bytes=plan.get('metadata_cache_bytes', 256*2**20),
+            sample_axis_cache_bytes=plan.get('sample_axis_cache_bytes', 64*2**20),
+            sample_axis_host_cache_bytes=plan.get('sample_axis_host_cache_bytes', 64*2**20),
+            job_state_cache_bytes=plan.get('job_state_cache_bytes', 0),
+            job_state_cache_live_fraction=plan.get('job_state_cache_live_fraction', .25),
+            device_cache_live_fraction=plan.get('device_cache_live_fraction'),
             emit=event, host_memory_lease_factory=gate.lease_factory)
         report.update(end_to_end_seconds=time.time()-started, model_repository=repository.summary(),
                       source_implementation_sha256=plan['source_implementation_sha256'],

@@ -47,7 +47,9 @@ class CheckpointCSVWriter:
     so dispatch may change without changing the scientific checkpoint identity.
     ``resume=False`` refuses completed blocks from the same worker; the caller
     requires a fresh run directory while new workers share one binding. It never
-    silently adopts results from an earlier invocation. Invalid blocks are retained under
+    silently adopts results from an earlier invocation. Published tiles may be
+    reused within this invocation when a later cohort is temporarily deferred.
+    Invalid blocks are retained under
     ``invalid`` and recomputed. Only this invocation's scheduled blocks enter its
     completion receipt, preventing omitted analysis kinds from being counted.
     """
@@ -198,7 +200,7 @@ class CheckpointCSVWriter:
     def checkpoint_tile(self, kind, chromosome, job_index, trait_indices, *,
                         block_index=0, block_identity=None, ordinal_before=None):
         key, path, marker = self._key(kind, chromosome, job_index, trait_indices, block_index)
-        if not self.resume or not marker.exists() or not path.exists():
+        if (not self.resume and str(marker) not in self.used) or not marker.exists() or not path.exists():
             return None
         try:
             record = self._verify(key, path, marker, block_identity=block_identity,

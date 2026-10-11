@@ -197,6 +197,17 @@ def _release_unused_cuda_blocks(device):
                 released_bytes=max(0, before["reserved_bytes"] - after["reserved_bytes"]))
 
 
+def _allocate_with_pressure_reclaim(factory, device, record_cleanup=None):
+    """Retry one non-mutating allocation only after an actual CUDA OOM."""
+    try:
+        return factory()
+    except torch.cuda.OutOfMemoryError:
+        cleanup = _release_unused_cuda_blocks(device)
+        if record_cleanup is not None:
+            record_cleanup(cleanup)
+        return factory()
+
+
 class _Timers:
     def __init__(self, device, enabled):
         self.device, self.enabled = device, enabled
@@ -238,10 +249,10 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
     ``panel_variant_size`` controls cached columns, with automatic admission
     when None, including a smaller 512-aligned product width if needed. The
     report records requested/effective widths; ``variant_tile_size`` in the
-    report is the effective width. Admission first releases unused CUDA cache
-    blocks and then counts all remaining allocator reservations against the
-    process ceiling, including existing model tensors. Cache cleanup also
-    precedes large panel allocations; it does not change any live tensor.
+    report is the effective width. Admission counts current allocator reservations
+    against the process ceiling, including existing model tensors. Unused cache
+    is reclaimed only after failed admission or an actual allocation OOM;
+    healthy calls retain allocator reuse. Cleanup never changes a live tensor.
     ``symmetry='average'`` retains both TF32 directions. Other symmetry
     rules are rejected because they change the accepted covariance contract.
     ``profile=True`` adds CUDA event measurements and synchronizes once at the
@@ -302,16 +313,25 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
     mm = getattr(module, "matmul")
     limit = int(memory_limit_gib * _GIB)
     peak_before = torch.cuda.max_memory_allocated(device)
-    initial_cleanup = _release_unused_cuda_blocks(device) if m else None
-    snapshot = initial_cleanup["after"] if initial_cleanup else _cuda_memory_snapshot(device)
+    initial_cleanup = None
+    snapshot = _cuda_memory_snapshot(device)
+    def make_plan(current):
+        return plan_cached_workspace(
+            n, m, q, variant_tile_size=variant_tile_size,
+            panel_variant_size=panel_variant_size, memory_limit_gib=memory_limit_gib,
+            allocated_bytes=current['allocated_bytes'], reserved_bytes=current['reserved_bytes'],
+            free_bytes=current['free_bytes'])
+    try:
+        plan = make_plan(snapshot)
+    except MemoryError:
+        if snapshot['reserved_bytes'] <= snapshot['allocated_bytes']:
+            raise
+        initial_cleanup = _release_unused_cuda_blocks(device)
+        snapshot = initial_cleanup['after']
+        plan = make_plan(snapshot)
     allocated_before = snapshot["allocated_bytes"]
     reserved_before = snapshot["reserved_bytes"]
     free_before = snapshot["free_bytes"]
-    plan = plan_cached_workspace(
-        n, m, q, variant_tile_size=variant_tile_size,
-        panel_variant_size=panel_variant_size, memory_limit_gib=memory_limit_gib,
-        allocated_bytes=allocated_before, reserved_bytes=reserved_before,
-        free_bytes=free_before)
     effective_tile = plan["effective_variant_tile_size"]
     timers = _Timers(device, profile)
     report = dict(backend="cached_native_tf32", cache_version=1,
@@ -363,25 +383,24 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
         if observed > limit:
             raise MemoryError("cached covariance exceeded the configured allocated-process memory limit")
 
-    score = torch.empty((m,), dtype=torch.float32, device=device)
-    cross = torch.empty((q, m), dtype=torch.float32, device=device)
-    projected_left = torch.empty((m, q), dtype=torch.float32, device=device)
-    covariance = torch.empty((m, m), dtype=torch.float32, device=device)
-    prepared = set()
-    validated_panels = set()
-
-    def release_panel_scratch():
-        cleanup = _release_unused_cuda_blocks(device)
+    def record_pressure_cleanup(cleanup):
         report["allocator_cleanup_calls"] += 1
         report["allocator_cleanup_released_bytes"] += cleanup["released_bytes"]
         report["allocator_cleanup_host_wall_seconds"] += cleanup["host_wall_seconds"]
 
+    def allocate(factory):
+        return _allocate_with_pressure_reclaim(factory, device, record_pressure_cleanup)
+
+    score = allocate(lambda: torch.empty((m,), dtype=torch.float32, device=device))
+    cross = allocate(lambda: torch.empty((q, m), dtype=torch.float32, device=device))
+    projected_left = allocate(lambda: torch.empty((m, q), dtype=torch.float32, device=device))
+    covariance = allocate(lambda: torch.empty((m, m), dtype=torch.float32, device=device))
+    prepared = set()
+    validated_panels = set()
+
     def load_panel(start, stop):
-        # Earlier product/validation/layout buffers may have left free blocks
-        # that fragment the allocator cap. Live left panels remain untouched.
-        release_panel_scratch()
         with timers.measure("genotype_h2d"):
-            panel = torch.as_tensor(source[:, start:stop], dtype=torch.float32, device=device)
+            panel = allocate(lambda: torch.as_tensor(source[:, start:stop], dtype=torch.float32, device=device))
         report["h2d_bytes"] += 4 * n * (stop - start)
         report["h2d_calls"] += 1
         observe_memory()
@@ -433,12 +452,8 @@ def score_covariance_cached(model, genotype, *, variant_tile_size=4096,
             report["projection_left_product_calls"] += 1
             prepared.add(column)
             del c, raw, score_tile
-        # Allocate the large weighted panel only after releasing unoccupied
-        # validation/GEMV scratch segments; reserving their aggregate bytes
-        # does not prove that the allocator can reuse one contiguous segment.
-        release_panel_scratch()
         with timers.measure("weighted_panel_prepare"):
-            weighted = inverse_variance[:, None] * panel
+            weighted = allocate(lambda: inverse_variance[:, None] * panel)
         report["weighted_panel_calls"] += 1
         observe_memory()
         return panel, weighted

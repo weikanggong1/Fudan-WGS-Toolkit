@@ -16,6 +16,16 @@ from fudan_wgs_toolkit.null_model import GaussianNullModel, KinshipSpectrum
 GIB = 2**30
 
 
+def test_explicit_budget_above_forty_gib_is_admitted_with_sufficient_live_memory():
+    plan = plan_cached_workspace(339013, 9854, 23, memory_limit_gib=41,
+        allocated_bytes=2*GIB, reserved_bytes=3*GIB, free_bytes=77*GIB)
+    assert plan['available_new_bytes'] == 38*GIB-256*2**20
+    assert plan['conservative_new_workspace_bytes'] <= plan['available_new_bytes']
+    with pytest.raises(MemoryError):
+        plan_cached_workspace(339013, 9854, 23, memory_limit_gib=41,
+            allocated_bytes=2*GIB, reserved_bytes=3*GIB, free_bytes=GIB)
+
+
 def test_admission_selects_full_then_two_panels_for_same_population():
     full = plan_cached_workspace(339013, 9854, 23, free_bytes=80 * GIB)
     assert full["full_resident"]
@@ -25,7 +35,7 @@ def test_admission_selects_full_then_two_panels_for_same_population():
     assert not long["full_resident"]
     assert long["panel_variant_size"] == 4096
     assert long["conservative_new_workspace_bytes"] < long["available_new_bytes"]
-    # A full resident long matrix cannot be admitted even on an 80-GiB card.
+    # A full resident long matrix cannot fit this explicit 40-GiB budget.
     full_long = cached_workspace_estimate(
         339013, 21231, 23, variant_tile_size=4096,
         panel_variant_size=21231, full_resident=True)
@@ -254,7 +264,9 @@ def test_explicit_panel_and_too_large_dense_matrix_rejected_before_allocation():
 @pytest.mark.parametrize("kwargs", [
     {"variant_tile_size": True}, {"variant_tile_size": 4095},
     {"panel_variant_size": 2048}, {"memory_limit_gib": 0},
-    {"memory_limit_gib": float("nan")}, {"allocated_bytes": -1},
+    {"memory_limit_gib": -1}, {"memory_limit_gib": float('nan')},
+    {"memory_limit_gib": float('inf')}, {"memory_limit_gib": True},
+    {"allocated_bytes": -1},
     {"free_bytes": -1},
 ])
 def test_invalid_cache_options_have_no_implicit_fallback(kwargs):
@@ -418,7 +430,9 @@ def test_cuda_budget_reduces_actual_product_width_and_matches_legacy512(
     assert report["allocator_budget_basis_bytes"] == max(
         report["allocated_before_bytes"], report["reserved_before_bytes"])
     assert report["allocator_reservation_credit_bytes"] == 0
-    assert report["allocator_cleanup_calls"] == 1 + 2 * report["weighted_panel_calls"]
+    # This admitted, deliberately small component needs no allocator purge.
+    # Weighted panels reuse freed blocks rather than calling empty_cache.
+    assert report["allocator_cleanup_calls"] == 0
     assert report["allocator_cleanup_released_bytes"] >= 0
     assert report["allocator_cleanup_host_wall_seconds"] >= 0
 

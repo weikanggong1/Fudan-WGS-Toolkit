@@ -32,6 +32,8 @@ class NativeMetadataFixture:
                 np.asarray(["longer_name"]), np.asarray(["c", "d", "e"]),
                 np.asarray([], dtype="U1"), np.asarray(["f"])],
             "annotation/info/bytes": np.asarray([b"A", b"BC", b"D", b"E", b"FG", b"H"]),
+            "annotation/info/unicode": np.asarray([["α", "脑"], [None, ""],
+                ["é", "🧬"], ["á", "短"], ["λγ", None], ["", "終"]], dtype=object),
             "annotation/info/numeric_ragged": [np.asarray([1, 2], dtype=np.int32),
                 np.asarray([], dtype=float), np.asarray([3], dtype=np.int32),
                 np.asarray([], dtype=float), np.asarray([4, 5], dtype=np.int32),
@@ -183,3 +185,65 @@ def test_exact_genotype_manifest_binding_no_silent_reuse(portable):
     (metadata / "COMPLETE").write_text(hashlib.sha256(raw).hexdigest())
     with pytest.raises(ValueError, match="another"):
         PortableMetadataReader(metadata, cache)
+
+
+@pytest.mark.parametrize("field", ["annotation/info/Category", "annotation/info/bytes",
+                                   "annotation/info/unicode"])
+def test_utf8_scalar_decode_uses_readonly_zero_copy_ndarray_views(portable, monkeypatch, field):
+    native, cache, metadata, manifest, _, _ = portable
+    with PortableMetadataReader(metadata, cache) as reader:
+        spec = manifest["fields"][field]
+        offsets = reader._array(spec["offsets"]["file"])
+        valid = reader._array(spec["valid"]["file"])
+        assert isinstance(offsets, np.memmap) and isinstance(valid, np.memmap)
+        assert not offsets.flags.writeable and not valid.flags.writeable
+        original_asarray = np.asarray
+        original_getitem = np.memmap.__getitem__
+        views = []
+
+        def checked_asarray(value, *args, **kwargs):
+            result = original_asarray(value, *args, **kwargs)
+            if value is offsets or value is valid:
+                assert type(result) is np.ndarray
+                assert not result.flags.writeable and np.shares_memory(result, value)
+                assert result.__array_interface__["data"][0] == value.__array_interface__["data"][0]
+                views.append(result)
+            return result
+
+        def checked_getitem(value, index):
+            if value is offsets or value is valid:
+                raise AssertionError("UTF8 decoding used a scalar/slice memmap subclass lookup")
+            return original_getitem(value, index)
+
+        monkeypatch.setattr(np, "asarray", checked_asarray)
+        monkeypatch.setattr(np.memmap, "__getitem__", checked_getitem)
+        axes = (None, np.asarray([5, 1, 3, 0]), np.arange(6)[::2][::-1],
+                np.asarray([], dtype=np.int64))
+        for rows in axes:
+            requested = np.arange(6) if rows is None else rows
+            observed = reader.read_field(field, rows)
+            np.testing.assert_array_equal(observed, native.fields[field][requested])
+        assert len(views) == 2*len(axes)
+        for view in views:
+            with pytest.raises(ValueError, match="read-only"):
+                view[0] = view[0]
+
+
+@pytest.mark.parametrize("component", ["file", "offsets", "valid"])
+def test_utf8_views_keep_payload_and_index_checksum_validation(portable, component):
+    _, cache, metadata, manifest, _, _ = portable
+    spec = manifest["fields"]["annotation/info/Category"]
+    name = spec["file"] if component == "file" else spec[component]["file"]
+    path = metadata/name
+    reader = PortableMetadataReader(metadata, cache)
+    reader.read_field("annotation/info/Category", [3, 0])
+    with path.open("r+b") as stream:
+        stream.seek(-1, 2)
+        value = stream.read(1)
+        stream.seek(-1, 2)
+        stream.write(bytes([value[0] ^ 1]))
+    with pytest.raises(ValueError, match="changed"):
+        reader.read_field("annotation/info/Category", [0, 3])
+    with PortableMetadataReader(metadata, cache) as fresh:
+        with pytest.raises(ValueError, match="checksum"):
+            fresh.read_field("annotation/info/Category")

@@ -372,8 +372,12 @@ class PortableMetadataReader:
                 raise ValueError("portable dense field geometry differs")
             return values if indices is None else values[indices]
         if spec["kind"] == "utf8":
-            offsets = self._read(spec["offsets"], None)
-            valid = self._read(spec["valid"], None)
+            # Retain the authenticated read-only mappings as zero-copy base
+            # ndarray views. A scalar memmap lookup otherwise invokes its
+            # Python subclass wrapper for every decoded offset and validity
+            # flag, although no new mapped view is needed for those scalars.
+            offsets = np.asarray(self._read(spec["offsets"], None))
+            valid = np.asarray(self._read(spec["valid"], None))
             flat_count = int(np.prod(shape, dtype=np.int64))
             path = self._verify(spec["file"])
             if offsets.shape != (flat_count + 1,) or valid.shape != (flat_count,) or int(offsets[-1]) != path.stat().st_size:

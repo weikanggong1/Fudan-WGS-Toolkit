@@ -6,12 +6,13 @@ or gene statistic receives a DeviceMinorBlock. CPU mode is a small contract
 oracle; production CUDA uses bounded Triton count/scatter kernels.
 """
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 import math
 import time
 import hashlib
 import os
+import weakref
 
 import numpy as np
 import torch
@@ -133,6 +134,12 @@ class _Axis:
     device_rows: object
     identity_rows: object = None
     single_binding: object = None
+    digest: object = None
+    pins: int = 0
+    host_bytes: int = 0
+    aliases: set = field(default_factory=set)
+    geometry: object = None
+    backing: object = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,7 @@ class _SingleAxisBinding:
                 or samples is not axis.samples or identity is not axis.identity_rows
                 or n != len(axis.samples)
                 or _array_geometry(samples) != self.sample_geometry
+                or _readonly_source(samples) != axis.backing
                 or _array_geometry(identity) != self.identity_geometry):
             raise ValueError('verified Single sample-axis binding was altered')
         return axis
@@ -178,7 +186,9 @@ class SharedStateBroker:
                  memory_limit_gib=None, device_cache_bytes=512 * 2**20,
                  compact_cache_bytes=64 * 2**20, own_reader=False, own_container=True,
                  portable_axis=False, memory_reserve_bytes=256 * 2**20,
-                 sample_axis_cache_bytes=64 * 2**20):
+                 sample_axis_cache_bytes=64 * 2**20,
+                 sample_axis_host_cache_bytes=64 * 2**20,
+                 device_cache_live_fraction=None):
         if not isinstance(container, store.Container) or not container.complete:
             raise ValueError('a complete verified six-state Container is required')
         if memory_limit_gib is not None and (not isinstance(memory_limit_gib, (int, float))
@@ -189,7 +199,10 @@ class SharedStateBroker:
             raise ValueError('memory_reserve_bytes must be a nonnegative integer')
         if type(portable_axis) is not bool:
             raise ValueError('portable_axis must be boolean')
-        for value in (device_cache_bytes, compact_cache_bytes, sample_axis_cache_bytes):
+        if device_cache_live_fraction is not None:
+            self._validate_fraction(device_cache_live_fraction)
+        for value in (device_cache_bytes, compact_cache_bytes, sample_axis_cache_bytes,
+                      sample_axis_host_cache_bytes):
             if type(value) is not int or value < 0:
                 raise ValueError('shared cache capacities must be nonnegative integers')
         self.device = torch.device(device)
@@ -204,10 +217,22 @@ class SharedStateBroker:
         self._limit = None if memory_limit_gib is None else int(memory_limit_gib * 2**30)
         self._reserve = memory_reserve_bytes
         self._device_capacity, self._compact_capacity = device_cache_bytes, compact_cache_bytes
+        self._device_capacity_configured = device_cache_bytes
+        self._device_cache_live_fraction = device_cache_live_fraction
+        if self.device.type == 'cuda' and device_cache_live_fraction is not None:
+            self._device_capacity = min(device_cache_bytes,
+                int(self._live_available_bytes()*device_cache_live_fraction))
         self._sources, self._device_sources = OrderedDict(), OrderedDict()
         self._source_bytes = self._device_bytes = 0
-        self._closed, self._seal, self._axes = False, object(), []
-        self._axes_by_object, self._axes_by_digest, self._axis_aliases = {}, {}, {}
+        self._raw_sources, self._raw_source_bytes, self._raw_capacity = OrderedDict(), 0, 0
+        self._raw_scope_active = False
+        self._closed, self._seal, self._axes = False, object(), OrderedDict()
+        self._axes_by_object, self._axes_by_digest = {}, {}
+        self._axis_aliases = OrderedDict()
+        self._axis_proofs = OrderedDict()
+        self._proof_capacity = 4096
+        self._host_axis_capacity, self._host_axis_bytes = sample_axis_host_cache_bytes, 0
+        self._alias_capacity = 256
         self._device_axes, self._device_axis_bytes = OrderedDict(), 0
         self._axis_capacity = sample_axis_cache_bytes
         self._identity_rows = None
@@ -237,8 +262,9 @@ class SharedStateBroker:
                     or np.any(self._starts[1:] != self._starts[:-1] + self._sizes[:-1])
                     or self._starts[-1] + self._sizes[-1] != original_reader.n_variants))):
             raise ValueError('physical cache variant coverage differs from source')
-        self._sample_sort = np.argsort(self.samples)
-        self._sorted_samples = self.samples[self._sample_sort]
+        self._identity_mapping = np.array_equal(self.samples, np.arange(len(self.samples), dtype=np.int64))
+        self._sample_sort = None if self._identity_mapping else np.argsort(self.samples)
+        self._sorted_samples = self.samples if self._identity_mapping else self.samples[self._sample_sort]
         self._metrics = dict(frame_reads=0, compact_frame_hits=0, compact_frame_evictions=0,
             gpu_csr_uploads=0, gpu_csr_hits=0, gpu_csr_evictions=0,
             device_csr_uploads=0, device_csr_hits=0,
@@ -247,10 +273,15 @@ class SharedStateBroker:
             trait_block_calls=0, trait_count_calls=0, returned_trait_variants=0,
             bound_sample_axes=0, sample_axis_reuse_calls=0, sample_axis_validation_calls=0,
             sample_axis_digest_calls=0, sample_axis_immutable_alias_hits=0,
+            sample_axis_host_bytes_highwater=0, sample_axis_host_evictions=0,
+            sample_axis_identity_mapping_aliases=0, sample_axis_borrowed_immutable_axes=0,
+            sample_axis_verified_rebinds=0,
             compact_bytes_highwater=0, gpu_csr_bytes_highwater=0,
             sample_axis_device_bytes_highwater=0, sample_axis_device_uploads=0,
             sample_axis_device_evictions=0,
             raw_slab_bytes_highwater=0, memory_required_bytes_highwater=0,
+            raw_state_cache_hits=0, raw_state_cache_evictions=0,
+            raw_state_cache_bytes_highwater=0, raw_state_materializations=0,
             frame_read_validate_seconds=0., csr_upload_host_seconds=0.,
             raw_materialize_host_seconds=0., trait_count_host_seconds=0.,
             trait_materialize_host_seconds=0., trait_summary_d2h_calls=0,
@@ -274,10 +305,21 @@ class SharedStateBroker:
         return dict(self._metrics, backend='shared-lossless-six-state-CSR', device=str(self.device),
             compact_cache_limit_bytes=self._compact_capacity,
             gpu_csr_cache_limit_bytes=self._device_capacity,
+            gpu_csr_cache_configured_limit_bytes=self._device_capacity_configured,
+            gpu_csr_cache_live_fraction=self._device_cache_live_fraction,
             current_compact_cache_bytes=self._source_bytes,
             current_gpu_csr_cache_bytes=self._device_bytes,
             sample_axis_cache_limit_bytes=self._axis_capacity,
             current_sample_axis_device_bytes=self._device_axis_bytes,
+            sample_axis_host_cache_limit_bytes=self._host_axis_capacity,
+            current_sample_axis_host_bytes=self._host_axis_bytes,
+            current_sample_axis_host_count=len(self._axes),
+            current_sample_axis_pinned_count=sum(axis.pins > 0 for axis in self._axes.values()),
+            current_sample_axis_weak_alias_count=len(self._axis_aliases),
+            current_sample_axis_weak_proof_count=len(self._axis_proofs),
+            raw_state_cache_limit_bytes=self._raw_capacity,
+            current_raw_state_cache_bytes=self._raw_source_bytes,
+            current_raw_state_cache_slabs=len(self._raw_sources),
             memory_limit_bytes=self._limit, genotype_sdk_fallback_count=0,
             live_memory_reserve_bytes=self._reserve,
             timer_contract='host times include enqueue; summary D2H includes wait/copy; stages may overlap')
@@ -288,11 +330,57 @@ class SharedStateBroker:
         self._metrics['gpu_csr_evictions'] += 1
 
     def release_device_cache(self):
-        """Retire only owned cached CSR references; active slabs remain valid."""
-        released = self._device_bytes
+        """Retire only owned CSR/raw references; active slabs remain valid."""
+        released = self._device_bytes+self._raw_source_bytes
+        while self._raw_sources:
+            self._evict_raw()
         while self._device_sources:
             self._evict_device()
         return released
+
+    def _evict_raw(self):
+        _, (_, size) = self._raw_sources.popitem(last=False)
+        self._raw_source_bytes -= size
+        self._metrics['raw_state_cache_evictions'] += 1
+
+    @staticmethod
+    def _validate_fraction(value):
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or not 0 < value <= 1):
+            raise ValueError('cache live_fraction must be in (0, 1]')
+
+    def _live_available_bytes(self):
+        free, total = torch.cuda.mem_get_info(self.device)
+        allocated = torch.cuda.memory_allocated(self.device)
+        unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
+        cap = int(total) if self._limit is None else min(int(total), self._limit)
+        return max(0, min(int(free)+unused-self._reserve, cap-allocated))
+
+    @contextmanager
+    def raw_state_cache(self, capacity_bytes, *, live_fraction=.25):
+        """Retain bounded physical uint8 slabs only across this genetic job.
+
+        The cache never contains cohort AF/MAC or floating point dosage. It
+        allocates nothing up front and yields under live workspace pressure.
+        An active caller's slab still counts in the CUDA allocator after its
+        cached reference is retired; retirement does not invent free credit.
+        """
+        self._check_open()
+        if type(capacity_bytes) is not int or capacity_bytes < 0:
+            raise ValueError('raw-state cache capacity must be a nonnegative integer')
+        self._validate_fraction(live_fraction)
+        if self._raw_scope_active:
+            raise RuntimeError('raw-state cache scopes cannot be nested')
+        capacity = capacity_bytes
+        if self.device.type == 'cuda':
+            capacity = min(capacity, int(self._live_available_bytes()*live_fraction))
+        self._raw_capacity, self._raw_scope_active = capacity, True
+        try:
+            yield self
+        finally:
+            while self._raw_sources:
+                self._evict_raw()
+            self._raw_capacity, self._raw_scope_active = 0, False
 
     @contextmanager
     def workspace_guard(self, admission):
@@ -316,14 +404,17 @@ class SharedStateBroker:
                 self._workspace_admission(required, phase='shared_genotype_or_covariance')
             # Own LRU entries may be evicted; independent model allocations are
             # only retired through the explicitly installed owner callback.
-            while self._device_sources:
+            while self._raw_sources or self._device_sources:
                 allocated = torch.cuda.memory_allocated(self.device)
                 unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
                 free, _ = torch.cuda.mem_get_info(self.device)
                 if ((self._limit is None or allocated+required <= self._limit)
                         and required <= max(0, free+unused-self._reserve)):
                     break
-                self._evict_device()
+                if self._raw_sources:
+                    self._evict_raw()
+                else:
+                    self._evict_device()
             allocated = torch.cuda.memory_allocated(self.device)
             unused = torch.cuda.memory_reserved(self.device) - allocated
             free, _ = torch.cuda.mem_get_info(self.device)
@@ -419,6 +510,16 @@ class SharedStateBroker:
         variants = _indices(variant_indices, self._reader.n_variants, 'variant_indices')
         self._metrics['state_read_calls'] += 1
         self._metrics['requested_variants'] += len(variants)
+        raw_key = (variants.tobytes(), minimum_mac_bound) if self._raw_capacity else None
+        cached = self._raw_sources.get(raw_key) if raw_key is not None else None
+        if cached is not None:
+            raw = cached[0]
+            self._validate_raw(raw)
+            self._raw_sources.move_to_end(raw_key)
+            self._metrics['raw_state_cache_hits'] += 1
+            self._metrics['bound_rejected_variants'] += len(variants)-len(raw.variant_indices)
+            self._metrics['returned_raw_variants'] += len(raw.variant_indices)
+            return raw
         frames = np.searchsorted(self._starts, variants, side='right') - 1
         parts, positions = [], []
         for frame in np.unique(frames):
@@ -473,9 +574,73 @@ class SharedStateBroker:
             states = torch.empty((len(self.samples), 0), dtype=torch.uint8, device=self.device)
             selected = np.empty(0, dtype=np.int64)
         self._metrics['returned_raw_variants'] += len(selected)
-        return RawStateBlock(states, self.samples, _immutable(selected), self._seal, _stamp(states))
+        self._metrics['raw_state_materializations'] += 1
+        raw = RawStateBlock(states, self.samples, _immutable(selected), self._seal, _stamp(states))
+        if raw_key is not None:
+            size = states.numel()*states.element_size()+raw.variant_indices.nbytes+len(raw_key[0])
+            if size <= self._raw_capacity:
+                while self._raw_sources and self._raw_source_bytes+size > self._raw_capacity:
+                    self._evict_raw()
+                self._raw_sources[raw_key] = (raw, size)
+                self._raw_source_bytes += size
+                self._metrics['raw_state_cache_bytes_highwater'] = max(
+                    self._metrics['raw_state_cache_bytes_highwater'], self._raw_source_bytes)
+        return raw
 
-    def _axis(self, samples):
+    def _touch_axis(self, axis, *, pin=False):
+        self._axes.move_to_end(id(axis.samples))
+        if pin:
+            axis.pins += 1
+        # The axis about to be consumed survives this lookup. Active reader
+        # views/trait kernels explicitly pin it; inactive history is bounded.
+        self._trim_host_axes(protect=axis)
+        return axis
+
+    def _forget_axis(self, axis):
+        key = id(axis.samples)
+        self._axes.pop(key)
+        self._axes_by_object.pop(key)
+        if self._axes_by_digest.get(axis.digest) is axis:
+            self._axes_by_digest.pop(axis.digest)
+        for alias_key in tuple(axis.aliases):
+            self._axis_aliases.pop(alias_key, None)
+        axis.aliases.clear()
+        # Single's proof holds this axis and broker. Break that retired cycle
+        # immediately rather than waiting for a generational GC traversal.
+        axis.single_binding = None
+        device_key = id(axis)
+        if self._device_axes.pop(device_key, None) is not None:
+            self._device_axis_bytes -= axis.cache_rows.nbytes
+            axis.device_rows = None
+            self._metrics['sample_axis_device_evictions'] += 1
+        self._host_axis_bytes -= axis.host_bytes
+        self._metrics['sample_axis_host_evictions'] += 1
+
+    def _trim_host_axes(self, *, protect=None):
+        while self._host_axis_bytes > self._host_axis_capacity:
+            victim = next((axis for axis in self._axes.values()
+                           if not axis.pins and axis is not protect), None)
+            if victim is None:
+                break
+            self._forget_axis(victim)
+
+    def _unpin_axis(self, axis):
+        if axis.pins <= 0:
+            raise RuntimeError('sample-axis pin was released twice')
+        axis.pins -= 1
+        if not self._closed:
+            self._trim_host_axes()
+
+    @contextmanager
+    def _acquire_axis(self, samples):
+        axis = self._axis(samples, pin=True)
+        try:
+            yield axis
+        finally:
+            self._unpin_axis(axis)
+
+    def _axis(self, samples, *, pin=False):
+        self._check_open()
         # Preserve the source mmap/array object so its admitted identity can be
         # checked without constructing a new ndarray wrapper on every call.
         candidate = samples if isinstance(samples, np.ndarray) else np.asarray(samples)
@@ -490,53 +655,121 @@ class SharedStateBroker:
         alias = self._axis_aliases.get(id(candidate))
         if alias is not None:
             source, axis, geometry, backing = alias
-            if (source is not candidate or _array_geometry(candidate) != geometry
+            if (source() is not candidate or _array_geometry(candidate) != geometry
                     or _readonly_source(candidate) != backing):
                 raise ValueError('verified readonly sample source binding was altered')
+            self._axis_aliases.move_to_end(id(candidate))
             self._metrics['sample_axis_reuse_calls'] += 1
             self._metrics['sample_axis_immutable_alias_hits'] += 1
-            return axis
+            return self._touch_axis(axis, pin=pin)
         axis = self._axes_by_object.get(id(samples))
         if axis is not None and samples is axis.samples:
             if (candidate.dtype != np.int64 or candidate.shape != axis.cache_rows.shape
-                    or candidate.flags.writeable):
+                    or _array_geometry(candidate) != axis.geometry):
                 raise ValueError('immutable sample binding metadata was altered')
+            if _readonly_source(candidate) != axis.backing:
+                raise ValueError('verified readonly sample source binding was altered')
             self._metrics['sample_axis_reuse_calls'] += 1
-            return axis
+            self._metrics['sample_axis_immutable_alias_hits'] += 1
+            return self._touch_axis(axis, pin=pin)
         # Different complete-case cohorts must not incur a quadratic scan of
         # every prior N-row axis. The digest only locates a candidate: equality
         # still proves all values before reusing its validated immutable axis.
         source_binding = _readonly_source(candidate)
-        digest = (len(candidate_values), hashlib.sha256(candidate_values.tobytes()).digest())
-        self._metrics['sample_axis_digest_calls'] += 1
+        proof = self._axis_proofs.get(id(candidate))
+        if proof is not None:
+            reference, geometry, backing, digest = proof
+            if (reference() is not candidate or _array_geometry(candidate) != geometry
+                    or source_binding != backing):
+                raise ValueError('verified readonly sample source binding was altered')
+            self._axis_proofs.move_to_end(id(candidate))
+        else:
+            digest = (len(candidate_values), hashlib.sha256(candidate_values.tobytes()).digest())
+            self._metrics['sample_axis_digest_calls'] += 1
         axis = self._axes_by_digest.get(digest)
         if axis is not None and np.array_equal(candidate_values, axis.samples):
             self._remember_axis_alias(candidate, axis, source_binding)
+            self._remember_axis_proof(candidate, source_binding, digest)
             self._metrics['sample_axis_reuse_calls'] += 1
-            return axis
-        self._metrics['sample_axis_validation_calls'] += 1
-        selected = _indices(samples, self._reader.n_samples, 'sample_indices')
-        positions = np.searchsorted(self._sorted_samples, selected)
-        if (np.any(positions >= len(self.samples)) or
-                np.any(self._sorted_samples[np.minimum(positions, max(0, len(self.samples)-1))] != selected)):
-            raise ValueError('phenotype samples are outside the physical cache binding')
-        rows = _immutable(self._sample_sort[positions])
+            return self._touch_axis(axis, pin=pin)
+        if proof is None:
+            self._metrics['sample_axis_validation_calls'] += 1
+            selected = _indices(samples, self._reader.n_samples, 'sample_indices')
+            positions = np.searchsorted(self._sorted_samples, selected)
+            if (np.any(positions >= len(self.samples)) or
+                    np.any(self._sorted_samples[np.minimum(positions, max(0, len(self.samples)-1))] != selected)):
+                raise ValueError('phenotype samples are outside the physical cache binding')
+        else:
+            # Only a weak immutable-source proof survives LRU retirement. It
+            # owns no cohort array or Axis and prevents repeated N-row scans.
+            selected = candidate_values
+            positions = None if self._identity_mapping else np.searchsorted(self._sorted_samples, selected)
+            self._metrics['sample_axis_verified_rebinds'] += 1
+        # Immutable authenticated model rows already own their exact ordering.
+        # Reuse that storage, and the same index when cache rows are logical
+        # population rows. Readonly flags over mutable storage still get copied.
+        canonical = (candidate if candidate.dtype == np.int64 and source_binding is not None
+                     else _immutable(selected))
+        if canonical is candidate:
+            self._metrics['sample_axis_borrowed_immutable_axes'] += 1
+        rows = canonical if self._identity_mapping else _immutable(self._sample_sort[positions])
+        if rows is canonical:
+            self._metrics['sample_axis_identity_mapping_aliases'] += 1
         self._guard(rows.nbytes + 64 * 2**20)
-        axis = _Axis(samples, _immutable(selected), rows, None)
-        self._axes.append(axis)
+        axis = _Axis(canonical, canonical, rows, None, digest=digest,
+            host_bytes=canonical.nbytes+(0 if rows is canonical else rows.nbytes),
+            geometry=_array_geometry(canonical), backing=_readonly_source(canonical))
+        self._axes[id(axis.samples)] = axis
         self._axes_by_object[id(axis.samples)] = axis
         self._axes_by_digest[digest] = axis
+        self._host_axis_bytes += axis.host_bytes
+        self._metrics['sample_axis_host_bytes_highwater'] = max(
+            self._metrics['sample_axis_host_bytes_highwater'], self._host_axis_bytes)
         self._remember_axis_alias(candidate, axis, source_binding)
+        self._remember_axis_proof(candidate, source_binding, digest)
         self._metrics['bound_sample_axes'] += 1
-        return axis
+        return self._touch_axis(axis, pin=pin)
+
+    def _remember_axis_proof(self, candidate, backing, digest):
+        if backing is None:
+            return
+        key, owner = id(candidate), weakref.ref(self)
+        def expired(reference):
+            broker = owner()
+            if broker is not None:
+                prior = broker._axis_proofs.get(key)
+                if prior is not None and prior[0] is reference:
+                    broker._axis_proofs.pop(key)
+        self._axis_proofs[key] = (weakref.ref(candidate, expired),
+            _array_geometry(candidate), backing, digest)
+        self._axis_proofs.move_to_end(key)
+        while len(self._axis_proofs) > self._proof_capacity:
+            self._axis_proofs.popitem(last=False)
 
     def _remember_axis_alias(self, candidate, axis, source_binding):
         backing = _readonly_source(candidate)
         if backing != source_binding:
             raise ValueError('readonly sample source changed while its axis was verified')
-        if backing is not None:
-            # Keep the source object alive: id reuse cannot validate another array.
-            self._axis_aliases[id(candidate)] = (candidate, axis, _array_geometry(candidate), backing)
+        if backing is not None and candidate is not axis.samples:
+            # Weak aliases cannot retain another cohort-sized allocation. The
+            # weakref identity and geometry still exclude id reuse and mutation.
+            key, owner = id(candidate), weakref.ref(self)
+            def expired(reference):
+                broker = owner()
+                if broker is not None:
+                    prior = broker._axis_aliases.get(key)
+                    if prior is not None and prior[0] is reference:
+                        broker._axis_aliases.pop(key)
+                        prior[1].aliases.discard(key)
+            prior = self._axis_aliases.pop(key, None)
+            if prior is not None:
+                prior[1].aliases.discard(key)
+            self._axis_aliases[key] = (weakref.ref(candidate, expired), axis,
+                _array_geometry(candidate), backing)
+            axis.aliases.add(key)
+            while len(self._axis_aliases) > self._alias_capacity:
+                old_key, old = self._axis_aliases.popitem(last=False)
+                old[1].aliases.discard(old_key)
 
     def _device_rows(self, axis):
         key = id(axis)
@@ -621,9 +854,9 @@ class SharedStateBroker:
         self._check_open()
         self._validate_raw(raw_block)
         self._minimum_mac(minimum_mac)
-        axis = self._axis(sample_indices)
-        counts = self._count(raw_block, axis)
-        return self._materialize_from_counts(raw_block, axis, counts, minimum_mac)
+        with self._acquire_axis(sample_indices) as axis:
+            counts = self._count(raw_block, axis)
+            return self._materialize_from_counts(raw_block, axis, counts, minimum_mac)
 
     def trait_blocks(self, raw_block, sample_axes, minimum_mac=None):
         """Count independent cohorts, then transfer their small summaries once.
@@ -635,7 +868,11 @@ class SharedStateBroker:
         self._check_open()
         self._validate_raw(raw_block)
         self._minimum_mac(minimum_mac)
-        axes = [self._axis(samples) for samples in sample_axes]
+        with ExitStack() as pins:
+            axes = [pins.enter_context(self._acquire_axis(samples)) for samples in sample_axes]
+            return self._trait_blocks_pinned(raw_block, axes, minimum_mac)
+
+    def _trait_blocks_pinned(self, raw_block, axes, minimum_mac):
         self._metrics['batched_trait_summary_calls'] += 1
         self._metrics['batched_trait_summary_traits'] += len(axes)
         if not axes:
@@ -701,7 +938,7 @@ class SharedStateBroker:
     def reader_view(self, trait_rows):
         """Metadata-compatible genotype facade fixed to one ordered cohort axis."""
         self._check_open()
-        return SharedTraitReader(self, self._axis(trait_rows))
+        return SharedTraitReader(self, self._axis(trait_rows, pin=True))
 
     def close(self):
         if self._closed:
@@ -709,12 +946,20 @@ class SharedStateBroker:
         self._closed = True
         self._sources.clear()
         self._device_sources.clear()
+        self._raw_sources.clear()
+        self._raw_source_bytes = self._raw_capacity = 0
+        for axis in self._axes.values():
+            axis.aliases.clear()
+            axis.single_binding = None
+            axis.device_rows = None
         self._axes.clear()
         self._axes_by_object.clear()
         self._axes_by_digest.clear()
         self._axis_aliases.clear()
+        self._axis_proofs.clear()
         self._device_axes.clear()
         self._device_axis_bytes = 0
+        self._host_axis_bytes = 0
         self._identity_rows = None
         self._source_bytes = self._device_bytes = 0
         try:
@@ -743,7 +988,9 @@ class SharedTraitReader:
         self.close()
 
     def close(self):
-        self._closed = True
+        if not self._closed:
+            self._closed = True
+            self._broker._unpin_axis(self._axis)
 
     def _single_axis_binding(self):
         self._broker._check_open()

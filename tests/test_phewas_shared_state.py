@@ -148,6 +148,213 @@ def test_source_frame_reads_and_device_payload_are_shared_without_cpu_lru(tmp_pa
             first.minor_block(columns, first._axis.samples)
 
 
+def test_authenticated_axis_aliases_identity_mapping_and_copies_mutable_sources(tmp_path):
+    from fudan_wgs_toolkit.phewas_runtime.shared_state import _immutable
+    raw = fixture_states()
+    selected = _immutable([10, 2, 7, 0])
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu') as broker:
+        view = broker.reader_view(selected)
+        assert view._axis.samples is selected and view._axis.cache_rows is selected
+        with pytest.raises(ValueError):
+            view._axis.samples.flags.writeable = True
+        ordinary = np.asarray([3, 2, 1], dtype=np.int64)
+        ordinary.flags.writeable = False
+        copied = broker.reader_view(ordinary)
+        assert copied._axis.samples is not ordinary
+        ordinary.flags.writeable = True
+        ordinary[:] = [0, 5, 6]
+        np.testing.assert_array_equal(copied._axis.samples, [3, 2, 1])
+        assert broker.metrics['sample_axis_borrowed_immutable_axes'] == 1
+        view.close()
+        copied.close()
+
+
+def test_host_axis_lru_preserves_active_binding_and_removes_all_aliases(tmp_path):
+    from fudan_wgs_toolkit.phewas_runtime.shared_state import _immutable
+    raw = fixture_states()
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu', sample_axis_host_cache_bytes=3*8) as broker:
+        first = broker.reader_view(_immutable([10, 2, 7]))
+        pinned_axis = first._axis
+        binding = first._single_axis_binding()
+        same = _immutable([10, 2, 7])
+        matched = broker.reader_view(same)
+        assert matched._axis is pinned_axis
+        matched.close()
+        for rows in ([1, 2, 3], [4, 5, 6], [8, 9, 0]):
+            other = broker.reader_view(_immutable(rows))
+            assert broker._axes_by_object[id(pinned_axis.samples)] is pinned_axis
+            other.close()
+        assert binding.validate(first, pinned_axis.samples, pinned_axis.identity_rows, 3) is pinned_axis
+        assert broker.metrics['current_sample_axis_host_bytes'] == 3*8
+        assert id(same) in broker._axis_aliases
+        first.close()
+        first.close()  # An idempotent close must not drop another view's pin.
+        replacement = broker.reader_view(_immutable([1, 2, 3]))
+        assert id(pinned_axis.samples) not in broker._axes_by_object
+        assert pinned_axis.digest not in broker._axes_by_digest
+        assert id(same) not in broker._axis_aliases
+        assert not pinned_axis.aliases
+        assert id(pinned_axis) not in broker._device_axes
+        replacement.close()
+        assert broker.metrics['current_sample_axis_host_bytes'] <= 3*8
+        assert broker.metrics['sample_axis_host_evictions'] >= 4
+
+
+def test_axis_weak_aliases_do_not_retain_equal_external_arrays(tmp_path):
+    import gc
+    import weakref
+    from fudan_wgs_toolkit.phewas_runtime.shared_state import _immutable
+    raw = fixture_states()
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu') as broker:
+        view = broker.reader_view(_immutable([10, 2, 7]))
+        references = []
+        for _ in range(300):
+            equal = _immutable([10, 2, 7])
+            references.append(weakref.ref(equal))
+            matched = broker.reader_view(equal)
+            matched.close()
+        del equal, matched
+        gc.collect()
+        assert all(reference() is None for reference in references)
+        assert broker.metrics['current_sample_axis_weak_alias_count'] == 0
+        view.close()
+
+
+def test_retired_axis_uses_weak_immutable_proof_without_repeated_population_scan(tmp_path, monkeypatch):
+    from fudan_wgs_toolkit.phewas_runtime.shared_state import _immutable
+    raw = fixture_states()
+    rows = [_immutable([10, 2, 7]), _immutable([1, 3, 5]), _immutable([6, 8, 0])]
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu', sample_axis_host_cache_bytes=3*8) as broker:
+        for axis in rows:
+            broker.reader_view(axis).close()
+        assert broker.metrics['sample_axis_digest_calls'] == 3
+        assert broker.metrics['sample_axis_validation_calls'] == 3
+        def forbidden(*args, **kwargs):
+            raise AssertionError('unchanged immutable source must not repeat its population-sized scan')
+        monkeypatch.setattr(np, 'unique', forbidden)
+        monkeypatch.setattr(np, 'searchsorted', forbidden)
+        for axis in rows:
+            view = broker.reader_view(axis)
+            assert view._axis.samples is axis and view._axis.cache_rows is axis
+            view.close()
+        assert broker.metrics['sample_axis_digest_calls'] == 3
+        assert broker.metrics['sample_axis_validation_calls'] == 3
+        assert broker.metrics['sample_axis_verified_rebinds'] == 3
+        assert broker.metrics['current_sample_axis_host_bytes'] <= 3*8
+
+
+def test_host_axis_lru_pins_batched_cohorts_until_materialization_finishes(tmp_path):
+    raw = fixture_states()
+    physical = np.asarray([10, 2, 9, 0, 5, 1, 8, 3, 7, 6, 4], dtype=np.int64)
+    columns = np.asarray([3, 4, 8, 2, 12])
+    axes = [np.asarray([10, 2, 7]), np.asarray([9, 0, 5]), np.asarray([4, 1, 3])]
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)),
+            make_cache(tmp_path/'cache', raw, physical), device='cpu',
+            sample_axis_host_cache_bytes=3*8*2) as broker:
+        blocks = broker.trait_blocks(broker.read_states(columns), axes)
+        for block, rows in zip(blocks, axes):
+            assert_block(block, oracle(raw, physical, rows, columns), rows)
+        assert broker.metrics['current_sample_axis_host_bytes'] <= 3*8*2
+        assert broker.metrics['current_sample_axis_pinned_count'] == 0
+
+
+@pytest.mark.parametrize('device', ['cpu', pytest.param('cuda:0', marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason='CUDA raw reuse contract requires CUDA'))])
+def test_job_raw_slab_read_decode_upload_once_across_distinct_cohorts(tmp_path, device):
+    raw = fixture_states()
+    columns = np.asarray([3, 4, 8, 2, 12])
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device=device, device_cache_bytes=0, compact_cache_bytes=0) as broker:
+        with broker.raw_state_cache(2**20):
+            source = broker.read_states(columns)
+            first = broker.trait_block(source, np.asarray([10, 2, 7]))
+            same = broker.read_states(columns.copy())
+            second = broker.trait_block(same, np.asarray([9, 0, 5]))
+            assert same is source
+            for block, rows in ((first, np.asarray([10, 2, 7])), (second, np.asarray([9, 0, 5]))):
+                assert_block(block, oracle(raw, np.arange(raw.shape[1]), rows, columns), rows)
+            assert broker.metrics['frame_reads'] == 1
+            assert broker.metrics['device_csr_uploads'] == 1
+            assert broker.metrics['raw_state_materializations'] == 1
+            assert broker.metrics['raw_state_cache_hits'] == 1
+            assert broker.metrics['current_raw_state_cache_slabs'] == 1
+        assert broker.metrics['current_raw_state_cache_bytes'] == 0
+        assert broker.metrics['raw_state_cache_limit_bytes'] == 0
+        # Scope retirement only drops the cached reference, not active readers.
+        assert_block(broker.trait_block(source, np.asarray([10, 2, 7])),
+            oracle(raw, np.arange(raw.shape[1]), np.asarray([10, 2, 7]), columns), np.asarray([10, 2, 7]))
+        broker.read_states(columns)
+        assert broker.metrics['frame_reads'] == 2
+
+
+def test_raw_slab_cache_budget_release_order_and_mac_binding_are_exact(tmp_path):
+    raw = fixture_states()
+    columns = np.asarray([3, 4, 8, 2, 12])
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu', device_cache_bytes=0, compact_cache_bytes=0) as broker:
+        size = raw.shape[1]*len(columns)+16*len(columns)
+        with broker.raw_state_cache(size):
+            unfiltered = broker.read_states(columns)
+            reverse = broker.read_states(columns[::-1])
+            np.testing.assert_array_equal(reverse.variant_indices, columns[::-1])
+            assert reverse is not unfiltered
+            assert broker.metrics['current_raw_state_cache_bytes'] <= size
+            filtered = broker.read_states(columns, minimum_mac_bound=10)
+            assert filtered is not unfiltered
+            assert broker.metrics['current_raw_state_cache_bytes'] <= size
+            released = broker.release_device_cache()
+            assert released > 0 and not broker._raw_sources
+            np.testing.assert_array_equal(unfiltered.states.numpy(), raw[columns].T)
+        with broker.raw_state_cache(1):
+            broker.read_states(columns)
+            assert broker.metrics['current_raw_state_cache_bytes'] == 0
+
+
+def test_adaptive_cache_caps_use_live_available_and_leave_reserve(tmp_path, monkeypatch):
+    """Mock only resource counters; no hardware/throughput claim is made."""
+    raw = fixture_states()
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (500, 2000))
+    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 200)
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 300)
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cuda:0', memory_limit_gib=1000/2**30, memory_reserve_bytes=100,
+            device_cache_bytes=1000, device_cache_live_fraction=.25) as broker:
+        # min(free + reusable - reserve, process cap - allocated) = 500.
+        assert broker.metrics['gpu_csr_cache_limit_bytes'] == 125
+        assert broker.metrics['gpu_csr_cache_configured_limit_bytes'] == 1000
+        with broker.raw_state_cache(1000, live_fraction=.5):
+            assert broker.metrics['raw_state_cache_limit_bytes'] == 250
+        monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (0, 2000))
+        monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 200)
+        with broker.raw_state_cache(1000):
+            assert broker.metrics['raw_state_cache_limit_bytes'] == 0
+
+
+def test_retiring_raw_cache_does_not_credit_active_external_storage(tmp_path, monkeypatch):
+    """An externally held slab remains counted after cache-owned retirement."""
+    raw = fixture_states()
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cpu', memory_reserve_bytes=0, device_cache_bytes=0, compact_cache_bytes=0) as broker:
+        with broker.raw_state_cache(2**20):
+            source = broker.read_states(np.asarray([3, 4, 8, 2, 12]))
+            broker.device = torch.device('cuda:0')
+            monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (100, 1000))
+            monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 900)
+            monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 900)
+            try:
+                with pytest.raises(MemoryError, match='live CUDA budget'):
+                    broker._guard(150)
+                assert broker.metrics['current_raw_state_cache_bytes'] == 0
+                np.testing.assert_array_equal(source.states.numpy(), raw[[3, 4, 8, 2, 12]].T)
+            finally:
+                broker.device = torch.device('cpu')
+
+
 @pytest.mark.parametrize('device', ['cpu', pytest.param('cuda:0', marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason='CUDA unavailable for cross-frame kernel contracts'))])
 def test_cross_frame_unsorted_variant_axis_is_never_sorted(tmp_path, device):

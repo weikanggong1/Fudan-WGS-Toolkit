@@ -17,10 +17,19 @@ _SOLVER_LOCK=threading.RLock()
 _SOLVER_CONTEXT_ACTIVE=False
 _SOLVER=None
 _LAST_SOLVER_CONTEXT=None
-_METRICS=dict(calls=0,batch_sizes=[],eigen_api_calls=0,complete_representative_spectra=0,
+_BATCH_SAMPLE_LIMIT=64
+_METRICS=dict(calls=0,batch_sizes=[],batch_size_counts={},eigen_api_calls=0,complete_representative_spectra=0,
               exact_relation_reused_spectra=0,live_workspace_queries=0,workspace_rejections=0,
               max_estimated_batch_workspace_bytes=0,max_weighted_tensor_bytes=0,
               workspace_query_host_seconds=0.,actual_backend_calls={},actual_backend_matrices={})
+
+def _record_batch_size(size):
+    """Keep exact lifetime counts and only the latest bounded batch samples."""
+    counts=_METRICS['batch_size_counts']
+    counts[size]=counts.get(size,0)+1
+    recent=_METRICS['batch_sizes']
+    recent.append(size)
+    del recent[:-_BATCH_SAMPLE_LIMIT]
 
 def _make_solver(memory_limit):
     # Library discovery stays lazy until the first selected CUDA tensor call.
@@ -179,7 +188,7 @@ def native_weighted_spectra(covariance, weights):
             spectra,backend = _complete_eigvalsh(matrices)
         if backend in ('torch.linalg.eigvalsh','torch.linalg.eigvalsh:magma_retry'):
             record_gpu_eigen_route(matrices)
-        _METRICS['batch_sizes'].append(len(indices))
+        _record_batch_size(len(indices))
         _METRICS['eigen_api_calls']+=1
         for index, spectrum in zip(indices, spectra):
             solved[index] = spectrum
@@ -195,6 +204,7 @@ def native_weighted_spectra(covariance, weights):
 def execution_metadata(*,reset=False):
     global _LAST_SOLVER_CONTEXT
     report=dict(copy.deepcopy(_METRICS),
+        batch_sizes_scope=f'last {_BATCH_SAMPLE_LIMIT} weighted-matrix batches; exact lifetime counts in batch_size_counts',
         batch_limit_bytes=WEIGHTED_BATCH_LIMIT_BYTES,
         weighted_matrix_dtype='float32',eigensolver='explicit complete FP32 eigvalsh APIs, UPLO=U',
         eigensolver_context=copy.deepcopy(_LAST_SOLVER_CONTEXT),

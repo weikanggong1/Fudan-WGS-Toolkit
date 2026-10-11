@@ -99,6 +99,83 @@ def test_interrupted_model_store_retries_in_same_process_without_overwriting_par
     assert entry['sha256'] == digest_file(destination/'model.private.json')
 
 
+def test_model_axes_are_immutable_and_descriptor_groups_alias_authenticated_rows(tmp_path):
+    from fudan_wgs_toolkit.phewas_runtime.runtime import _descriptor_groups
+    n = 20
+    model = fit_gaussian_null(np.sin(np.arange(n)), sample_ids=np.arange(n).astype(str),
+        covariates=np.ones((n, 1)), device='cpu', matmul_mode='fp64')
+    entry = save_model_store(model, tmp_path/'model', sample_rows=np.arange(n), fit_metadata={})
+    repository = ModelRepository([entry, entry.copy()])
+    rows = repository.descriptors()[0]['ordered_rows']
+    with pytest.raises(ValueError):
+        rows.flags.writeable = True
+    descriptors, groups = _descriptor_groups(repository)
+    assert len(groups) == 1 and groups[0]['rows'] is rows
+    assert all(descriptor['ordered_rows'] is rows for descriptor in descriptors)
+    assert repository.summary()['sample_axis_ram_bytes'] == rows.nbytes
+
+
+def test_design_dedup_survives_one_bank_eviction_and_releases_last_owner(tmp_path):
+    import gc
+    import weakref
+    n = 24
+    x = np.column_stack((np.ones(n), np.linspace(-1, 1, n)))
+    entries = []
+    for i in range(2):
+        model = fit_gaussian_null(np.sin(np.arange(n)+i), sample_ids=np.arange(n).astype(str),
+            covariates=x, device='cpu', matmul_mode='fp64')
+        entries.append(save_model_store(model, tmp_path/f'model{i}',
+            sample_rows=np.arange(n), fit_metadata={}))
+    repository = ModelRepository(entries)
+    with repository.acquire([0, 1], 'cpu') as loaded:
+        assert loaded[0].x is loaded[1].x
+        design = weakref.ref(loaded[1].x)
+    del loaded
+    assert repository._evict_one(device=torch.device('cpu'), protect=((1, 'cpu'),))
+    with repository.acquire([0], 'cpu') as loaded:
+        assert loaded[0].x is repository.models[(1, 'cpu')].x is design()
+    del loaded
+    while repository._evict_one():
+        pass
+    gc.collect()
+    assert design() is None
+    assert repository.summary()['live_deduplicated_design_tensors'] == 0
+
+
+def test_bank_close_releases_owned_arrays_and_refuses_active_contexts(tmp_path):
+    import gc
+    import weakref
+    n = 20
+    model = fit_gaussian_null(np.sin(np.arange(n)), sample_ids=np.arange(n).astype(str),
+        covariates=np.ones((n, 1)), device='cpu', matmul_mode='fp64')
+    destination = tmp_path/'model'
+    entry = save_model_store(model, destination, sample_rows=np.arange(n), fit_metadata={})
+    repository = ModelRepository([entry])
+    axis = weakref.ref(repository.descriptors()[0]['ordered_rows'])
+    with repository.acquire([0], 'cpu') as loaded:
+        design = weakref.ref(loaded[0].x)
+        with pytest.raises(RuntimeError, match='active model/workspace'):
+            repository.close()
+        storage = repository.resident_storage_summary()
+        assert storage['resident_storage_bytes_by_device']['cpu'] >= loaded[0].x.numel()*8
+        assert storage['unique_cuda_storage_bytes'] == 0
+    del loaded
+    with repository.reserve_workspace('cpu', 0):
+        with pytest.raises(RuntimeError, match='active model/workspace'):
+            repository.close()
+    repository.close()
+    repository.close()
+    gc.collect()
+    assert design() is None and axis() is None
+    assert repository.summary()['closed'] is True
+    assert repository.summary()['resident_storage_bytes_by_device'] == {}
+    assert (destination/'normal'/'x.npy').exists()
+    with pytest.raises(RuntimeError, match='closed'):
+        with repository.acquire([0], 'cpu'):
+            pass
+
+
+
 def test_csv_shards_cover_all_traits_fields_and_significance_levels(tmp_path):
     writer = StreamingCSVWriter(tmp_path, max_rows_per_shard=3, minimum_free_bytes=0)
     for trait in range(5):
@@ -143,6 +220,45 @@ def test_binary_repository_reuses_verified_source_for_normal_and_spa(tmp_path, m
     assert repository.summary()['spa_source_loads'] == 1
     assert repository.summary()['spa_source_hits'] == 3
     assert repository.spa_pinned[(0, 'cpu')] == 0
+
+
+def test_optional_stored_native_binary_bank_preserves_fitted_normal_and_original_spa(tmp_path, monkeypatch):
+    import fudan_wgs_toolkit.binary_null as binary_null
+    monkeypatch.setattr(binary_null, 'matmul', lambda left, right, mode: left@right)
+    from fudan_wgs_toolkit.phewas_models import prepare_phewas_model
+    n = 45
+    x = np.column_stack((np.ones(n), np.linspace(-1, 1, n)))
+    fitted = prepare_phewas_model((np.arange(n)%3 == 0).astype(float),
+        np.arange(n).astype(str), x, family='binomial', device='cpu')
+    entry = save_model_store(fitted.model, tmp_path/'model', sample_rows=np.arange(n),
+        fit_metadata={}, spa_model=fitted.spa_model)
+    repository = ModelRepository([entry], binary_normal_cache='stored_native')
+    g = torch.tensor(np.column_stack((np.arange(n)%2, np.arange(n)%5 == 0)), dtype=torch.float32)
+    with repository.acquire([0], 'cpu') as normal:
+        first = normal[0]
+        assert not first.use_spa and repository.summary()['spa_source_loads'] == 0
+        for name in ('x', 'scaled_residuals', 'fitted_probability', 'precision',
+                     'precision_x', 'fixed_effect_covariance', 'coefficients'):
+            torch.testing.assert_close(getattr(first, name), getattr(fitted.model, name), rtol=0, atol=0)
+        for actual, expected in zip(first.score_covariance(g), fitted.model.score_covariance(g)):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        with repository.acquire_spa(0, 'cpu') as spa:
+            assert spa.use_spa and spa.x.dtype == torch.float64
+            assert first.null_fit_source_sha256 == spa.null_fit_source_sha256
+            np.testing.assert_array_equal(first.sample_ids, spa.sample_ids)
+            torch.testing.assert_close(spa.x, fitted.spa_model.x, rtol=0, atol=0)
+            torch.testing.assert_close(spa.projection_left, fitted.spa_model.projection_left,
+                rtol=1e-12, atol=1e-12)
+            for actual, expected in zip(spa.score_covariance(g.double()), fitted.spa_model.score_covariance(g.double())):
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    with repository.acquire([0], 'cpu') as normal:
+        assert normal[0] is first
+    summary = repository.summary()
+    assert summary['model_loads'] == 1 and summary['spa_source_loads'] == 1
+    assert summary['binary_normal_from_same_fp64_source'] is False
+    assert summary['binary_spa_state_provenance'] == 'authenticated_original_fp64_source'
+    with pytest.raises(ValueError, match='binary_normal_cache'):
+        ModelRepository([], binary_normal_cache='rounded_spa')
 
 
 def test_interrupted_writer_keeps_partial_and_cannot_claim_complete(tmp_path):

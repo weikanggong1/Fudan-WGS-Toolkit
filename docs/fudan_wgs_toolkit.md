@@ -516,6 +516,24 @@ if __name__ == "__main__":
 
 跨运行或跨源码导入模型属于另一个操作，须提供原拟合源码与当前消费源码的绑定、数学兼容证明、完整模型导入清单，以及所有原拟合进程退出为零的收据。模型数组的 SHA、dtype、shape、样本轴及全部表型覆盖必须通过校验；导入不修改原模型，也不重新拟合。统一入口的 `resume` 只恢复同一运行，不能用来绕过这些跨运行证明。模型验证完成也不能替代关联输出完成。
 
+### 6.3 主机准入、共享读取与张量生命周期
+
+主机准入账本的 schema 2 记录 `future_bytes`：本进程接下来还要分配的字节。实际占用从全部可见 cgroup 及物理主存取得；跨 worker 的 RSS 可重复包含共享映射，因此仅用于诊断，不再与完整工作区重复相加。预留在准备步骤中随已初始化的自有数组更新，每个 cohort/mask 结束后归零。`np.empty` 尚未初始化的空间不能用作抵扣依据。旧 schema 账本保留在旧运行目录，新运行使用新的账本。
+
+当前集合首次因主存压力推迟时，先释放临时数组和非固定 metadata LRU 缓存，并在该集合的重试期间暂停 LRU 写入，防止相同读取重新占满空间；成功或异常退出后恢复缓存。固定结构字段、样本轴与已经准备的注释索引保留。缓存释放量仅作估计诊断，下一次分配仍以真实主存占用重新准入。
+
+关联按实际相同的有序样本集合分组。一个集合完成后提交其结果；后续集合遇到暂时资源压力只重试当前集合，避免整 gene 的已有表型重算。只读样本行索引允许认证共享，主机与设备索引均有容量及活跃读取视图保护。一个遗传作业内可以复用原始六状态块，按表型自己的样本计算 AF、筛选与模型关联；不同表型的统计量和模型不共享。索引的弱校验证明有界保存，避免主机缓存淘汰后重复扫描完整样本集合。
+
+Single 在每个 trait tile 和物理批次结束时释放临时状态、pipeline 与模型引用。长 mask 的 panel 上传不再无条件清空 CUDA allocator；只有真实空间不足时才回收已无引用的缓存。监控分别记录当前 allocated、reserved 和有界缓存。模型 bank 预热或 reserved 增长并不能单独证明显存泄漏，需要在固定输入重复运行后检查仍被引用的张量。
+
+已拟合二分类模型可设置 `binary_normal_cache="stored_native"`，复用原来保存且经过哈希认证的 FP32 普通关联状态；显著结果仍按需读取同次拟合的原 FP64 来源并执行 SPA。默认 `derived_fp64` 保留按 FP64 来源派生普通状态的路径。选择前应比较同一模型的保存状态、关联结果与 SPA；模型拟合和样本选择不变。
+
+分布式计划可配置 `device_cache_bytes`（设备六状态 CSR 缓存字节）、`compact_cache_bytes`（主机解码缓存字节）、`metadata_cache_bytes`（metadata 缓存字节）及 `memory_reserve_bytes`（CUDA 安全余量字节）。`sample_axis_host_cache_bytes` 与 `sample_axis_cache_bytes` 分别控制主机和 CUDA 样本索引缓存；`job_state_cache_bytes` 控制作业内原始六状态块的 CUDA 缓存。`device_cache_live_fraction` 和 `job_state_cache_live_fraction` 限制缓存可使用的实际可用显存比例。缓存仍受运行时工作区准入控制；提高容量不会绕过设备空闲内存或主机 cgroup 限额。每个 worker 的线程亲和性和共享 CPU quota 分别约束，不能将每卡最多使用 8 CPU 解读为每卡独占 8 核。
+
+加权谱诊断以直方图保留各批次大小的累计次数，最近批次列表最多 64 项；长时间运行不再逐个保存无限增长的批次列表。
+
+染色体类别索引在相同 metadata、catalog 和选项下只构建一次，按只读数组共享给后续表型集合。UTF-8 metadata 解码对 offsets/valid 使用零拷贝只读 ndarray 视图，保留原字符串解码、缺失值、顺序和 checksum 校验，减少逐元素 memmap 子类访问。
+
 ## 7. 原始方法与验证记录
 
 算法来源、许可证和固定参考提交见 [NOTICE.md](../NOTICE.md)。原始方法的调用参数与输入格式见 [原始 pipeline 教程](https://github.com/li-lab-genetics/STAARpipeline-Tutorial)、[原始多表型实现](https://github.com/li-lab-genetics/STAARpipelinePheWAS)。这些链接用于解释来源，本包不安装、包装或运行这些项目。
@@ -543,6 +561,7 @@ if __name__ == "__main__":
 
 | 版本 | 更新 |
 | --- | --- |
+| 0.9.0 资源与读取修复 | 主机 future 准入与单 cohort 重试；共享只读样本轴及染色体类别索引；UTF-8 offsets/valid 零拷贝访问；压力时释放可选 metadata 缓存；Single 和模型临时引用按生命周期释放 |
 | 0.9.0 统一公开接口 | 已完成的两种遗传目录都用 run_WGS_all，不再次转存；全部/编号染色体、设备列表/卡数、自动显存与预留、自动模型族、每表型协变量、验证结果块恢复、sparse/none GRM；连续默认处理按缓存来源保留，标准 CSV 使用 FID/IID；恢复检查遗传数据流身份，本次状态与归档报告分别记录 |
 | 0.8.0 工作区修复 | Burden 继承调用方显存预算和 reserve；二分类状态派生分配前计量；及时释放原生检验中间张量；资源配置变化的模型兼容证明；201 项测试及真实四类 444 行局部复核 |
 | 0.8.0 | 改为 Fudan WGS Toolkit；prepare_WGS_data 原始 PLINK + 独立注释入口，默认多 CPU 并行；run_WGS_all 单/多表型统一入口；常量精度的原生 TF32 协方差归一化；严格 FID/IID；直接 CSV；删除退休读取器、非 Python 实现、旧导出和旧文档 |

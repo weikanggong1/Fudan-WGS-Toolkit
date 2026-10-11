@@ -13,6 +13,7 @@ from pathlib import Path
 import shutil
 import time
 import uuid
+import weakref
 import numpy as np
 import torch
 from .binary_null import BinaryNullModel
@@ -202,8 +203,9 @@ def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
         spec = meta['arrays'][name]
         key = (str(device), spec['sha256'], tuple(spec['shape']), spec['dtype'])
         # Only fixed design arrays are safely deduplicated across fitted states.
-        if name == 'x' and key in memo:
-            return memo[key]
+        cached = memo.get(key) if name == 'x' else None
+        if cached is not None:
+            return cached
         a = array(name)
         result = torch.tensor(np.asarray(a), device=device)
         if name == 'x':
@@ -257,8 +259,9 @@ def load_spa_source(directory, *, device, tensor_cache):
     def tensor(name):
         spec = meta['arrays'][name]
         key = (str(device), spec['sha256'], tuple(spec['shape']), spec['dtype'])
-        if name == 'x' and key in tensor_cache:
-            return tensor_cache[key]
+        cached = tensor_cache.get(key) if name == 'x' else None
+        if cached is not None:
+            return cached
         result = torch.tensor(np.asarray(array(name)), device=device)
         if name == 'x':
             tensor_cache[key] = result
@@ -364,16 +367,24 @@ class ModelRepository:
     device memory and leaves workspace for G/covariance; no fixed GiB ceiling
     applies. Entries held by nested acquire contexts cannot be evicted.
     """
-    def __init__(self, entries, *, workspace_bytes=8*2**30):
+    def __init__(self, entries, *, workspace_bytes=8*2**30,
+                 binary_normal_cache='derived_fp64'):
         self._validate_bytes(workspace_bytes, 'workspace_bytes')
+        if binary_normal_cache not in ('derived_fp64', 'stored_native'):
+            raise ValueError('binary_normal_cache must be derived_fp64 or stored_native')
         self.entries = list(entries)
         self.workspace_bytes = workspace_bytes
+        self.binary_normal_cache = binary_normal_cache
+        self._closed = False
         self._workspace_reservations = []
         self._memory_policies = {}
         self._workspace_metrics = dict(workspace_admissions=0, workspace_evictions=0,
             workspace_cache_release_calls=0, workspace_required_bytes_highwater=0,
             workspace_additional_bytes_highwater=0, workspace_phase_counts={})
-        self.models, self.pinned, self.tensor_cache = OrderedDict(), {}, {}
+        # X remains deduplicated while any live model/source owns it. The memo
+        # itself never pins a tensor after its last fitted state is retired.
+        self.models, self.pinned = OrderedDict(), {}
+        self.tensor_cache = weakref.WeakValueDictionary()
         self.spa_sources, self.spa_pinned = OrderedDict(), {}
         self.spa_source_loads = self.spa_source_hits = 0
         self.loads = self.hits = self.evictions = 0
@@ -393,15 +404,44 @@ class ModelRepository:
                 rows = np.load(path/'sample_rows.npy', allow_pickle=False)
                 if rows.ndim != 1 or rows.dtype != np.dtype(np.int64):
                     raise ValueError('fitted sample rows must be a one-dimensional int64 axis')
-                rows.flags.writeable = False
-                self._sample_axes[axis_key] = rows
+                # A reversible readonly flag cannot prove immutable ownership.
+                # Bytes-backed rows are safe aliases in descriptor grouping and
+                # the shared broker, without retaining an open mmap per trait.
+                self._sample_axes[axis_key] = np.frombuffer(rows.tobytes(), dtype=np.int64)
             rows = self._sample_axes[axis_key]
             if len(rows) != model_meta['n']:
                 raise ValueError('fitted sample axis length differs from model metadata')
             self._descriptors.append(dict(trait_index=i, n=len(rows), family=entry['family'],
                 ordered_rows=rows, projection_key=None, spa_available=(path/'spa').exists()))
     def descriptors(self):
+        self._check_open()
         return self._descriptors
+
+    def _check_open(self):
+        if self._closed:
+            raise RuntimeError('fitted-state bank is closed')
+
+    def close(self):
+        """Release only this bank's owned references, never immutable files.
+
+        Active acquire/workspace contexts must finish first. External callers
+        may still own a fitted tensor; allocator counters remain authoritative
+        for such live storage after its bank reference has been retired.
+        """
+        if self._closed:
+            return
+        if (any(self.pinned.values()) or any(self.spa_pinned.values())
+                or self._workspace_reservations or self._memory_policies):
+            raise RuntimeError('cannot close fitted-state bank with active model/workspace contexts')
+        self.models.clear()
+        self.spa_sources.clear()
+        self.tensor_cache.clear()
+        self._sample_axes.clear()
+        self._descriptors.clear()
+        self.entries.clear()
+        self.pinned.clear()
+        self.spa_pinned.clear()
+        self._closed = True
     @staticmethod
     def _validate_bytes(value, name):
         if type(value) is not int or value < 0:
@@ -423,6 +463,7 @@ class ModelRepository:
         None retains admission against current physical/live CUDA capacity.
         Nested contexts restore the previous policy on every exit.
         """
+        self._check_open()
         if limit_bytes is not None:
             self._validate_bytes(limit_bytes, 'limit_bytes')
             if not limit_bytes:
@@ -495,6 +536,7 @@ class ModelRepository:
         after covariance allocation so its already resident bytes are excluded.
         Context exit restores outer reservations even after failed admission.
         """
+        self._check_open()
         self._validate_bytes(required_bytes, 'required_bytes')
         self._validate_bytes(reserve_bytes, 'reserve_bytes')
         if cache_release is not None and not callable(cache_release):
@@ -514,26 +556,25 @@ class ModelRepository:
             if (key not in protected and not self.pinned.get(key, 0)
                     and (device is None or torch.device(key[1]) == device)):
                 self.models.pop(key)
-                # Deduplicated X references must not become an unbounded cache.
-                self.tensor_cache.clear()
                 self.evictions += 1
                 return True
         for key in list(self.spa_sources):
             if (key not in protected and not self.spa_pinned.get(key, 0)
                     and (device is None or torch.device(key[1]) == device)):
                 self.spa_sources.pop(key)
-                self.tensor_cache.clear()
                 self.evictions += 1
                 return True
         return False
     @contextmanager
     def acquire(self, indices, device):
         from contextlib import ExitStack
+        self._check_open()
         keys, models = [], []
         contexts = ExitStack()
         try:
             for i in indices:
-                if self._descriptors[i]['family'] == 'binomial':
+                family = self._descriptors[i]['family']
+                if family == 'binomial' and self.binary_normal_cache == 'derived_fp64':
                     source = contexts.enter_context(self._acquire_binary_source(int(i), device))
                     self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source),
                                 phase='binary_normal_derivation')
@@ -546,9 +587,25 @@ class ModelRepository:
                         meta = json.loads((path/'state.private.json').read_text())
                         estimated = sum(int(np.prod(s['shape']))*np.dtype(s['dtype']).itemsize
                                         for name, s in meta['arrays'].items() if name != 'sample_ids')
+                        if family == 'binomial':
+                            # Native sparse precision loading may briefly hold
+                            # input/output COO plus the coalescing sort buffers.
+                            sparse = sum(int(np.prod(meta['arrays'][name]['shape']))*
+                                np.dtype(meta['arrays'][name]['dtype']).itemsize
+                                for name in ('precision_indices', 'precision_values')
+                                if name in meta['arrays'])
+                            estimated += 2*sparse
                         self._admit(device, fitted_bytes=estimated)
                     self.models[key] = load_model_store(self.entries[i]['path'], device=device,
                                                        tensor_cache=self.tensor_cache)
+                    if family == 'binomial':
+                        model = self.models[key]
+                        if model.use_spa:
+                            self.models.pop(key)
+                            raise ValueError('stored native normal state must have SPA disabled')
+                        model.normal_projection_reconstructed = False
+                        model.normal_projection_method = 'authenticated_stored_'+model.matmul_mode
+                        model.fitted_source_validation = 'authenticated_immutable_model_store'
                     self.loads += 1
                 else:
                     self.hits += 1
@@ -566,6 +623,7 @@ class ModelRepository:
                 self.pinned[key] -= 1
     @contextmanager
     def _acquire_binary_source(self, index, device):
+        self._check_open()
         if not self._descriptors[index]['spa_available']:
             raise ValueError('binary SPA sidecar is missing')
         key = (int(index), str(device))
@@ -597,16 +655,71 @@ class ModelRepository:
                 yield model
             finally:
                 del model
+    def resident_storage_summary(self):
+        """Endpoint owned tensor storage, deduplicating views and shared X.
+
+        Walk once for diagnostics, including lazy model projection caches.
+        This is not an allocator peak, total RSS or total card occupancy.
+        """
+        visited, storages = set(), {}
+        def visit(value):
+            if isinstance(value, torch.Tensor):
+                if value.layout == torch.strided:
+                    storage = value.untyped_storage()
+                    key = (str(value.device), storage.data_ptr())
+                    storages[key] = max(storages.get(key, 0), storage.nbytes())
+                elif value.layout == torch.sparse_coo:
+                    visit(value._indices())
+                    visit(value._values())
+                else:
+                    # Fitted storage uses COO; account other sparse layouts
+                    # without constructing a dense copy during diagnostics.
+                    visit(value.values())
+                    for name in ('crow_indices', 'col_indices', 'ccol_indices', 'row_indices'):
+                        try:
+                            visit(getattr(value, name)())
+                        except RuntimeError:
+                            pass
+                return
+            if id(value) in visited:
+                return
+            visited.add(id(value))
+            if isinstance(value, dict):
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, (tuple, list)):
+                for child in value:
+                    visit(child)
+            elif hasattr(value, '__dict__') and not isinstance(value, np.ndarray):
+                visit(vars(value))
+        visit(self.models)
+        for source in self.spa_sources.values():
+            visit(getattr(source, '_tensors', source))
+        totals = {}
+        for (device, _), size in storages.items():
+            totals[device] = totals.get(device, 0)+size
+        return dict(resident_storage_bytes_by_device=totals,
+            unique_cuda_storage_bytes=sum(size for device, size in totals.items() if device.startswith('cuda')),
+            resident_storage_scope='owned bank endpoint; unique physical tensor storage, including lazy projections')
+
     def summary(self):
         return dict(model_loads=self.loads, bank_hits=self.hits, evictions=self.evictions,
                     resident_models=len(self.models), workspace_bytes=self.workspace_bytes,
                     spa_source_loads=self.spa_source_loads, spa_source_hits=self.spa_source_hits,
                     resident_spa_sources=len(self.spa_sources), spa_projection_reconstructed_on_gpu=True,
-                    binary_normal_from_same_fp64_source=True,
+                    binary_normal_from_same_fp64_source=self.binary_normal_cache == 'derived_fp64',
+                    binary_normal_cache_policy=self.binary_normal_cache,
+                    binary_normal_state_provenance=('derived_from_authenticated_fp64_source'
+                        if self.binary_normal_cache == 'derived_fp64' else 'authenticated_stored_native'),
+                    binary_spa_state_provenance='authenticated_original_fp64_source',
                     unique_sample_axes=len(self._sample_axes),
                     sample_axis_ram_bytes=sum(rows.nbytes for rows in self._sample_axes.values()),
                     sample_axis_open_mmaps=0,
+                    sample_axis_immutable_backing='bytes',
+                    live_deduplicated_design_tensors=len(self.tensor_cache),
                     active_workspace_reservations=len(self._workspace_reservations),
+                    closed=self._closed,
+                    **self.resident_storage_summary(),
                     **{key: dict(value) if isinstance(value, dict) else value
                        for key, value in self._workspace_metrics.items()})
 
