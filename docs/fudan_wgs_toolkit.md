@@ -6,9 +6,11 @@
 
 `prepare_WGS_data` 从原始 PLINK BED/BIM/FAM 和独立下载的功能注释构建可校验的遗传数据。`run_WGS_all` 消费表型 CSV、协变量 CSV 和已完成遗传目录，完成单变异、coding、noncoding 和 ncRNA 关联分析。传入多个表型列时，它们共享遗传数据读取、CPU 缓存、注释索引和 CPU–GPU 传输；各表型仍独立筛选完整样本、拟合零模型、计算频率和检验结果。
 
-本页的原始 PLINK 示例生成 `dataset.json`，使用一张 GPU 和普通零模型。已有 `cache_dataset.json` 则选择 GRM 绑定的混合模型路线，保留原数字身份轴和 profile，可指定本机多个 GPU；输入格式、全部 CSV 输出及专用 CLI 见 [缓存兼容与 PheWAS 调用](phewas_cache_compatibility.md)。部署计划复用已拟合模型时，还需满足 [模型来源与复用规则](phewas_model_reuse.md)。
+正常流程为 `prepare_WGS_data → run_WGS_all`。准备只执行一次；目录已有完成清单时，直接运行关联步骤，不重复准备遗传数据、注释或样本轴。本页的原始 PLINK 示例生成 `dataset.json`，使用一张 GPU 和普通零模型。已有 `cache_dataset.json` 则选择 GRM 绑定的混合模型路线，保留原数字身份轴和 profile，可指定本机多个 GPU。两种目录均由同一个三输入接口识别。
 
-遗传矩阵计算使用原生 TF32/FP32 运算，不通过拆分乘法重建 FP64。零模型拟合、部分谱校正和稳定尾概率仍保留 FP64，以控制数值误差；这不改变基因型矩阵乘法路径。精度用显著结果的 `−log10(P)` 差异评估，目标为 0.001。该目标不是对所有数据、注释版本和模型的精度保证。
+遗传缓存复用与零模型复用分别处理。三输入入口默认拟合本次表型的零模型；已有模型仅通过来源绑定的计划复用，需核对输入、样本轴、拟合源码兼容证明、完整模型导入清单及原拟合成功收据。复用不改变原模型文件，也不把未完成关联的 partial 输出视为已完成结果。格式细节见 [缓存兼容与 PheWAS 调用](phewas_cache_compatibility.md) 和 [模型来源与复用规则](phewas_model_reuse.md)。
+
+遗传矩阵计算使用原生 TF32/FP32 运算，不通过拆分乘法重建 FP64。零模型拟合、部分谱校正和稳定尾概率仍保留 FP64，以控制数值误差；Burden 矩阵乘法使用 IEEE FP32。同输入数值复现与已有官方结果的一致性比较分别报告，具体口径见第 7 节。
 
 ```mermaid
 flowchart TD
@@ -27,10 +29,11 @@ flowchart TD
     DIR --> CSR["六状态 CSR + Zstandard；逐块往返与计数校验"]
     CSR --> COMMIT["全部染色体完成后：主进程提交唯一完成标记"]
     COMMIT --> PREP["dataset.json + 样本双列轴 + 注释 + gene jobs"]
-    PH["表型 CSV：FID / IID + 一个或多个数值列"] --> ALIGN
-    CV["协变量 CSV：FID / IID + 数值协变量列"] --> ALIGN
+    EXISTING["已有完成遗传目录：省略 prepare"] --> ALIGN
+    PH["表型 CSV：对应清单的身份列 + 全部数值表型"] --> ALIGN
+    CV["协变量 CSV：对应清单的身份列 + 数值协变量"] --> ALIGN
     PREP --> ALIGN["run_WGS_all：每表型独立完整样本匹配"]
-    ALIGN --> MODEL["各自的 Gaussian / binomial 零模型；独立样本数"]
+    ALIGN --> MODEL["各自的 Gaussian / binomial 零模型；缓存可绑定 GRM"]
     PREP --> SH["共享注释索引、压缩帧读取、解码与设备传输"]
     MODEL --> SUB["按各表型样本子集取值；各自频率、MAC、填补"]
     SH --> SUB
@@ -56,7 +59,7 @@ conda env create -f environment.yml
 conda activate fudan-wgs-toolkit
 ```
 
-运行关联分析需要支持 TF32 的 NVIDIA GPU、兼容的驱动以及安装环境中的 CUDA 运行库。默认一张 GPU、8 个 CPU 线程、20 GiB 设备工作区上限。数据准备默认使用 8 个 CPU worker 预算，不占用 GPU；并发染色体数同时受可用任务和 `memory_limit_gib` 的主机工作区估算预算限制。Parquet 注释为可选输入，使用时安装 `python -m pip install -e '.[parquet]'`；CSV/TSV 和压缩包不需要这个额外依赖。
+运行关联分析需要支持 TF32 的 NVIDIA GPU、兼容的驱动以及安装环境中的 CUDA 运行库。普通模型路线默认一张 GPU、8 个 CPU 线程和 20 GiB 设备工作区上限。混合 PheWAS 可通过 `gpu_ids` 选择本机多张 GPU，按实际可用显存准入；每个 worker 的线程亲和性为 8 核，数值线程数为 4，共享 cgroup 配额仍限制总算力。数据准备默认使用 8 个 CPU worker 预算，不占用 GPU；并发染色体数同时受可用任务和 `memory_limit_gib` 的主机工作区估算预算限制。Parquet 注释为可选输入，使用时安装 `python -m pip install -e '.[parquet]'`；CSV/TSV 和压缩包不需要这个额外依赖。
 
 ## 3. 输入数据的意义和格式
 
@@ -157,7 +160,7 @@ python examples/write_annotation_manifest.py \
 
 ### 3.3 表型与协变量 CSV
 
-两个文件均使用 UTF-8、逗号分隔和表头。前两列为字符串 `FID,IID`，后续列必须是数值。下面仅展示格式，不是 benchmark 数据。
+两个文件均使用 UTF-8、逗号分隔和表头。`dataset.json` 的普通模型路线要求前两列为字符串 `FID,IID`，后续列必须是数值。下面仅展示格式，不是 benchmark 数据。
 
 ```text
 FID,IID,trait_a,trait_b
@@ -181,7 +184,20 @@ family_b,person_003,47,1,-0.01,0.02
 | 缺失值 | 空白、NaN、NA、null 等转成缺失；每个表型独立排除该表型或它所选协变量缺失的样本；不填补表型 NaN |
 | 二分类表型 | 必须显式声明 `phenotype_families={"trait_b": "binomial"}`；连续表型默认 `gaussian`；二分类值必须为 0/1，分析样本中须同时存在两类 |
 
-重复 FID/IID 对、无穷大数值、非数值协变量和秩不足的协变量设计会报错。当前公共入口使用普通回归零模型，不推断亲缘结构；二分类入口采用非 SPA 的 logistic 零模型。原始基因型缺失填补和表型 NaN 排除是两个不同步骤：基因型按每个表型分析样本集合的频率处理，表型不插值。
+重复 FID/IID 对、无穷大数值、非数值协变量和秩不足的协变量设计会报错。这些普通模型使用普通回归零模型，不推断亲缘结构；二分类采用非 SPA 的 logistic 零模型。
+
+`cache_dataset.json` 的混合 PheWAS 路线使用以下格式，保留缓存已有的数字身份轴：
+
+| 输入 | 格式与意义 |
+| --- | --- |
+| 表型 CSV | 第一列为 `eid`，值为唯一正十进制整数且不带前导零；后续每个数值列为一个连续或 0/1 表型 |
+| 协变量 CSV | 第一列同为 `eid`，后续为数值协变量；与表型表分别按身份匹配缓存，不要求两表原始行序相同 |
+| 遗传目录 | 完成的 `cache_dataset.json`、样本轴、各染色体基因型和 metadata；`phewas.kinship_npz` 指向绑定身份的 GRM |
+| 模型设置 | 缓存的 `phewas.covariate_profiles` 指定各表型的模型族和协变量；可选 `phewas.cohort_rows` 限定缓存逻辑行子集；缺省 profile 的识别规则见缓存格式说明 |
+
+混合路线使用各表型自己的完整案例样本，连续表型默认执行协变量残差、RINT 与原单位恢复，二分类执行混合模型和显著结果的 FP64 SPA。不能把数字身份自动改造成 FID/IID，也不能把缓存人数视为各表型统一分析人数。
+
+两种路线都按每个表型的分析样本处理基因型频率和缺失填补；表型 NaN 按完整案例排除，不插值。
 
 ## 4. Python 调用
 
@@ -227,6 +243,29 @@ association_report = run_WGS_all(
 print(association_report["completed"])
 ```
 
+### 已有完成缓存：省略 prepare
+
+下面使用同一个 `run_WGS_all`，将全部表型列一次提交。`trait_batch_size=16` 是每个遗传块的计算批次大小，不是总表型数；读取、解码和设备数据在表型批次间共享。
+
+```python
+from fudan_wgs_toolkit import run_WGS_all
+
+if __name__ == "__main__":
+    association_report = run_WGS_all(
+        phenotype_csv="/data/phenotypes.csv",       # 数字身份 + 全部数值表型列
+        covariate_csv="/data/covariates.csv",       # 数字身份 + 数值协变量列
+        prepared_directory="/data/completed_cache", # 已完成的 cache_dataset.json 目录
+        output_directory="/data/results",          # 本次新运行的目录
+        gpu_ids=[0, 1],                             # 本机参与计算的 CUDA 编号
+        trait_batch_size=16,
+        continuous_transform="paper",
+        memory_limit_gib=None,                      # 使用实际可用显存，不设固定 GiB 上限
+    )
+    print(association_report["association_rows"])
+```
+
+多 GPU 入口启动独立 Python 进程，脚本须保留 `__main__` 保护。使用已有 `dataset.json` 时，同样省略上例的 prepare 调用，并沿普通模型示例的参数运行。
+
 ### prepare_WGS_data 的每个参数
 
 | 参数 | 默认值 | 含义 |
@@ -253,15 +292,15 @@ print(association_report["completed"])
 
 | 参数 | 默认值 | 含义 |
 | --- | --- | --- |
-| phenotype_csv | 必填 | FID/IID 加一个或多个数值表型列 |
-| covariate_csv | 必填 | FID/IID 加数值协变量列；可仅有身份双列以拟合截距模型 |
+| phenotype_csv | 必填 | 普通路线为 FID/IID 加一个或多个数值表型列；混合路线为 eid 加全部数值表型列 |
+| covariate_csv | 必填 | 普通路线为 FID/IID 加数值协变量，可仅有身份双列；混合路线使用 eid 身份列与 profile 规定的协变量 |
 | prepared_directory | 必填 | 已完成遗传根目录；dataset.json 为本页普通模型路线，cache_dataset.json 为混合 PheWAS 路线 |
-| output_directory | 必填 | 新结果目录，每个表型一个子目录 |
+| output_directory | 必填 | 本次新结果目录；普通路线每个表型一个子目录，混合路线按分析类型和字段签名分片并用 trait_index 标识表型 |
 | chromosomes | None | 分析的染色体；None 为准备数据中的全部常染色体 |
-| analyses | 四类全部 | individual、coding、noncoding、ncrna 的任意非空组合 |
-| device | cuda:0 | 单个 CUDA 设备；当前不跨设备调度 |
-| cpu_threads | 8 | 读取、解码及 CPU 数值阶段的线程预算 |
-| memory_limit_gib | 20 | 设备工作区预算，必须大于 0 且不超过 20 GiB |
+| analyses | 四类全部 | 普通路线可选 individual、coding、noncoding、ncrna 的非空组合；混合路线要求四类全部 |
+| device | cuda:0 | 普通路线的单个 CUDA 设备；混合路线未指定 gpu_ids 时使用此设备 |
+| cpu_threads | 8 | 普通路线的读取、解码和 CPU 数值线程预算；混合路线按 worker 绑定 8 核、数值线程 4 |
+| memory_limit_gib | 按路线选择 | 普通路线默认 20，要求 0 < 值 ≤ 20 GiB；混合路线省略或传 None，按实时可用显存准入 |
 | phenotype_families | None | `{表型列名: gaussian/binomial}`；未声明列为 gaussian |
 | phenotype_covariates | None | `{表型列名: [协变量列名, ...]}`；未声明列用全部协变量，空列表为仅截距；列名必须存在且不重复 |
 | gene_variant_type | SNV | gene-based 的 SNV、Indel 或 variant 选择；Single 始终扫描全部变异；SNV 模式使用功能注释权重，其他模式遵循原规则关闭这些权重 |
@@ -278,7 +317,7 @@ print(association_report["completed"])
 | device_cache_bytes | 536870912 | 设备共享缓存容量，单位字节；0 禁用留存 |
 | compact_cache_bytes | 67108864 | CPU 紧凑状态缓存容量，单位字节；0 禁用留存 |
 | metadata_cache_bytes | 268435456 | CPU 注释元数据缓存容量，单位字节，正整数 |
-| resume | False | 仅复用已完成、全部输入及代码校验和相同且文件未变化的结果；不恢复中途关联 run |
+| resume | False | 普通路线仅复用全部输入及源码绑定一致的完整结果，不恢复中途关联；混合路线不接受 resume=True |
 | gpu_ids | None | 混合 PheWAS 使用的本机不同 CUDA 编号，例如 [0, 1]；None 使用 device；普通模型路线不接受此参数 |
 | trait_batch_size | 16 | 混合 PheWAS 中每个遗传块的表型批次大小，正整数；不限制总表型数 |
 | continuous_transform | paper | 混合 PheWAS 连续表型处理：paper 为协变量残差、RINT 和原标准差恢复，rint 为直接 RINT，none 为保留单位 |
@@ -286,6 +325,8 @@ print(association_report["completed"])
 上表除最后三项外的模型和计算参数说明针对普通模型路线。混合 PheWAS 的模型族、协变量、mask 和统计设置由缓存及计划绑定，要求全部四类分析；不支持的非默认覆盖会在启动前报错。该路线按实际 GPU 可用内存准入，memory_limit_gib 仅接受默认选择或 Python 的 None，不应用普通路线的 20 GiB 上限。
 
 普通路线的预算约束包管理的工作区；CUDA 上下文、其他用户进程及文件系统缓存不在包内显存计数中。运行报告记录实际分配和保留峰值，而不是把参数值当成实测峰值。
+
+混合路线的 Burden 矩阵乘法继承调用方预算和安全余量，子函数不再附加独立的 20 GiB 默认限制。二分类模型的 FP64 源状态、FP32 normal 状态及 FP64 SPA 状态在分配前估算工作区，已有源张量不重复计为新增分配；原生检验及时释放不再使用的乘积和稀有变异协方差。预算检查和生命周期修复保持原有 TF32/IEEE FP32 算式、模型拟合参数及结果顺序。
 
 多染色体准备使用独立 Python 进程；在独立脚本中，把调用放进 `if __name__ == "__main__":`，避免进程启动时重复执行顶层代码。命令行入口已经包含此保护。`max_frames` 为显式检查点调试参数，转换阶段采用串行调度来保持全局精确帧上限；普通完整准备默认并行。转换先完成所有输入、样本轴和注释的检查，再写基因型；主进程只在全部染色体完成后提交数据集完成标记。
 
@@ -304,6 +345,16 @@ run-WGS-all /data/phenotypes.csv /data/covariates.csv /data/prepared_genetics \
 ```
 
 `python -m fudan_wgs_toolkit` 与 `run-WGS-all` 等价。准备 CLI 可用 `--sample-pairs`、`--max-frames`、`--resume`、`--copy-annotations`；指定精确 prefixes 和 variant_indices 使用 Python 接口。其余关联参数的 CLI 名称采用短横线，例如 `--long-mask-rank`。`--phenotype-families` 和 `--phenotype-covariates` 接受相应映射字典的 JSON 文件路径；`--gene-variant-type` 对应 gene-based 变异类型。
+
+已有 `cache_dataset.json` 时，直接运行以下命令，不再调用 `prepare-WGS-data`；省略普通路线的 `--memory-limit-gib 20`：
+
+```bash
+run-WGS-all /data/phenotypes.csv /data/covariates.csv /data/completed_cache \
+  --output-directory /data/results \
+  --gpu-ids 0 1 --trait-batch-size 16 --continuous-transform paper
+```
+
+`gpu_ids` 中的每个设备均须有 8 个可用 CPU affinity 核；默认分配使用互不重叠的 affinity 区间，实际 CPU cgroup 配额可能共享。已有部署计划可显式指定经审核的 worker 分配与模型复用绑定。专用 `phewas_run` CLI 与计划字段见现有的缓存和模型格式说明。
 
 ## 6. 输出与分析方法
 
@@ -329,7 +380,20 @@ results/
   report.private.json          # 完成状态、阶段耗时、缓存与输出校验
 ```
 
-只写最终 CSV、Python NPZ 和 JSON，不生成外部语言专用对象。CSV 不添加队列表型 field ID、Phenotype 或 Phenotypic category 列；表型名称由父目录确定。浮点数以 17 位有效数字保存，避免导出阶段引入额外舍入。空结果保留表头。
+上述是普通模型路线。混合 PheWAS 将所有表型的结果流式写入以下结构：
+
+```text
+results/
+  csv/{individual,coding,noncoding,ncrna}/chr<编号>/<字段签名>/*.csv.gz
+  models/                      # 各表型的混合零模型及状态
+  inputs/                      # 私有表型索引、匹配样本和输入绑定
+  plan.private.json
+  report.private.json
+```
+
+混合分片的 `trait_index` 对应私有表型索引，每行同时保留位点或 gene/mask、概率和数值诊断；`.csv.gz` 可直接用 `pandas.read_csv` 读取。文件 SHA 和完整字段列表记录在完成收据中。连续 gene-based 汇总使用 STAAR-O，二分类使用 STAAR-Burden 和 SPA；不能将两类输出的检验含义混为同一个统计量。
+
+只写最终 CSV、Python 模型状态和 JSON，不生成外部语言专用对象。CSV 不添加队列表型 field ID、Phenotype 或 Phenotypic category 列；普通路线由父目录确定表型，混合路线通过私有索引映射。浮点数以 17 位有效数字保存，避免导出阶段引入额外舍入。空结果保留表头。
 
 | 输出 | 主要列与含义 |
 | --- | --- |
@@ -342,7 +406,7 @@ results/
 
 coding 包括 pLoF、pLoF 加 disruptive missense、missense、disruptive missense、synonymous。noncoding 包括 upstream、downstream、UTR、promoter CAGE/DHS、enhancer CAGE/DHS；ncRNA 单独运行。每个表型使用自己的 MAF、MAC 和有效 mask，不因为共享读取而使用多个表型样本的交集。
 
-公共入口的 gene-based 规则固定为严格 `0 < MAF < 0.01`：准备数据的完整样本轴频率和当前表型完整案例的频率都必须满足该条件，每个 mask 至少有 2 个符合条件的变异。缺失基因型按当前表型样本的等位基因频率作均值填补；表型和协变量的 NaN 仍按完整案例规则排除。这些筛选和填补规则在共享与独立单表型运行中相同。
+普通模型路线的 gene-based 规则固定为严格 `0 < MAF < 0.01`：准备数据的完整样本轴频率和当前表型完整案例的频率都必须满足该条件，每个 mask 至少有 2 个符合条件的变异。混合路线沿缓存计划绑定的统计设置。两种路线都按当前表型样本的等位基因频率作均值填补；表型和协变量的 NaN 仍按完整案例规则排除。这些筛选和填补规则在共享与独立单表型运行中相同。
 
 Score 和协方差分别为 `u = Gᵀr`、`V = GᵀPG`。Single 只求需要的方差对角线。Burden 把全部权重列合并计算，ACAT-V 复用单变异统计量并保留极罕见变异合并规则。局部重叠 mask 共享基因型和协方差；不同零模型的 V 不直接共用。SKAT 使用加权协方差的特征值和稳定尾概率分支，大 mask 使用声明的随机近似。统计小值通过稳定对数尾概率和 Cauchy 小 P 分支处理，不能简单把 P、效应或 SE 乘一个系数再检验。
 
@@ -361,7 +425,11 @@ Score 和协方差分别为 `u = Gᵀr`、`V = GᵀPG`。Single 只求需要的�
 
 原方法示例的模型、变异类型、QC、频率阈值和注释列均属于对照条件。当前普通模型入口不能直接与不同样本或亲缘结构的旧结果比较；大 mask 的随机谱路径也需单独标明。公开仓库保留原调用链接，本包的可执行入口全部为 Python。
 
-精度对照必须固定参与者、表型处理、协变量、REF 方向、缺失处理、注释版本和每个 mask 的位点集合。重点报告任一实现 P<0.05 的并集上最大 `|−log10(P_gpu) − −log10(P_reference)|`，同时给出全部有限 P 值范围的诊断结果。源格式解码一致、CSV 无舍入损失与统计方法一致是三项不同的验证。
+同输入精度对照必须固定参与者、表型处理、协变量、REF 方向、缺失处理、注释版本和每个 mask 的位点集合。历史数值复现检查以 `|Δ(−log10(P))| < 0.001` 为目标，报告显著并集及全部有限 P 值的误差；此目标不用于不同人群或不同处理的已有官方结果。源格式解码一致、CSV 无舍入损失与统计方法一致分别核验。
+
+多表型与已下载官方 gene-based 结果比较时，按表型、gene 和 mask 匹配，连续 STAAR-O 与二分类 STAAR-B 分开报告：`P < 1e-5` 的显著重叠、仅本次显著、仅官方显著，以及有限 `−log10(P)` 的 Pearson/Spearman 相关性。已有官方结果未发布 Single 时，Single 的官方覆盖记为 0。`P=0` 且没有有限对数结果的项单独记录，不人为加概率下限。不同样本和处理条件下的结果用于描述性一致性分析。
+
+2026-10-11 的资源预算与张量生命周期修复通过 201 项针对性测试，另复用 4 个真实既有模型（2 连续、2 二分类）完成四类局部分析：Single 412 行、coding 24 行、noncoding 4 行、ncRNA 4 行，合计 444 行，CSV 全量回读通过、SPA 失败 0。该局部运行墙时为 215.12 秒，未重建遗传缓存或重新拟合模型；此记录单列关联复核范围，完整全基因组耗时与官方比较在完整输出回读后报告。
 
 当前版本的迁移验证及历史端到端结果见 [验证记录](../validation/README.md)。记录明确区分真实数据、接口测试、局部验证和整条染色体完成的运行；不使用人工输入的单测耗时代替真实 benchmark。
 
@@ -369,6 +437,7 @@ Score 和协方差分别为 `u = Gᵀr`、`V = GᵀPG`。Single 只求需要的�
 
 | 版本 | 更新 |
 | --- | --- |
+| 0.8.0 工作区修复 | Burden 继承调用方显存预算和 reserve；二分类状态派生分配前计量；及时释放原生检验中间张量；资源配置变化的模型兼容证明；201 项测试及真实四类 444 行局部复核 |
 | 0.8.0 | 改为 Fudan WGS Toolkit；prepare_WGS_data 原始 PLINK + 独立注释入口，默认多 CPU 并行；run_WGS_all 单/多表型统一入口；常量精度的原生 TF32 协方差归一化；严格 FID/IID；直接 CSV；删除退休读取器、非 Python 实现、旧导出和旧文档 |
 | 0.8.0 后续更新 | 增加已完成数字身份缓存的混合 PheWAS 入口、已有模型来源验证和 GPU Single 批处理；修正二分类混合模型边界与恢复路径；真实局部验证见缓存兼容说明 |
 | 0.7.0 | 整合共享多表型与完整 mask 路径；CPU 预算 8；大 mask 使用 FastSKAT；该版输入和导出接口已经被 0.8.0 替代 |
