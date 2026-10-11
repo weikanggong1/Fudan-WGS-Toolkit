@@ -9,10 +9,12 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from pathlib import Path
 import json
+import sys
 import inspect
 import math
 import threading
 import time
+import traceback
 import hashlib
 import gc
 import weakref
@@ -38,6 +40,19 @@ from .single import (process_single_batches, process_single_shared_genotype,
                      execution_metadata as single_metadata)
 
 _LOCK = threading.Lock()
+
+
+def _clear_inactive_exception_frames(error):
+    """Retain failure type, message and stack positions, releasing leaf locals."""
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        traceback.clear_frames(current.__traceback__)
+        pending.extend(value for value in (current.__cause__, current.__context__)
+                       if value is not None)
 
 
 def _gpu_memory_diagnostics(device, repository=None, broker=None):
@@ -443,6 +458,11 @@ def _thin_pipeline(gds, model, rows, options, configuration, structural=None):
     p.maximum_mask_variants = configuration.get('maximum_mask_variants')
     if structural is not None:
         _share_annotations([structural, p])
+    # Borrow one worker-lifecycle owner across traits/cohorts/chromosomes.
+    # It is lazy: Single, binary and ordinary masks create no CUDA streams.
+    owner = configuration.get('_association_lobpcg_owner')
+    if owner is not None:
+        p._enable_fastskat_lobpcg(owner=owner)
     return p
 
 
@@ -739,7 +759,8 @@ def _gaussian_covariance(model, genotype):
     return (covariance+covariance.T)/2
 
 
-def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512):
+def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512,
+                                *, profiler=None, report=None):
     """Bounded exact fitted kinship-block formula for a host genotype mask.
 
     Each panel uses the model's original spectral rotation and inverse weights,
@@ -749,6 +770,10 @@ def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512):
     CUDA panel geometry differs from one monolithic GEMM and requires the real
     numerical comparison; this function makes no bitwise equality claim.
     """
+    if torch.device(model.device).type == 'cuda':
+        from .._blocked_covariance import blocked_gaussian_covariance
+        return blocked_gaussian_covariance(model, host, broker,
+            variant_tile_size=variant_tile_size, profiler=profiler, report=report)
     from ..tf32 import matmul
     n, m = host.shape
     width = min(m, variant_tile_size)
@@ -1240,6 +1265,7 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
             try:
                 for mi, indices in enumerate(masks):
                     prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                    covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
                     try:
                         anchor = group['descriptors'][0]
                         with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
@@ -1358,16 +1384,19 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                             if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
                                                 copies = 2 if model.spectrum.blocks else 1
                                                 broker._guard(4*genotype_elements*copies + 32*m*m + 256*2**20)
-                                                covariance = _gaussian_covariance(model, genotype)
+                                                with p.profiler.measure('gene_covariance', gpu=True):
+                                                    covariance = _gaussian_covariance(model, genotype)
                                             else:
                                                 # Cached/tiled covariance is fitted-model specific;
                                                 # only G IO and phenotype-score GEMM are shared.
-                                                if p._supports_long_tf32_products(model):
-                                                    redundant_score, covariance = p._long_mask_products(model, host, compute_score=False)
-                                                    del redundant_score
-                                                else:
-                                                    covariance = _blocked_gaussian_covariance(model, host, broker,
-                                                        variant_tile_size=options.variant_tile_size or 512)
+                                                with p.profiler.measure('gene_covariance', gpu=True):
+                                                    if p._supports_long_tf32_products(model):
+                                                        redundant_score, covariance = p._long_mask_products(model, host, compute_score=False)
+                                                        del redundant_score
+                                                    else:
+                                                        covariance = _blocked_gaussian_covariance(model, host, broker,
+                                                            variant_tile_size=options.variant_tile_size or 512,
+                                                            profiler=p.profiler, report=report)
                                             if callable(memory_sample):
                                                 memory_sample('gene_covariance_ready', genotype=genotype, covariance=covariance, score=scores)
                                             # Its input covariance is now allocated.
@@ -1376,17 +1405,34 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                             payload = {key: value for key, value in prepared.items() if not key.startswith('_')}
                                             payload.update(score=scores[:, gauss_columns[ti]], covariance=covariance,
                                                            cmac=prepared['cmac'])
-                                            value = _evaluate_gaussian_gene_score(p, payload, model, genotype, broker,
-                                                shared_simt=shared_simt, report=report)
+                                            from .._fastskat_lobpcg_tiles import lobpcg_workspace_scope
+                                            def lobpcg_future(additional, *, phase):
+                                                # V and prepared G are already resident. Preserve
+                                                # the whole original STAAR reservation and add only
+                                                # lookahead/parallel NEW excess before allocation.
+                                                workspace.set_required(tail_new+additional, phase=phase)
+                                                return True
+                                            with lobpcg_workspace_scope(callback=lobpcg_future):
+                                                value = _evaluate_gaussian_gene_score(p, payload, model, genotype, broker,
+                                                    shared_simt=shared_simt, report=report)
+                                            lobpcg_future = None
                                             del covariance, payload
                                         result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
                                         del p, model, value
                                     del scores, models
                         del prepared, host, genotype, burdens
+                    except BaseException as error:
+                        # Completed leaf frames can otherwise retain a model,
+                        # G and V even after the cache and leases are closed.
+                        _clear_inactive_exception_frames(error)
+                        raise
                     finally:
                         if prototype is not None:
                             prototype.models = []
                         prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                        # A retained caller exception must not extend the last
+                        # model lease or keep a completed covariance alive.
+                        covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
                         set_future = configuration.get('_host_memory_set_future')
                         if callable(set_future):
                             set_future(0, phase='gene_mask_released')
@@ -1466,6 +1512,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         raise RuntimeError('PheWAS context is already running')
     previous_threads = torch.get_num_threads()
     repository_policy = ExitStack()
+    lobpcg_owner = report = None
     try:
         if torch.device(device).type != 'cuda' or not torch.cuda.is_available():
             raise ValueError('native batched PheWAS production requires CUDA')
@@ -1474,6 +1521,10 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         torch.cuda.reset_peak_memory_stats(device)
         budget = _resolved_budget(memory_limit_gib, device)
         configuration = dict(configuration)
+        from .._fastskat_lobpcg_tiles import lobpcg_pool_scope
+        lobpcg_owner = repository_policy.enter_context(lobpcg_pool_scope(
+            max_workers=2, owner=configuration.get('_association_lobpcg_owner')))
+        configuration['_association_lobpcg_owner'] = lobpcg_owner
         if host_memory_lease_factory is not None and not callable(host_memory_lease_factory):
             raise TypeError('host_memory_lease_factory must be callable or None')
         configuration['_batched_emit'] = emit
@@ -1495,6 +1546,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             last_sample[0] = token
             sample.update(phase=phase, explicit_workspace_owners=tensor_storage_footprint(owners),
                           fitted_state_owners=getattr(model_repository, 'resident_storage_summary', lambda: {})())
+            sample['fastskat_lobpcg_owner'] = lobpcg_owner.metadata()
             memory_samples.append(sample)
             if len(memory_samples) > 120:
                 del memory_samples[0]
@@ -1692,7 +1744,12 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         raise
     finally:
         try:
-            repository_policy.close()
+            from .._lobpcg_stream_pool import close_preserving_error
+            try:
+                close_preserving_error(repository_policy.close, sys.exc_info()[1])
+            finally:
+                if report is not None and lobpcg_owner is not None:
+                    report['fastskat_lobpcg_owner'] = lobpcg_owner.metadata()
         finally:
             try:
                 torch.set_num_threads(previous_threads)

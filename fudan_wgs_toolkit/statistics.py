@@ -899,7 +899,8 @@ def _fastskat_ritz_pairs(weighted, basis):
 
 
 def _fastskat_hybrid_pvalues(q_values, covariance, skat_weights, *, rank=512,
-                             seed=1729, threshold=5000):
+                             seed=1729, threshold=5000, _lobpcg_worker_pool=None,
+                             _lobpcg_new_workspace_limit=None, _lobpcg_workspace_callback=None):
     """FastSKAT-style top-k spectrum plus exact-dense residual moments.
 
     The dense covariance already held by the current WGS pipeline makes the
@@ -909,124 +910,140 @@ def _fastskat_hybrid_pvalues(q_values, covariance, skat_weights, *, rank=512,
     included analytically in the saddlepoint cgf.  This is approximate because
     the residual spectrum is collapsed to two moments.
     """
-    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
-        raise ValueError("FastSKAT hybrid requires a square covariance")
-    m = int(covariance.shape[0])
-    if m <= int(threshold):
-        raise ValueError("FastSKAT hybrid is reserved above the configured mask threshold")
-    if q_values.ndim != 1 or skat_weights.ndim != 2 or skat_weights.shape[0] != m:
-        raise ValueError("FastSKAT hybrid q/weights have incompatible shapes")
-    device = covariance.device
-    dtype = covariance.dtype
-    k = min(int(rank), m - 1)
-    if k < 1:
-        raise ValueError("FastSKAT hybrid requires a positive rank")
-    if covariance.is_cuda:
-        from . import tf32
-        limit_bytes = int(tf32._memory_limit_bytes)
-        allocated = int(torch.cuda.memory_allocated(covariance.device))
-        reserved = int(torch.cuda.memory_reserved(covariance.device))
-        free_bytes, _ = torch.cuda.mem_get_info(covariance.device)
-        estimate_bytes = 8 * m * m + 24 * m * k + int(tf32._memory_reserve_bytes)
-        if (allocated + estimate_bytes > limit_bytes
-                or estimate_bytes > int(free_bytes) + max(0, reserved-allocated)):
-            _fastskat_failure(index=0, m=m, rank=k, seed=seed,
-                              reason="estimated CUDA workspace exceeds configured or live memory",
-                              allocated_bytes=allocated, estimated_bytes=estimate_bytes,
-                              limit_bytes=limit_bytes, live_free_bytes=int(free_bytes),
-                              reusable_reserved_bytes=max(0, reserved-allocated))
-    from ._fastskat_numerics import refine_spectrum_and_moments
-    from .precision_audit import explicit_fp64_spectral_refinement
-    generator = torch.Generator(device=device)
-    generator.manual_seed(int(seed))
-    pvalues = []
-    weight_records = []
-    for index in range(int(skat_weights.shape[1])):
-        weights = skat_weights[:, index].to(dtype=dtype, device=device)
-        weighted = covariance * weights[:, None] * weights[None, :]
-        # A fixed-seed Gaussian basis is required here.  Rademacher columns
-        # can be strongly correlated for a large identity-like block and
-        # trigger a known LOBPCG failure mode with spurious eigenvalues.
-        init = torch.randn((m, k), generator=generator, device=device,
-                           dtype=dtype)
-        try:
-            top, basis = torch.lobpcg(weighted, k=k, B=None, X=init,
-                                      largest=True, niter=200, tol=1e-5)
-        except RuntimeError as error:
-            _fastskat_failure(index=index, m=m, rank=k, seed=seed,
-                              reason="LOBPCG failed", error=str(error))
-        top = top.flatten()
-        basis = basis.to(dtype=dtype)
-        if not bool(torch.isfinite(top).all()) or not bool(torch.isfinite(basis).all()):
-            _fastskat_failure(index=index, m=m, rank=k, seed=seed,
-                              reason="LOBPCG produced non-finite eigenpairs")
-        # Refine the sampled subspace against the stored matrix itself.
-        # FP64 is confined to spectral refinement; genotype/covariance GEMMs
-        # retain their explicit TF32 route and the dense matrix stays FP32.
-        try:
-            with explicit_fp64_spectral_refinement():
-                refined = refine_spectrum_and_moments(weighted, basis)
-        except (RuntimeError, ArithmeticError) as error:
-            _fastskat_failure(index=index, m=m, rank=k, seed=seed,
-                              reason="FP64 spectral refinement failed", error=str(error))
-        top, basis, projected = (refined[key] for key in ("top", "basis", "projected"))
-        trace, trace2 = refined["trace"], refined["trace2"]
-        residual_mean, residual_second = refined["residual_mean"], refined["residual_second"]
-        residual_norm_value = float(refined["residual_norm"].detach().cpu())
-        orthogonality_value = float(refined["orthogonality"].detach().cpu())
-        _STATISTICS_METADATA["fastskat_lobpcg_max_residual"] = max(
-            _STATISTICS_METADATA["fastskat_lobpcg_max_residual"], residual_norm_value)
-        _STATISTICS_METADATA["fastskat_lobpcg_max_orthogonality"] = max(
-            _STATISTICS_METADATA["fastskat_lobpcg_max_orthogonality"], orthogonality_value)
-        if residual_norm_value > 0.25 or orthogonality_value > 1e-2:
-            _fastskat_failure(index=index, m=m, rank=k, seed=seed,
-                              reason="LOBPCG convergence or orthogonality guard failed",
-                              residual_norm=residual_norm_value,
-                              orthogonality=orthogonality_value)
-        tail_diagnostics = {}
-        pvalue = _fastskat_hybrid_sf_tensor(q_values[index], top, residual_mean,
-                                            residual_second, diagnostics=tail_diagnostics)
-        if not bool(torch.isfinite(pvalue)):
-            _fastskat_failure(index=index, m=m, rank=k, seed=seed,
-                              reason="FastSKAT hybrid probability is non-finite")
-        pvalues.append(pvalue.to(dtype=torch.float64))
-        weight_records.append({
-            "index": index,
-            "residual_mean": float(residual_mean.detach().cpu()),
-            "residual_second": float(residual_second.detach().cpu()),
-            "residual_scale": float((residual_second / residual_mean).detach().cpu())
-            if bool(residual_mean > 0) else 0.0,
-            "residual_dof": float((residual_mean.square() / residual_second).detach().cpu())
-            if bool(residual_second > 0) else 0.0,
-            "lobpcg_residual": residual_norm_value,
-            "lobpcg_orthogonality": orthogonality_value,
-            **tail_diagnostics,
-            "spectral_refinement": refined["metadata"],
+    completed = False
+    pvalues = pair_tiles = None
+    try:
+        if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+            raise ValueError("FastSKAT hybrid requires a square covariance")
+        m = int(covariance.shape[0])
+        if m <= int(threshold):
+            raise ValueError("FastSKAT hybrid is reserved above the configured mask threshold")
+        if q_values.ndim != 1 or skat_weights.ndim != 2 or skat_weights.shape[0] != m:
+            raise ValueError("FastSKAT hybrid q/weights have incompatible shapes")
+        device = covariance.device
+        dtype = covariance.dtype
+        k = min(int(rank), m - 1)
+        if k < 1:
+            raise ValueError("FastSKAT hybrid requires a positive rank")
+        if covariance.is_cuda:
+            from . import tf32
+            limit_bytes = int(tf32._memory_limit_bytes)
+            allocated = int(torch.cuda.memory_allocated(covariance.device))
+            reserved = int(torch.cuda.memory_reserved(covariance.device))
+            free_bytes, _ = torch.cuda.mem_get_info(covariance.device)
+            estimate_bytes = 8 * m * m + 24 * m * k + int(tf32._memory_reserve_bytes)
+            if (allocated + estimate_bytes > limit_bytes
+                    or estimate_bytes > int(free_bytes) + max(0, reserved-allocated)):
+                _fastskat_failure(index=0, m=m, rank=k, seed=seed,
+                                  reason="estimated CUDA workspace exceeds configured or live memory",
+                                  allocated_bytes=allocated, estimated_bytes=estimate_bytes,
+                                  limit_bytes=limit_bytes, live_free_bytes=int(free_bytes),
+                                  reusable_reserved_bytes=max(0, reserved-allocated))
+        from ._fastskat_numerics import refine_spectrum_and_moments
+        from .precision_audit import explicit_fp64_spectral_refinement
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(seed))
+        pvalues = []
+        weight_records = []
+        from ._fastskat_lobpcg_tiles import FastSKATPairTiles
+        pair_tiles = FastSKATPairTiles(covariance, skat_weights, generator, k,
+                                      worker_pool=_lobpcg_worker_pool,
+                                      max_new_workspace_bytes=_lobpcg_new_workspace_limit,
+                                      workspace_callback=_lobpcg_workspace_callback)
+        for index in range(int(skat_weights.shape[1])):
+            try:
+                weights, weighted, init, top, basis = pair_tiles.take(index)
+            except RuntimeError as error:
+                _fastskat_failure(index=index, m=m, rank=k, seed=seed,
+                                  reason="LOBPCG failed", error=str(error))
+            top = top.flatten()
+            basis = basis.to(dtype=dtype)
+            if not bool(torch.isfinite(top).all()) or not bool(torch.isfinite(basis).all()):
+                _fastskat_failure(index=index, m=m, rank=k, seed=seed,
+                                  reason="LOBPCG produced non-finite eigenpairs")
+            # Refine the sampled subspace against the stored matrix itself.
+            # FP64 is confined to spectral refinement; genotype/covariance GEMMs
+            # retain their explicit TF32 route and the dense matrix stays FP32.
+            try:
+                with explicit_fp64_spectral_refinement():
+                    refined = refine_spectrum_and_moments(weighted, basis)
+            except (RuntimeError, ArithmeticError) as error:
+                _fastskat_failure(index=index, m=m, rank=k, seed=seed,
+                                  reason="FP64 spectral refinement failed", error=str(error))
+            top, basis, projected = (refined[key] for key in ("top", "basis", "projected"))
+            trace, trace2 = refined["trace"], refined["trace2"]
+            residual_mean, residual_second = refined["residual_mean"], refined["residual_second"]
+            residual_norm_value = float(refined["residual_norm"].detach().cpu())
+            orthogonality_value = float(refined["orthogonality"].detach().cpu())
+            _STATISTICS_METADATA["fastskat_lobpcg_max_residual"] = max(
+                _STATISTICS_METADATA["fastskat_lobpcg_max_residual"], residual_norm_value)
+            _STATISTICS_METADATA["fastskat_lobpcg_max_orthogonality"] = max(
+                _STATISTICS_METADATA["fastskat_lobpcg_max_orthogonality"], orthogonality_value)
+            if residual_norm_value > 0.25 or orthogonality_value > 1e-2:
+                _fastskat_failure(index=index, m=m, rank=k, seed=seed,
+                                  reason="LOBPCG convergence or orthogonality guard failed",
+                                  residual_norm=residual_norm_value,
+                                  orthogonality=orthogonality_value)
+            tail_diagnostics = {}
+            pvalue = _fastskat_hybrid_sf_tensor(q_values[index], top, residual_mean,
+                                                residual_second, diagnostics=tail_diagnostics)
+            if not bool(torch.isfinite(pvalue)):
+                _fastskat_failure(index=index, m=m, rank=k, seed=seed,
+                                  reason="FastSKAT hybrid probability is non-finite")
+            pvalues.append(pvalue.to(dtype=torch.float64))
+            weight_records.append({
+                "index": index,
+                "residual_mean": float(residual_mean.detach().cpu()),
+                "residual_second": float(residual_second.detach().cpu()),
+                "residual_scale": float((residual_second / residual_mean).detach().cpu())
+                if bool(residual_mean > 0) else 0.0,
+                "residual_dof": float((residual_mean.square() / residual_second).detach().cpu())
+                if bool(residual_second > 0) else 0.0,
+                "lobpcg_residual": residual_norm_value,
+                "lobpcg_orthogonality": orthogonality_value,
+                **tail_diagnostics,
+                "spectral_refinement": refined["metadata"],
+            })
+            del weighted, top, basis, init, projected, refined
+        _STATISTICS_METADATA["fastskat_approximate_calls"] += 1
+        _record_tail_metadata({
+            "method": "fastskat_hybrid",
+            "tail_method": "top_k_plus_residual_satterthwaite_saddlepoint",
+            "m": m,
+            "M": m,
+            "rank": k,
+            "probes": 0,
+            "probe_count": 0,
+            "seed": int(seed),
+            "lobpcg_init": "fixed-seed-gaussian-X",
+            "lobpcg_max_iter": 200,
+            "lobpcg_batch_tiles": pair_tiles.records,
+            "subspace_residual_limit": 0.25,
+            "subspace_power_iterations": 2,
+            "spectral_refinement_precision": "blockwise_fp64",
+            "dense_storage_precision": "fp32",
+            "residual_second_reduction": "fp64_square_and_sum",
+            "residual_definition": "matched_ritz_pairs_frobenius_relative",
+            "residual_trace_method": "exact_dense",
+            "weights": weight_records,
+            "approximate": True,
         })
-        del weighted, top, basis, init, projected, refined
-    _STATISTICS_METADATA["fastskat_approximate_calls"] += 1
-    _record_tail_metadata({
-        "method": "fastskat_hybrid",
-        "tail_method": "top_k_plus_residual_satterthwaite_saddlepoint",
-        "m": m,
-        "M": m,
-        "rank": k,
-        "probes": 0,
-        "probe_count": 0,
-        "seed": int(seed),
-        "lobpcg_init": "fixed-seed-gaussian-X",
-        "lobpcg_max_iter": 200,
-        "subspace_residual_limit": 0.25,
-        "subspace_power_iterations": 2,
-        "spectral_refinement_precision": "blockwise_fp64",
-        "dense_storage_precision": "fp32",
-        "residual_second_reduction": "fp64_square_and_sum",
-        "residual_definition": "matched_ritz_pairs_frobenius_relative",
-        "residual_trace_method": "exact_dense",
-        "weights": weight_records,
-        "approximate": True,
-    })
-    return torch.stack(pvalues).to(device=q_values.device)
+        result = torch.stack(pvalues).to(device=q_values.device)
+        completed = True
+        return result
+    except BaseException as error:
+        from ._lobpcg_stream_pool import clear_exception_frames
+        clear_exception_frames(error)
+        raise
+    finally:
+        if pair_tiles is not None:
+            pair_tiles.close()
+        if not completed and pvalues is not None:
+            pvalues.clear()
+        pair_tiles = _lobpcg_worker_pool = _lobpcg_workspace_callback = None
+        q_values = covariance = skat_weights = pvalues = generator = None
+        weighted = top = basis = init = projected = refined = weights = None
+        trace = trace2 = residual_mean = residual_second = pvalue = result = None
 
 
 def _association_probability_fields(pvalues, labels, *, tail_optimization=False, batch_copy=True):

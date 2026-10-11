@@ -237,6 +237,7 @@ class SharedStateBroker:
         self._axis_capacity = sample_axis_cache_bytes
         self._identity_rows = None
         self._workspace_admission = None
+        self._optional_device_cache_releases = []
         if portable_axis:
             # Explicit legacy opt-in still proves the physical Container rows.
             manifest = getattr(original_reader, 'manifest', None)
@@ -338,7 +339,24 @@ class SharedStateBroker:
             self._evict_raw()
         while self._device_sources:
             self._evict_device()
+        for release in tuple(self._optional_device_cache_releases):
+            released += release()
         return released
+
+    @contextmanager
+    def optional_device_cache(self, release):
+        """Register a mask-local owner with the existing live pressure guard.
+
+        The callback retires only unpinned references and allocates nothing.
+        It gives no credit for still borrowed tensors or allocator fragments.
+        """
+        if not callable(release):
+            raise TypeError('optional cache release must be callable')
+        self._optional_device_cache_releases.append(release)
+        try:
+            yield
+        finally:
+            self._optional_device_cache_releases.remove(release)
 
     def _evict_raw(self):
         _, (_, size) = self._raw_sources.popitem(last=False)

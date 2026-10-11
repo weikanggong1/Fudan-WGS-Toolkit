@@ -38,9 +38,9 @@ if triton is not None:
     @triton.jit
     def _gemm(A,B,C,M,N,K,AS0,AS1,BS0,BS1,
               BM:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr):
-        rows=tl.program_id(0)*BM+tl.arange(0,BM)
-        cols=tl.program_id(1)*BN+tl.arange(0,BN)
-        inner=tl.arange(0,BK)
+        rows=(tl.program_id(0)*BM+tl.arange(0,BM)).to(tl.int64)
+        cols=(tl.program_id(1)*BN+tl.arange(0,BN)).to(tl.int64)
+        inner=tl.arange(0,BK).to(tl.int64)
         acc=tl.full((BM,BN),0,tl.float32)
         # Dimensions/strides are runtime scalars: shape changes do not require
         # a separate fully specialized kernel for every variant-set size.

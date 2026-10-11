@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import OrderedDict
+from contextlib import contextmanager
 import hashlib
 import math
 from typing import Mapping, Sequence
@@ -210,6 +211,41 @@ class PheWASPipeline:
         self.host_memory_guard = None
         self.hybrid_mask_sizes = []
         self.hybrid_union_M = 0
+
+    def _enable_fastskat_lobpcg(self, *, owner=None):
+        """Bind a lazy pool owner; a thin pipeline can borrow the worker owner."""
+        from ._fastskat_lobpcg_tiles import _LazyPoolOwner
+        previous = getattr(self, '_association_lobpcg_owner', None)
+        if previous is not None:
+            if owner is None or owner is previous:
+                return previous
+            raise RuntimeError('pipeline already has a different LOBPCG owner')
+        if owner is not None and (not isinstance(owner, _LazyPoolOwner) or owner.closed):
+            raise ValueError('pipeline LOBPCG owner must be open')
+        self._association_lobpcg_owned = owner is None
+        self._association_lobpcg_owner = _LazyPoolOwner(2) if owner is None else owner
+        return self._association_lobpcg_owner
+
+    def close(self):
+        """Close owned FastSKAT control resources; input and model owners remain."""
+        owner = getattr(self, '_association_lobpcg_owner', None)
+        try:
+            if owner is not None and getattr(self, '_association_lobpcg_owned', False):
+                owner.close()
+        finally:
+            self._association_lobpcg_owner = None
+            self._association_lobpcg_owned = False
+            owner = None
+
+    @contextmanager
+    def _fastskat_pool_context(self):
+        owner = getattr(self, '_association_lobpcg_owner', None)
+        if owner is None:
+            yield
+            return
+        from ._fastskat_lobpcg_tiles import lobpcg_pool_scope
+        with lobpcg_pool_scope(owner=owner):
+            yield
 
     @property
     def profiler(self):
@@ -934,6 +970,11 @@ class PheWASPipeline:
         return results
 
     def _evaluate_prepared(self, payload, model):
+        # Unbound/standalone consumers retain the original scalar path.
+        with self._fastskat_pool_context():
+            return self._evaluate_prepared_core(payload, model)
+
+    def _evaluate_prepared_core(self, payload, model):
         options = getattr(self, "options", AnalysisOptions())
         if payload is None:
             return None
