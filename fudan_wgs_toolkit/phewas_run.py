@@ -53,6 +53,47 @@ def _bound_json(path, expected):
     return value
 
 
+def _existing_prepared_input_components(plan, proof):
+    """Permit changed preparation code only for certified, unmodified inputs.
+
+    Consumption has its own exact AST proof. This narrower route cannot fit a
+    new phenotype or reinterpret a prepared artifact under changed CSV rules.
+    The original plan, input manifest and all saved models are still verified
+    by the common reuse path below.
+    """
+    if 'prepared_input_reuse_scope' not in proof:
+        return {'phewas_inputs.py:complete_module'}
+    scope = proof['prepared_input_reuse_scope']
+    bindings = dict(model_fit_source_implementation_sha256=plan.get(
+        'model_fit_source_implementation_sha256', plan['source_implementation_sha256']),
+        consumer_source_implementation_sha256=plan['source_implementation_sha256'],
+        prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+        cohort_sha256=plan.get('cohort_sha256'), kinship_sha256=plan['kinship_sha256'],
+        continuous_transform=plan.get('continuous_transform', 'paper'))
+    if (not isinstance(scope, dict) or scope.get('kind') != 'fixed_existing_prepared_inputs'
+            or plan.get('reuse_models_only') is not True
+            or not set(bindings) <= scope.keys()
+            or any(scope.get(key) != value for key, value in bindings.items())
+            or not _hash(scope.get('prepared_inputs_manifest_sha256'))
+            or any(value is not None and not _hash(value)
+                   for value in (scope.get('cohort_sha256'), scope.get('kinship_sha256')))
+            or any(scope.get(key) is not True for key in ('input_preparation_disabled',
+                'consumption_components_identical', 'complete_input_preparation_module_changed'))
+            or type(scope.get('models_refitted')) is not int or scope['models_refitted'] != 0):
+        raise ValueError('prepared-input reuse scope does not bind these existing scientific inputs')
+    change = proof.get('inputs_module_change')
+    if (not isinstance(change, dict) or change.get('identical') is not False
+            or any(not _hash(change.get(key)) for key in
+                   ('old_fingerprint', 'new_fingerprint', 'old_sha256', 'new_sha256'))
+            or change['old_fingerprint'] == change['new_fingerprint']
+            or change['old_sha256'] == change['new_sha256']
+            or not isinstance(proof.get('components'), dict)
+            or 'phewas_inputs.py:complete_module' in proof['components']):
+        raise ValueError('prepared-input reuse must explicitly report changed preparation code')
+    return {'phewas_inputs.py:PhewasInputs', 'phewas_inputs.py:sha256',
+            'phewas_inputs.py:_discard', 'phewas_inputs.py:consumer_imports'}
+
+
 def _reuse_context(plan):
     """Validate separate original-fit and current-consumer provenance.
 
@@ -86,12 +127,13 @@ def _reuse_context(plan):
         raise ValueError('null-fit compatibility receipt does not authorize this reuse')
     components = proof.get('components', {})
     required = {'binary_null.py:complete_module', 'phewas_models.py:complete_module',
-        'phewas_inputs.py:complete_module', 'rint.py:complete_module', 'numerics.py:complete_module',
+        'rint.py:complete_module', 'numerics.py:complete_module',
         'tensor_validation.py:complete_module',
         'null_model.py:fit_gaussian_null', 'null_model.py:KinshipSpectrum',
         'null_model.py:rank_inverse_normal', 'null_model.py:_r_sum',
         'null_model.py:GaussianNullModel.dataclass_fields',
         'null_model.py:GaussianNullModel.set_matmul_mode_except_new_cache_clear', 'phewas_run.py:_design'}
+    required.update(_existing_prepared_input_components(plan, proof))
     if not isinstance(components, dict) or not required <= components.keys():
         raise ValueError('null-fit compatibility receipt lacks required scientific components')
     if 'tf32.py:complete_module' not in components:

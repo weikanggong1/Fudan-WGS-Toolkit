@@ -253,3 +253,142 @@ def test_unchanged_fresh_fit_binding_remains_default():
     plan = dict(kinship_sha256='kinship', source_implementation_sha256='current', cohort_sha256=None)
     assert run._fit_binding(plan) == dict(kinship_sha256='kinship', source_implementation_sha256='current',
                                         cohort_sha256=None, continuous_transform='paper')
+
+
+def refresh_scoped_proof(plan, inventory, proof):
+    joined = hashlib.sha256()
+    for name, record in sorted(proof['components'].items()):
+        joined.update(name.encode())
+        joined.update(bytes.fromhex(record['old_fingerprint']))
+    proof['old_null_fit_component_fingerprint'] = joined.hexdigest()
+    proof['new_null_fit_component_fingerprint'] = joined.hexdigest()
+    plan['null_fit_compatibility_sha256'] = write(Path(plan['null_fit_compatibility_receipt']), proof)
+    inventory['null_fit_compatibility_sha256'] = plan['null_fit_compatibility_sha256']
+    refresh_inventory(plan, inventory)
+
+
+def existing_input_scope(reuse):
+    plan, inventory, proof = reuse
+    proof['components'].pop('phewas_inputs.py:complete_module')
+    for name in ('PhewasInputs', 'sha256', '_discard', 'consumer_imports'):
+        proof['components']['phewas_inputs.py:'+name] = dict(
+            old_fingerprint='c'*64, new_fingerprint='c'*64, identical=True)
+    proof['prepared_input_reuse_scope'] = dict(
+        kind='fixed_existing_prepared_inputs',
+        model_fit_source_implementation_sha256=OLD,
+        consumer_source_implementation_sha256=NEW,
+        prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+        cohort_sha256=plan['cohort_sha256'], kinship_sha256=plan['kinship_sha256'],
+        continuous_transform=plan['continuous_transform'], input_preparation_disabled=True,
+        models_refitted=0, consumption_components_identical=True,
+        complete_input_preparation_module_changed=True)
+    proof['inputs_module_change'] = dict(old_fingerprint='d'*64, new_fingerprint='e'*64,
+        old_sha256='f'*64, new_sha256='1'*64, identical=False)
+    refresh_scoped_proof(plan, inventory, proof)
+    return plan, inventory, proof
+
+
+def test_fixed_existing_inputs_reuse_phase_never_prepares_refits_or_rewrites_models(reuse, monkeypatch):
+    plan, inventory, _ = existing_input_scope(reuse)
+    monkeypatch.setattr(run, 'prepare_phewas_inputs', lambda **kwargs: pytest.fail('reuse prepared inputs'))
+    before = {Path(file['path']): digest_file(file['path'])
+              for record in inventory['models'] for file in record['files']}
+    # This is the fit-only phase called by a dispatched worker; the fixture
+    # forbids trait preparation, fresh GRM loading and every fitting function.
+    result = run.fit_models(plan, device='cpu')
+    assert result['mode'] == 'verified_reuse' and result['errors'] == []
+    assert result['model_fit_source_implementation_sha256'] == OLD
+    assert result['consumer_source_implementation_sha256'] == NEW
+    assert len(run._all_models(plan, 1)) == 2
+    assert {path: digest_file(path) for path in before} == before
+
+
+@pytest.mark.parametrize('key,value', [
+    ('kind', 'general_changed_preparation'),
+    ('model_fit_source_implementation_sha256', NEW),
+    ('consumer_source_implementation_sha256', OLD),
+    ('prepared_inputs_manifest_sha256', 'd'*64),
+    ('cohort_sha256', None), ('kinship_sha256', 'd'*64),
+    ('continuous_transform', 'none'), ('input_preparation_disabled', False),
+    ('models_refitted', 1), ('models_refitted', False),
+    ('consumption_components_identical', False),
+    ('complete_input_preparation_module_changed', False),
+])
+def test_fixed_existing_input_scope_rejects_shifted_or_reinterpreted_inputs(reuse, key, value):
+    plan, inventory, proof = existing_input_scope(reuse)
+    proof['prepared_input_reuse_scope'][key] = value
+    refresh_scoped_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='prepared-input reuse scope'):
+        run.fit_models(plan, device='cpu')
+    assert not (Path(plan['output_directory'])/'fit_worker_0.complete.private.json').exists()
+
+
+@pytest.mark.parametrize('problem', ['null', 'missing_binding', 'missing_change', 'same_ast',
+    'same_sha', 'claimed_identical', 'bad_ast_digest', 'bad_source_digest', 'full_module_claim'])
+def test_fixed_existing_input_proof_requires_explicit_scoped_changed_module_evidence(reuse, problem):
+    plan, inventory, proof = existing_input_scope(reuse)
+    if problem == 'null':
+        proof['prepared_input_reuse_scope'] = None
+    elif problem == 'missing_binding':
+        proof['prepared_input_reuse_scope'].pop('cohort_sha256')
+    elif problem == 'missing_change':
+        proof.pop('inputs_module_change')
+    elif problem == 'same_ast':
+        proof['inputs_module_change']['new_fingerprint'] = proof['inputs_module_change']['old_fingerprint']
+    elif problem == 'same_sha':
+        proof['inputs_module_change']['new_sha256'] = proof['inputs_module_change']['old_sha256']
+    elif problem == 'claimed_identical':
+        proof['inputs_module_change']['identical'] = True
+    elif problem == 'bad_ast_digest':
+        proof['inputs_module_change']['old_fingerprint'] = 'not-a-hash'
+    elif problem == 'bad_source_digest':
+        proof['inputs_module_change']['new_sha256'] = 'z'*64
+    else:
+        proof['components']['phewas_inputs.py:complete_module'] = dict(
+            old_fingerprint='c'*64, new_fingerprint='c'*64, identical=True)
+    refresh_scoped_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='prepared-input reuse'):
+        run._fit_binding(plan)
+
+
+@pytest.mark.parametrize('component', ['PhewasInputs', 'sha256', '_discard', 'consumer_imports'])
+def test_fixed_existing_input_proof_requires_every_unchanged_consumption_component(reuse, component):
+    plan, inventory, proof = existing_input_scope(reuse)
+    proof['components'].pop('phewas_inputs.py:'+component)
+    refresh_scoped_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='required scientific components'):
+        run._fit_binding(plan)
+
+
+def test_fixed_existing_input_proof_rejects_changed_consumer_even_with_rebound_receipts(reuse):
+    plan, inventory, proof = existing_input_scope(reuse)
+    proof['components']['phewas_inputs.py:PhewasInputs']['new_fingerprint'] = 'd'*64
+    refresh_scoped_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='scientific component fingerprints differ'):
+        run._fit_binding(plan)
+
+
+@pytest.mark.parametrize('key', ['prepared_inputs_manifest_sha256', 'cohort_sha256', 'kinship_sha256'])
+def test_fixed_existing_input_scope_cannot_rebind_original_fit_plan_to_new_inputs(reuse, key):
+    plan, inventory, proof = existing_input_scope(reuse)
+    plan[key] = inventory[key] = proof['prepared_input_reuse_scope'][key] = '2'*64
+    refresh_scoped_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='original fit plan scientific/source bindings'):
+        run._fit_binding(plan)
+
+
+@pytest.mark.parametrize('file', ['manifest', 'cohort', 'kinship'])
+def test_fixed_existing_input_scope_still_verifies_current_artifact_checksums(reuse, file):
+    plan, _, _ = existing_input_scope(reuse)
+    path = (Path(plan['prepared_inputs_directory'])/'manifest.private.json' if file == 'manifest'
+            else Path(plan['cohort_rows' if file == 'cohort' else 'kinship_npz']))
+    path.write_bytes(path.read_bytes()+b'corrupted')
+    with pytest.raises(ValueError, match='prepared input manifest|GRM/cohort checksum'):
+        run.fit_models(plan, device='cpu')
+
+
+def test_fixed_existing_input_scope_cannot_authorize_new_model_fits(reuse):
+    plan, _, _ = existing_input_scope(reuse)
+    plan['reuse_models_only'] = False
+    with pytest.raises(ValueError, match='reuse-only'):
+        run.fit_models(plan, device='cpu')
