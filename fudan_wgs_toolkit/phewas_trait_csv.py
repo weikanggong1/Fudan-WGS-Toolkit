@@ -9,6 +9,8 @@ Corrupt committed ranges fail closed; they are never mistaken for missing work.
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 import csv
 import fcntl
 import gzip
@@ -28,6 +30,127 @@ from .phewas_storage import _rows, atomic_json
 from .csv_output import _write_bound_trait_rows
 
 _KINDS = ('individual', 'coding', 'noncoding', 'ncrna')
+_INVOCATION_LEASE = ContextVar('wgs_association_invocation_lease', default=None)
+
+
+def _restore_invocation_lease(handle):
+    return handle
+
+
+class _InvocationLeaseTransfer:
+    """Defer FD transfer until Process.start installs its spawn context.
+
+    DupFd outside that context registers a duplicated descriptor with the
+    resource sharer. An early child death before detach could then leave the
+    invocation locked by that parent-side registration. The actual spawn
+    pass_fds route holds the same open-file description in the child directly.
+    This carrier owns no extra descriptor in its parent.
+    """
+    def __init__(self, descriptor):
+        self._descriptor=descriptor
+
+    def __reduce__(self):
+        from multiprocessing.context import get_spawning_popen
+        from multiprocessing.reduction import DupFd
+        if self._descriptor is None:
+            raise ValueError('spawn invocation lease transfer has been retired')
+        if get_spawning_popen() is None:
+            raise RuntimeError('invocation lease can only be serialized by Process.start')
+        os.fstat(self._descriptor)
+        return (_restore_invocation_lease,(DupFd(self._descriptor),))
+
+    def detach(self):
+        # Direct in-process/fork execution needs its own closeable descriptor;
+        # normal spawn receives a restored Popen DupFd instead of this carrier.
+        if self._descriptor is None:
+            raise ValueError('spawn invocation lease transfer has been retired')
+        descriptor=os.dup(self._descriptor)
+        self._descriptor=None
+        return descriptor
+
+    def retire(self):
+        self._descriptor=None
+
+
+def invocation_lease_for_spawn():
+    """Transfer the active lock's open-file description to one spawn child.
+
+    This is runtime state, passed in Process kwargs rather than a deployment
+    plan. A child detaches it before scientific work and keeps the same flock
+    alive if its owning API parent exits unexpectedly.
+    """
+    descriptor=_INVOCATION_LEASE.get()
+    if descriptor is None:
+        return None
+    return _InvocationLeaseTransfer(descriptor)
+
+
+def close_pending_invocation_lease(handle):
+    """Retire an unstarted carrier without closing the parent invocation FD."""
+    if handle is not None:
+        if not isinstance(handle,_InvocationLeaseTransfer):
+            raise ValueError('pending invocation lease must be a parent transfer carrier')
+        handle.retire()
+
+
+@contextmanager
+def held_invocation_lease(handle):
+    """Hold a spawn-transferred invocation descriptor through worker cleanup."""
+    if handle is None:
+        yield
+        return
+    if not callable(getattr(handle,'detach',None)):
+        raise ValueError('spawn invocation lease must be a transferable descriptor')
+    descriptor=handle.detach()
+    token=None
+    try:
+        if type(descriptor) is not int:
+            raise ValueError('spawn invocation lease did not detach a file descriptor')
+        os.fstat(descriptor)
+        token=_INVOCATION_LEASE.set(descriptor)
+        yield
+    finally:
+        if token is not None:
+            _INVOCATION_LEASE.reset(token)
+        # Closing this duplicate does not unlock the parent's/peers' shared
+        # open-file description. Never use LOCK_UN on an inherited flock.
+        if type(descriptor) is int:
+            os.close(descriptor)
+
+
+@contextmanager
+def association_output_lease(output_directory):
+    """Claim one public invocation before preparation or resume changes files.
+
+    The sibling lock leaves a fresh output directory empty/nonexistent. All
+    worker children also receive this lease before scientific work, then use
+    their chromosome/trait locks. A parent's abrupt exit cannot release the
+    output for resume until the last active owned worker closes its duplicate.
+    """
+    output=Path(output_directory).resolve()
+    if not output.name:
+        raise ValueError('association output must be a named directory')
+    output.parent.mkdir(parents=True,exist_ok=True)
+    # Keep long valid output names below the filesystem filename limit while
+    # retaining a unique resolved-path binding. No identities are written.
+    stem=output.name if len(os.fsencode(output.name))<=120 else hashlib.sha256(
+        str(output).encode()).hexdigest()
+    target=output.parent/f'.{stem}.wgs-association.lock'
+    if target.is_symlink():
+        raise ValueError('association invocation lock must not be a symlink')
+    descriptor=os.open(target,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+    token=None
+    try:
+        try:
+            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise RuntimeError('association output already has an active public invocation') from error
+        token=_INVOCATION_LEASE.set(descriptor)
+        yield descriptor
+    finally:
+        if token is not None:
+            _INVOCATION_LEASE.reset(token)
+        os.close(descriptor)
 
 
 def _canonical(value):
@@ -128,14 +251,18 @@ class PerTraitCheckpointCSVWriter:
     trait dictionary. ``binding`` has the same source/input/configuration/model
     contract as the immutable tile writer. Worker/GPU placement is excluded.
     At most ``max_open_streams`` append handles and ``verification_cache_size``
-    verified tile records are retained. Active trait ownership uses OS locks,
-    which are released automatically after a crash and explicitly on close.
+    verified tile records are retained. Active ownership uses OS locks, which
+    are released automatically after a crash and explicitly on close. The
+    continuous chromosome dispatch uses one lock per chromosome, so different
+    workers may append the same traits on disjoint chromosomes safely without
+    retaining a lock for every trait/chromosome pair.
     """
     checkpoint_tiles = True
     output_layout = 'per_trait'
 
     def __init__(self, directory, *, binding, resume=False, worker_id='0',
-                 minimum_free_bytes=0, max_open_streams=48, verification_cache_size=256):
+                 minimum_free_bytes=0, max_open_streams=48, verification_cache_size=256,
+                 ownership_scope='trait'):
         required = {'source_implementation_sha256', 'input_manifest_sha256',
                     'configuration_sha256', 'models'}
         if (type(resume) is not bool or not isinstance(binding, dict) or not required.issubset(binding)
@@ -145,6 +272,8 @@ class PerTraitCheckpointCSVWriter:
         if (not _nonnegative(minimum_free_bytes) or type(max_open_streams) is not int or max_open_streams < 1
                 or type(verification_cache_size) is not int or verification_cache_size < 1):
             raise ValueError('invalid CSV reserve, stream or verification-cache bound')
+        if ownership_scope not in ('trait', 'chromosome'):
+            raise ValueError('CSV ownership_scope must be trait or chromosome')
         worker_id = str(worker_id)
         if not worker_id or Path(worker_id).name != worker_id or worker_id in ('.', '..') or '\\' in worker_id:
             raise ValueError('checkpoint worker ID must be a single safe filename component')
@@ -155,6 +284,7 @@ class PerTraitCheckpointCSVWriter:
         if self.root.is_symlink():
             raise ValueError('checkpoint directory must not be a symlink')
         self.worker_id, self.resume = worker_id, resume
+        self.ownership_scope = ownership_scope
         self.binding = json.loads(_canonical(binding))
         self.binding_sha256 = _sha(self.binding)
         self.minimum_free_bytes, self.max_open = minimum_free_bytes, max_open_streams
@@ -162,6 +292,7 @@ class PerTraitCheckpointCSVWriter:
         self.invocation = uuid.uuid4().hex
         self.streams, self._verified, self._owners = OrderedDict(), OrderedDict(), {}
         self._recovered_traits = set()
+        self._owned_traits = set()
         self.reused_blocks = self.computed_blocks = 0
         self.write_seconds = 0.
         self._closed, self._finished = False, None
@@ -215,8 +346,13 @@ class PerTraitCheckpointCSVWriter:
               invocation TEXT NOT NULL,block_token TEXT NOT NULL,reused INTEGER NOT NULL,
               PRIMARY KEY(invocation,block_token));
         ''')
-        expected = _canonical(dict(schema_version=1, output_layout=self.output_layout,
-            binding=self.binding, binding_sha256=self.binding_sha256))
+        contract = dict(schema_version=1, output_layout=self.output_layout,
+            binding=self.binding, binding_sha256=self.binding_sha256)
+        # Preserve the original trait-owner ledger bytes. Explicit chromosome
+        # mode cannot share a ledger with a concurrently active legacy writer.
+        if self.ownership_scope == 'chromosome':
+            contract['ownership_scope'] = 'chromosome'
+        expected = _canonical(contract)
         self.db.execute('BEGIN IMMEDIATE')
         try:
             prior = self.db.execute("SELECT value FROM metadata WHERE key='binding'").fetchone()
@@ -296,30 +432,43 @@ class PerTraitCheckpointCSVWriter:
             raise CommittedCSVCorruption('canonical CSV has ambiguous final and partial owners')
         return partial if partial.exists() else final
 
-    def _claim(self, trait):
-        if trait in self._owners:
+    def _claim(self, trait, chromosome):
+        chromosome = str(chromosome)
+        key = trait if self.ownership_scope == 'trait' else chromosome
+        recovered = trait if self.ownership_scope == 'trait' else (trait, chromosome)
+        if recovered in self._recovered_traits:
             return
         owners = self.root/'owners'; owners.mkdir(exist_ok=True)
-        target = owners/f'trait_{trait:04d}.lock'
-        if target.is_symlink() or owners.is_symlink():
-            raise ValueError('trait owner lock must not be a symlink')
-        descriptor = os.open(target, os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW, 0o600)
+        new_owner = key not in self._owners
+        descriptor = None
         try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise RuntimeError('trait CSV already has an active writer owner') from error
+            if new_owner:
+                target = owners/(f'trait_{trait:04d}.lock' if self.ownership_scope == 'trait'
+                                 else f'chromosome_{chromosome}.lock')
+                if target.is_symlink() or owners.is_symlink():
+                    raise ValueError('CSV owner lock must not be a symlink')
+                descriptor = os.open(target, os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW, 0o600)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError as error:
+                    raise RuntimeError('trait CSV already has an active writer owner') from error
+                self._owners[key] = descriptor
+            scope = '' if self.ownership_scope == 'trait' else ' AND f.chromosome=?'
+            parameters = (trait,self.invocation) if not scope else (trait,self.invocation,chromosome)
             if not self.resume and self.db.execute('''SELECT 1 FROM ranges r JOIN files f ON f.id=r.file_id
-                JOIN blocks b ON b.token=r.block_token WHERE f.trait=? AND b.invocation<>? LIMIT 1''',
-                (trait,self.invocation)).fetchone():
+                JOIN blocks b ON b.token=r.block_token WHERE f.trait=? AND b.invocation<>?'''+scope+' LIMIT 1',
+                parameters).fetchone():
                 raise FileExistsError('previous trait CSV exists; choose resume=True or a new output directory')
-            self._owners[trait] = descriptor
-            for row in self.db.execute('SELECT * FROM files WHERE trait=?', (trait,)):
+            files = ('SELECT * FROM files WHERE trait=?' if not scope
+                     else 'SELECT * FROM files WHERE trait=? AND chromosome=?')
+            for row in self.db.execute(files, (trait,) if not scope else (trait,chromosome)):
                 self._recover_tail(self._file(row))
-            self._recovered_traits.add(trait)
+            self._recovered_traits.add(recovered)
+            self._owned_traits.add(trait)
         except BaseException:
-            self._owners.pop(trait,None)
-            os.close(descriptor)
+            if new_owner and descriptor is not None:
+                self._owners.pop(key,None)
+                os.close(descriptor)
             raise
 
     def _close_stream(self, file_id):
@@ -502,7 +651,7 @@ class PerTraitCheckpointCSVWriter:
         self._require_open()
         key,token = self._key(kind,chromosome,job_index,trait_indices,block_index)
         for trait in sorted(key['trait_indices']):
-            self._claim(trait)
+            self._claim(trait,key['chromosome'])
         if not self.resume and not self.db.execute('SELECT 1 FROM visits WHERE invocation=? AND block_token=?',
                 (self.invocation,token)).fetchone():
             return None
@@ -701,7 +850,7 @@ class PerTraitCheckpointCSVWriter:
                 raise RuntimeError('canonical CSV contains committed blocks omitted by this invocation schedule')
             receipts.append(self._finish_file(info))
         counts = dict.fromkeys(_KINDS,0); counts.update(self.row_counts)
-        trait_rows = {str(trait):dict.fromkeys(_KINDS,0) for trait in self._owners}
+        trait_rows = {str(trait):dict.fromkeys(_KINDS,0) for trait in self._owned_traits}
         for receipt in receipts:
             trait_rows[str(receipt['trait_index'])][receipt['kind']] += receipt['rows']
         if any(sum(r['rows'] for r in receipts if r['kind']==kind)!=counts[kind] for kind in _KINDS):

@@ -1,4 +1,4 @@
-"""Multiple binary phenotype association on prepared genetic data."""
+"""Binary and continuous phenotype association on prepared genetic data."""
 from __future__ import annotations
 import argparse
 from collections import OrderedDict
@@ -433,7 +433,7 @@ class AlignedInputCache:
                 result = np.column_stack((np.ones(len(x)), x))
                 columns = ("Intercept", *names)
             if len(result) <= result.shape[1] or np.linalg.matrix_rank(result) != result.shape[1]:
-                raise ValueError("insufficient binary samples or rank-deficient covariate design")
+                raise ValueError("insufficient complete-case samples or rank-deficient covariate design")
             return result, columns, design, has_intercept
         return self._get(("design", tuple(names), reduce_redundant, axis), build)
 
@@ -682,7 +682,7 @@ def _jobs(entry, analyses, output, *, single_mac_cutoff, single_group_variants, 
     return jobs
 
 
-def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+def _run_wgs_binary_unlocked(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
                 chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
                 memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
                 phenotype_covariates=None, impute_missing=True, gene_variant_type="SNV",
@@ -828,6 +828,251 @@ def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, out
             _json_write(output/"status.private.json", dict(status="failed", attempt_id=attempt_id,
                 error_type=type(error).__name__))
         raise
+
+
+def _run_wgs_association_unlocked(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+                chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
+                memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
+                phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
+                transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
+                covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512, seed=1729,
+                single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
+                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
+                gpu_ids=None, trait_batch_size=16, continuous_transform=None,
+                grm="sparse", grm_file=None, input_contract="mixed",
+                association_partition_strategy="cohort_tiles"):
+    """Associate every numeric phenotype independently with existing WGS caches.
+
+    chromosomes='all' consumes all declared autosomes; a list selects a subset.
+    device=['cuda:0'] selects one GPU, while integer n selects the first n GPUs.
+    None uses physical GPU capacity with memory_reserve_gib kept for workspace.
+    host_memory_limit_gib bounds the whole node task, shared across GPU workers;
+    None detects all finite cgroup ancestor limits and physical capacity.
+    Exact finite 0/1 columns are binomial in auto mode; other columns Gaussian.
+    rm_nan=True fills Gaussian missing phenotypes with their eligible mean and
+    maps binomial values other than one, including missing, to zero. False
+    selects complete cases. Selected covariates are never imputed. Unlisted
+    traits use all supplied covariates; changing rm_nan requires new null fits.
+    grm='sparse' requires an ID-bound GRM; grm='none' selects ordinary nulls.
+    resume verifies immutable per-block CSV/model/input/source proofs and fills
+    missing blocks. A new full run (resume=False) requires a fresh output folder.
+    Both supported cache formats use genetic-major GPU phenotype tiles and
+    emit complete compressed text CSV shards and a private trait dictionary.
+    Large fitted banks partition ordered cohorts across GPUs; when too few
+    cohorts fit the workers or a cohort exceeds cache capacity, fixed global
+    phenotype tiles divide that cohort. Smaller banks partition genetic jobs.
+    Unique jobs and worker scan visits are
+    reported separately, with global trait IDs and model bindings preserved.
+    long_mask_method="full" computes complete native FP32 gene spectra with
+    live GPU admission. fastskat/liu explicitly retain threshold-based
+    approximations; long_mask_threshold is not the default spectrum switch.
+    Genetic preparation is never invoked by this association entry point.
+    """
+    if input_contract not in ("mixed", "continuous"):
+        raise ValueError("unknown phenotype input contract")
+    if association_partition_strategy not in ("cohort_tiles", "chromosomes"):
+        raise ValueError("unknown association partition strategy")
+    if input_contract == "continuous" and (phenotype_families != "auto" or phenotype_covariates is not None):
+        raise ValueError("continuous analysis requires shared covariates and automatic continuous input validation")
+    chromosomes = _normalise_chromosomes(chromosomes)
+    if type(rm_nan) is not bool:
+        raise ValueError("rm_nan must be a boolean")
+    if type(resume) is not bool:
+        raise ValueError("resume must be a boolean")
+    if type(cpu_threads) is not int or cpu_threads < 1:
+        raise ValueError("cpu_threads must be a positive integer")
+    for name, value, allow_none in (("memory_limit_gib", memory_limit_gib, True),
+                                     ("host_memory_limit_gib", host_memory_limit_gib, True),
+                                     ("memory_reserve_gib", memory_reserve_gib, False)):
+        if allow_none and value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or (allow_none and value == 0):
+            raise ValueError(name + " must be finite and positive" + (" or None" if allow_none else " or zero"))
+    if memory_limit_gib is not None and memory_reserve_gib >= memory_limit_gib:
+        raise ValueError("memory_reserve_gib must be below the GPU memory limit")
+    if not isinstance(analyses, (list, tuple)):
+        raise ValueError("analyses must be a sequence of analysis names")
+    kinds = tuple(dict.fromkeys(analyses))
+    if not kinds or any(k not in _KINDS for k in kinds):
+        raise ValueError("analyses must select individual, coding, noncoding or ncrna")
+    positive = (covariance_block_size, long_mask_threshold, long_mask_rank, single_mac_cutoff,
+                single_group_variants, single_region_size, individual_effective_block_size, trait_batch_size)
+    if any(type(v) is not int or v < 1 for v in positive):
+        raise ValueError("block sizes, trait tiles and MAC cutoff must be positive integers")
+    if long_mask_method not in ("full", "fastskat", "liu"):
+        raise ValueError("long_mask_method must be full, fastskat or liu")
+    if type(seed) is not int or seed < 0:
+        raise ValueError("seed must be a nonnegative integer")
+    if any(type(v) is not int or v < 0 for v in (device_cache_bytes, compact_cache_bytes)) or type(metadata_cache_bytes) is not int or metadata_cache_bytes < 1:
+        raise ValueError("cache capacities must be nonnegative; metadata capacity must be positive")
+    if transform not in ("none", "rint") or null_fit_mode not in ("fp64", "tf32"):
+        raise ValueError("transform must be none or rint; null_fit_mode must be fp64 or tf32")
+    if continuous_transform not in (None, "paper", "none", "rint"):
+        raise ValueError("continuous_transform must be None, paper, none or rint")
+    if gene_variant_type not in ("SNV", "Indel", "variant"):
+        raise ValueError("gene_variant_type must be SNV, Indel or variant")
+    if grm not in ("sparse", "none") or (grm == "none" and grm_file is not None):
+        raise ValueError("grm must be sparse or none; grm_file requires sparse mode")
+    population = (Path(prepared_directory)/"cache_dataset.json").is_file()
+    if population and (Path(prepared_directory)/"dataset.json").exists():
+        raise ValueError("prepared directory contains ambiguous old and new dataset roots")
+    if transform != "none":
+        if continuous_transform not in (None, transform):
+            raise ValueError("conflicting phenotype transformations")
+        continuous_transform = transform
+    if continuous_transform is None:
+        continuous_transform = "paper" if population else "none"
+    devices = _normalise_devices(device, gpu_ids)
+    options = dict(analyses=kinds, cpu_threads=cpu_threads, memory_limit_gib=memory_limit_gib,
+        memory_reserve_gib=float(memory_reserve_gib), host_memory_limit_gib=host_memory_limit_gib, phenotype_families=phenotype_families,
+        phenotype_covariates=phenotype_covariates, rm_nan=rm_nan, gene_variant_type=gene_variant_type,
+        covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
+        long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
+        single_group_variants=single_group_variants, single_region_size=single_region_size,
+        individual_effective_block_size=individual_effective_block_size,
+        device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
+        metadata_cache_bytes=metadata_cache_bytes, resume=resume, grm=grm, grm_file=grm_file,
+        trait_batch_size=trait_batch_size, input_contract=input_contract,
+        association_partition_strategy=association_partition_strategy)
+    started = time.perf_counter()
+    output = Path(output_directory).resolve()
+    attempt_id = uuid.uuid4().hex
+    if resume and (output/"plan.private.json").is_file():
+        previous = output/"report.private.json"
+        if previous.exists():
+            previous.replace(output/f"report.previous.{attempt_id}.private.json")
+        _json_write(output/"status.private.json", dict(status="running", attempt_id=attempt_id))
+    try:
+        if population:
+            if null_fit_mode != "fp64":
+                raise ValueError("mixed PheWAS null fitting requires fp64")
+            from .phewas_run import run_phewas
+            workers = run_phewas(phenotype_csv, covariate_csv, prepared_directory,
+                output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
+                continuous_transform=continuous_transform, **options)
+        else:
+            from .prepared_association import run_prepared_association
+            workers = run_prepared_association(phenotype_csv, covariate_csv, prepared_directory,
+                output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
+                transform=continuous_transform, null_fit_mode=null_fit_mode, **options)
+        if not isinstance(workers, list) or len(workers) != len(devices):
+            raise RuntimeError("WGS execution returned incomplete worker reports")
+        rows = dict.fromkeys(_KINDS, 0)
+        for worker in workers:
+            counts = worker.get("association_rows", {})
+            if any(type(counts.get(kind)) is not int or counts[kind] < 0 for kind in _KINDS):
+                raise RuntimeError("worker report has invalid association row counts")
+            for kind in _KINDS:
+                rows[kind] += counts[kind]
+        dictionary_sha = None
+        if (output/"plan.private.json").is_file():
+            expected = json.loads((output/"plan.private.json").read_text())["trait_index_sha256"]
+            dictionary_sha = _sha256(output/"trait_index.private.csv")
+            if dictionary_sha != expected:
+                raise ValueError("completed phenotype dictionary differs from the bound input order")
+        report = dict(completed=True, schema_version=3, workflow="shared_cache_phewas",
+            input_contract=input_contract, association_partition_strategy=association_partition_strategy,
+            attempt_id=attempt_id,
+            trait_index_sha256=dictionary_sha,
+            eligible_association_tests=sum(rows.values()), association_rows=rows, workers=workers,
+            gpu_ids=list(devices), end_to_end_seconds=time.perf_counter()-started,
+            output_directory=str(output))
+        completions = [worker.get('global_completion') for worker in workers]
+        if any(completion is not None for completion in completions):
+            if (any(completion is None for completion in completions)
+                    or any(completion!=completions[0] for completion in completions)):
+                raise RuntimeError('worker global completion bindings differ')
+            report.update(completions[0])
+        output.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _json_write(output/"report.private.json", report)
+        _json_write(output/"status.private.json", dict(status="complete", attempt_id=attempt_id,
+            report_sha256=_sha256(output/"report.private.json")))
+        return report
+    except BaseException as error:
+        current = output/"report.private.json"
+        if current.exists():
+            published = json.loads(current.read_text())
+            if published.get("attempt_id") == attempt_id:
+                current.replace(output/f"report.failed.{attempt_id}.private.json")
+        if output.is_dir() and (resume or not current.exists()):
+            _json_write(output/"status.private.json", dict(status="failed", attempt_id=attempt_id,
+                error_type=type(error).__name__))
+        raise
+
+def _run_wgs_association(*args, **kwargs):
+    """Own this output attempt before changing any plan or resume receipt."""
+    from .phewas_trait_csv import association_output_lease
+    with association_output_lease(kwargs['output_directory']):
+        return _run_wgs_association_unlocked(*args, **kwargs)
+
+
+def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+                chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
+                memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
+                phenotype_covariates=None, impute_missing=True, gene_variant_type="SNV",
+                covariance_block_size=4096, seed=1729,
+                single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
+                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
+                trait_batch_size=32,
+                grm="sparse", grm_file=None):
+    """Associate at least two strictly binary 0/1/missing phenotype columns.
+
+    chromosomes='all' consumes all declared autosomes; a list selects a subset.
+    device=['cuda:0'] selects one GPU, while integer n selects the first n GPUs.
+    None uses physical GPU capacity with memory_reserve_gib kept for workspace.
+    host_memory_limit_gib bounds the whole node task, shared across GPU workers;
+    None detects all finite cgroup ancestor limits and physical capacity.
+    impute_missing=True maps phenotype NaNs to controls after matching existing
+    input rows and valid selected covariates. False selects each phenotype's
+    observed samples. Other finite codes are rejected in either mode. Every
+    phenotype needs both cases and controls; covariates are never imputed.
+    Unlisted traits use all supplied covariates. Changing the missing policy
+    requires a fresh output directory and null fits.
+    grm='sparse' requires an ID-bound GRM; grm='none' selects ordinary nulls.
+    resume verifies immutable per-block CSV/model/input/source proofs and fills
+    missing blocks. A new full run (resume=False) requires a fresh output folder.
+    Both supported cache formats use genetic-major GPU phenotype tiles and
+    emit complete compressed text CSV shards and a private trait dictionary.
+    All GPU counts use whole-chromosome dispatch. Each active GPU processes
+    all phenotypes for its assigned chromosomes, sharing genotype reads and
+    transfers in bounded tiles. Per-phenotype fitted models and statistics
+    remain independent. Null fitting retains the validated FP64 path; main
+    association operators use native FP32/TF32 with stable tail branches.
+    Genetic preparation is never invoked by this association entry point.
+    """
+    from .phewas_trait_csv import association_output_lease
+    with association_output_lease(output_directory):
+        return _run_wgs_binary_unlocked(
+            phenotype_csv=phenotype_csv,
+            covariate_csv=covariate_csv,
+            prepared_directory=prepared_directory,
+            output_directory=output_directory,
+            chromosomes=chromosomes,
+            analyses=analyses,
+            device=device,
+            cpu_threads=cpu_threads,
+            memory_limit_gib=memory_limit_gib,
+            memory_reserve_gib=memory_reserve_gib,
+            host_memory_limit_gib=host_memory_limit_gib,
+            phenotype_covariates=phenotype_covariates,
+            impute_missing=impute_missing,
+            gene_variant_type=gene_variant_type,
+            covariance_block_size=covariance_block_size,
+            seed=seed,
+            single_mac_cutoff=single_mac_cutoff,
+            single_group_variants=single_group_variants,
+            single_region_size=single_region_size,
+            individual_effective_block_size=individual_effective_block_size,
+            device_cache_bytes=device_cache_bytes,
+            compact_cache_bytes=compact_cache_bytes,
+            metadata_cache_bytes=metadata_cache_bytes,
+            resume=resume,
+            trait_batch_size=trait_batch_size,
+            grm=grm,
+            grm_file=grm_file,
+        )
 
 
 def main(argv=None):

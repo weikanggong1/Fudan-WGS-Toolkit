@@ -16,6 +16,39 @@ from fudan_wgs_toolkit.io import load_null_model
 from fudan_wgs_toolkit.run import run_WGS_all_binanry
 
 
+@pytest.mark.parametrize("entry_name,unlocked_name", [
+    ("run_WGS_all_binanry", "_run_wgs_binary_unlocked"),
+    ("_run_wgs_association", "_run_wgs_association_unlocked"),
+])
+def test_binary_and_continuous_executor_lease_precedes_unlocked_call(
+        tmp_path, monkeypatch, entry_name, unlocked_name):
+    from fudan_wgs_toolkit import run as module
+    from fudan_wgs_toolkit.phewas_trait_csv import association_output_lease
+    output, calls = tmp_path / "results", []
+    sentinel = {"completed": True}
+
+    def unlocked(*args, **kwargs):
+        calls.append((args, kwargs))
+        # The scientific executor starts only after owning the whole attempt.
+        with pytest.raises(RuntimeError, match="active public invocation"):
+            with association_output_lease(output):
+                pytest.fail("unlocked executor ran without output ownership")
+        return sentinel
+
+    monkeypatch.setattr(module, unlocked_name, unlocked)
+    entry = getattr(module, entry_name)
+    with association_output_lease(output):
+        with pytest.raises(RuntimeError, match="active public invocation"):
+            entry("phenotypes.csv", "covariates.csv", "prepared",
+                  output_directory=output)
+    assert calls == [] and not output.exists()
+    assert entry("phenotypes.csv", "covariates.csv", "prepared",
+                 output_directory=output) is sentinel
+    assert len(calls) == 1 and calls[0][1]["output_directory"] == output
+    with association_output_lease(output):
+        assert not output.exists()
+
+
 def commit_dataset(root, value):
     raw = json.dumps(value).encode()
     (root / "dataset.json").write_bytes(raw)
@@ -101,6 +134,7 @@ def test_public_run_shares_schedule_and_retains_independent_samples(tmp_path, mo
     from fudan_wgs_toolkit import phewas_partition
     monkeypatch.setattr(phewas_partition, "gpu_model_cache_capacity",
                         lambda gpu_ids, **policy: 8*2**30)
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", lambda *args: (8*2**30, 8*2**30))
     monkeypatch.setattr(portable, "PortableMetadataReader", PositionMetadata)
     fits, seen = [], []
     def fit(*args, **kwargs):

@@ -6,12 +6,15 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import pickle
 import sqlite3
 import weakref
 
 import pytest
 
-from fudan_wgs_toolkit.phewas_trait_csv import PerTraitCheckpointCSVWriter, CommittedCSVCorruption
+from fudan_wgs_toolkit.phewas_trait_csv import (PerTraitCheckpointCSVWriter, CommittedCSVCorruption,
+                                              association_output_lease, invocation_lease_for_spawn,
+                                              held_invocation_lease, close_pending_invocation_lease)
 from fudan_wgs_toolkit.phewas_storage import StreamingCSVWriter
 
 BINDING = dict(source_implementation_sha256='source',input_manifest_sha256='inputs',
@@ -224,6 +227,228 @@ def test_active_owner_conflict_is_explicit_instead_of_deadlock_or_duplicate_rows
     first.abort()
     assert second.checkpoint_tile('ncrna','21',0,[0]) is not None
     second.finish()
+
+
+def _parallel_chromosome(directory,chromosome,ready,go):
+    writer=PerTraitCheckpointCSVWriter(directory,binding=BINDING,worker_id=chromosome,
+        ownership_scope='chromosome',max_open_streams=1)
+    writer.checkpoint_tile('coding',chromosome,0,[0,1])
+    assert len(writer._owners)==1
+    ready.set();assert go.wait(20)
+    for job in range(8):
+        writer.write_tile('coding',chromosome,[(0,[row(job,chromosome=chromosome)]),
+            (1,[row(job+100,chromosome=chromosome)])],job_index=job)
+        assert len(writer.streams)<=1 and len(writer._owners)==1
+    writer.finish()
+
+
+def test_parallel_chromosomes_share_traits_without_recovering_or_finishing_peer_files(tmp_path):
+    context=multiprocessing.get_context('fork');go=context.Event();ready=[context.Event(),context.Event()]
+    processes=[context.Process(target=_parallel_chromosome,args=(str(tmp_path),chromosome,ready[index],go))
+        for index,chromosome in enumerate(('21','22'))]
+    for process in processes:process.start()
+    try:
+        assert all(event.wait(20) for event in ready);go.set()
+        for process in processes:process.join(30)
+        assert [process.exitcode for process in processes]==[0,0]
+        reports=[json.loads((tmp_path/f'worker_{chromosome}.complete.private.json').read_text())
+            for chromosome in ('21','22')]
+        assert [report['committed_blocks'] for report in reports]==[8,8]
+        assert [len(rows(tmp_path,report)) for report in reports]==[16,16]
+        assert all(set(report['trait_rows'])=={'0','1'} for report in reports)
+        assert [{receipt['chromosome'] for receipt in report['receipts']} for report in reports]==[{'21'},{'22'}]
+        assert len(list(tmp_path.rglob('*.csv.gz')))==4
+        assert not list(tmp_path.rglob('*.partial'))
+    finally:
+        go.set()
+        for process in processes:
+            if process.is_alive():process.terminate()
+            process.join(10)
+
+
+def test_chromosome_resume_card_redispatch_cannot_steal_active_owner(tmp_path):
+    first=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,ownership_scope='chromosome')
+    block=first.write_tile('coding','21',[(0,[row()]),(1,[row(.5)])],job_index=4)
+    resumed=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,resume=True,worker_id='new-card',
+        ownership_scope='chromosome')
+    with pytest.raises(RuntimeError,match='active writer owner'):
+        resumed.checkpoint_tile('coding','21',4,[0,1])
+    first.abort()
+    assert resumed.checkpoint_tile('coding','21',4,[0,1])==block
+    resumed.write_tile('coding','21',[(0,[row(.75)]),(1,[])],job_index=5)
+    result=resumed.finish()
+    assert result['rows']['coding']==3 and result['reused_blocks']==1
+    assert result['trait_rows']['0']['coding']==2
+    assert len(rows(tmp_path,result))==3
+
+
+def test_chromosome_claim_keeps_other_chromosome_uncommitted_tail_untouched(tmp_path):
+    first=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,ownership_scope='chromosome')
+    first.write_tile('coding','21',[(0,[row()])],job_index=0);first.abort()
+    partial=next(tmp_path.rglob('*.partial'))
+    with partial.open('ab') as handle:handle.write(b'preserved-peer-tail')
+    before=partial.read_bytes()
+    second=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,worker_id='1',ownership_scope='chromosome')
+    second.write_tile('coding','22',[(0,[row(.9)])],job_index=0)
+    result=second.finish()
+    assert partial.read_bytes()==before and result['rows']['coding']==1
+    assert [receipt['chromosome'] for receipt in result['receipts']]==['22']
+    resumed=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,resume=True,worker_id='2',ownership_scope='chromosome')
+    assert resumed.checkpoint_tile('coding','21',0,[0]) is not None
+    resumed.finish()
+    assert list((tmp_path/'.trait_checkpoints/uncommitted').rglob('tail.gz'))
+
+
+def test_chromosome_and_legacy_trait_writer_modes_cannot_share_ledger(tmp_path):
+    writer=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,ownership_scope='chromosome')
+    with pytest.raises(ValueError,match='binding differs'):
+        PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,worker_id='legacy')
+    writer.abort()
+
+
+def _hold_invocation_lease(directory,ready,release,crash):
+    with association_output_lease(directory):
+        assert not Path(directory).exists()
+        ready.set();assert release.wait(20)
+        if crash:os._exit(73)
+
+
+@pytest.mark.parametrize('crash',[False,True])
+def test_public_invocation_lease_rejects_active_parent_and_recovers_after_exit(tmp_path,crash):
+    context=multiprocessing.get_context('fork');ready=context.Event();release=context.Event()
+    output=tmp_path/'output';different=tmp_path/'independent'
+    process=context.Process(target=_hold_invocation_lease,args=(str(output),ready,release,crash))
+    process.start()
+    try:
+        assert ready.wait(20)
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):raise AssertionError('active output acquired')
+        with association_output_lease(different):assert not different.exists()
+        release.set();process.join(30)
+        assert process.exitcode==(73 if crash else 0)
+        with association_output_lease(output):assert not output.exists()
+        assert (tmp_path/'.output.wgs-association.lock').stat().st_size==0
+    finally:
+        release.set()
+        if process.is_alive():process.terminate()
+        process.join(10)
+
+
+def test_invocation_lease_checks_symlink_lock_before_any_output_change(tmp_path):
+    preserved=tmp_path/'preserved';preserved.write_bytes(b'preserved')
+    (tmp_path/'.output.wgs-association.lock').symlink_to(preserved)
+    with pytest.raises(ValueError,match='symlink'):
+        with association_output_lease(tmp_path/'output'):pass
+    assert preserved.read_bytes()==b'preserved' and not (tmp_path/'output').exists()
+
+
+def _alive_spawn_lease_child(handle,ready,release,done):
+    with held_invocation_lease(handle):
+        ready.set();assert release.wait(45)
+    done.set()
+
+
+def _crash_parent_with_spawned_lease_children(directory,ready,release,done):
+    with association_output_lease(directory):
+        context=multiprocessing.get_context('spawn')
+        children=[]
+        for index in range(2):
+            child=context.Process(target=_alive_spawn_lease_child,
+                args=(invocation_lease_for_spawn(),ready[index],release[index],done[index]))
+            child.start();children.append(child)
+        assert all(event.wait(45) for event in ready)
+        # Deliberately bypass cleanup after both real spawn children have
+        # detached their descriptors and entered their owned work scopes.
+        os._exit(73)
+
+
+def test_parent_crash_does_not_release_invocation_until_last_spawn_worker_ends(tmp_path):
+    context=multiprocessing.get_context('spawn')
+    ready=[context.Event(),context.Event()];release=[context.Event(),context.Event()]
+    done=[context.Event(),context.Event()];output=tmp_path/'output'
+    parent=context.Process(target=_crash_parent_with_spawned_lease_children,
+        args=(str(output),ready,release,done))
+    parent.start()
+    try:
+        assert all(event.wait(45) for event in ready)
+        parent.join(30);assert parent.exitcode==73
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):raise AssertionError('orphan workers lost ownership')
+        release[0].set();assert done[0].wait(45)
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):raise AssertionError('last live worker lost ownership')
+        release[1].set();assert done[1].wait(45)
+        with association_output_lease(output):assert not output.exists()
+    finally:
+        for event in release:event.set()
+        if parent.is_alive():parent.terminate()
+        parent.join(10)
+        for event in done:event.wait(10)
+
+
+def test_unstarted_spawn_transfer_is_retired_without_leaving_invocation_locked(tmp_path):
+    output=tmp_path/'output'
+    with association_output_lease(output):
+        close_pending_invocation_lease(invocation_lease_for_spawn())
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):pass
+    with association_output_lease(output):assert not output.exists()
+
+
+def _spawn_child_before_lease_detach(handle,ready,release):
+    # The OS-transferred descriptor must hold ownership before scientific
+    # worker entry/detach as well as through its normal context manager.
+    ready.set();assert release.wait(45)
+    with held_invocation_lease(handle):pass
+
+
+def test_spawn_killed_before_detach_has_no_resource_sharer_lock_leak(tmp_path,monkeypatch):
+    import multiprocessing.resource_sharer as resource_sharer
+    def unexpected_sharer(*args,**kwargs):
+        raise AssertionError('invocation lease registered with resource_sharer')
+    monkeypatch.setattr(resource_sharer,'DupFd',unexpected_sharer)
+    context=multiprocessing.get_context('spawn')
+    ready=context.Event();release=context.Event();output=tmp_path/'output';child=None
+    try:
+        with association_output_lease(output):
+            child=context.Process(target=_spawn_child_before_lease_detach,
+                args=(invocation_lease_for_spawn(),ready,release))
+            child.start();assert ready.wait(45)
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):raise AssertionError('undetached child lost ownership')
+        child.terminate();child.join(30)
+        assert child.exitcode is not None and child.exitcode<0
+        with association_output_lease(output):assert not output.exists()
+    finally:
+        # A terminated Event waiter cannot acknowledge Condition.notify_all.
+        # Do not set that Event during cleanup: this test deliberately kills
+        # the exact child before detach and needs only terminate/join cleanup.
+        if child is not None:
+            if child.is_alive():child.terminate()
+            child.join(10)
+
+
+def test_invocation_transfer_refuses_unbound_serialization_and_retired_reuse(tmp_path):
+    with association_output_lease(tmp_path/'output'):
+        handle=invocation_lease_for_spawn()
+        with pytest.raises(RuntimeError,match='Process.start'):
+            pickle.dumps(handle)
+        close_pending_invocation_lease(handle)
+        with pytest.raises(ValueError,match='retired'):
+            pickle.dumps(handle)
+        with pytest.raises(ValueError,match='retired'):
+            with held_invocation_lease(handle):pass
+
+
+def test_spawn_worker_exception_releases_only_its_duplicate(tmp_path):
+    output=tmp_path/'output'
+    with association_output_lease(output):
+        with pytest.raises(ArithmeticError,match='owned worker failure'):
+            with held_invocation_lease(invocation_lease_for_spawn()):
+                raise ArithmeticError('owned worker failure')
+        with pytest.raises(RuntimeError,match='active public invocation'):
+            with association_output_lease(output):pass
+    with association_output_lease(output):assert not output.exists()
 
 
 @pytest.mark.parametrize('damage',['byte','truncate','database'])

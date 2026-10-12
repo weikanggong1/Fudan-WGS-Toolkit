@@ -352,7 +352,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                          phenotype_dictionary=None, phenotype_manifest=None,
                          covariate_manifest=None, chunk_rows=8192, emit=None,
                          phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
-                         binary_only=False):
+                         binary_only=False, input_contract="mixed"):
     """Create immutable raw float64 arrays in cache sample order.
 
     ``output`` must not exist.  No intercept, RINT, residualization, ancestry
@@ -374,11 +374,23 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
     eligible trait. Only NaNs may become controls; participants absent from
     the phenotype CSV are never created as controls. The legacy generic
     missing-value policy remains available to internal callers.
+
+    ``input_contract="continuous"`` requires at least two inferred Gaussian
+    traits and one shared profile containing every covariate. It cannot be
+    combined with ``binary_only``. The contract is bound to prepared metadata
+    so reopening an input never changes its accepted phenotype types.
     """
     if type(rm_nan) is not bool:
         raise ValueError("rm_nan must be a boolean")
     if type(binary_only) is not bool:
         raise ValueError("binary_only must be a boolean")
+    if input_contract not in ("mixed", "continuous"):
+        raise ValueError("unknown phenotype input contract")
+    if binary_only and input_contract != "mixed":
+        raise ValueError("binary_only cannot be combined with a continuous input contract")
+    if input_contract == "continuous" and (profiles is not None or phenotype_families != "auto"
+                                            or phenotype_covariates is not None):
+        raise ValueError("continuous analysis requires inferred families and shared all covariates")
     if not isinstance(chunk_rows, int) or chunk_rows <= 0:
         raise ValueError("chunk_rows must be a positive integer")
     started = time.perf_counter()
@@ -395,6 +407,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         raise ValueError("The phenotype CSV must have at least one numeric column")
     if binary_only and len(phenotype_names) < 2:
         raise ValueError("Binary-only analysis requires at least two phenotype columns")
+    if input_contract == "continuous" and len(phenotype_names) < 2:
+        raise ValueError("continuous analysis requires at least two phenotype columns")
     traits, profile_indices, dictionary = _metadata(profiles, phenotype_names, covariate_names,
         phenotype_dictionary, phenotype_families=phenotype_families,
         phenotype_covariates=phenotype_covariates)
@@ -435,6 +449,11 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
             for trait, family in zip(traits, p_parse.pop("inferred_families")):
                 if trait["family"] is None:
                     trait["family"] = family
+        if input_contract == "continuous":
+            from .continuous_run import validate_continuous_values
+            validate_continuous_values(phenotype_names, y)
+            if any(trait["family"] != "gaussian" for trait in traits):
+                raise ValueError("continuous analysis accepts Gaussian phenotypes only")
         if profiles is None and dictionary is not None and any(row.get("model_family") != trait["family"]
                                           for row, trait in zip(dictionary, traits)):
             raise ValueError("Phenotype dictionary family differs from the assigned numeric family")
@@ -454,6 +473,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
             policy = apply_phenotype_missing_policy(values, family=trait["family"],
                 rm_nan=rm_nan, covariate_valid=eligible, binary_only=binary_only)
             analyzed = policy["values"]
+            eligible_finite = values[eligible & finite]
             quality = {"index": trait["index"], "family": trait["family"],
                        "phenotype_nonmissing": int(finite.sum()),
                        "phenotype_missing": int((~finite).sum()),
@@ -464,6 +484,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                        "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
                        "minimum": float(values[finite].min()) if finite.any() else None,
                        "maximum": float(values[finite].max()) if finite.any() else None,
+                       "eligible_minimum": float(eligible_finite.min()) if eligible_finite.size else None,
+                       "eligible_maximum": float(eligible_finite.max()) if eligible_finite.size else None,
                        "analysis_cases": policy["analysis_cases"],
                        "analysis_controls": policy["analysis_controls"],
                        "available_cases": policy["available_cases"],
@@ -479,7 +501,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         for binding in sources.values():
             _unchanged(binding)
         metadata = {"traits": traits, "covariate_names": covariate_names,
-                    "rm_nan": rm_nan, "binary_only": binary_only,
+                    "rm_nan": rm_nan, "binary_only": binary_only, "input_contract": input_contract,
                     "missing_policy": _missing_policy(rm_nan, binary_only),
                     "profile_covariate_indices": profile_indices,
                     "phenotype_dictionary": dictionary, "quality": trait_counts,
@@ -489,6 +511,9 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                         "declared_by_profile" if profiles is not None else
                         "auto_with_explicit_overrides" if isinstance(phenotype_families, Mapping) and phenotype_families else
                         "inferred_exact_01_from_all_source_rows")}
+        if input_contract == "continuous":
+            from .continuous_run import validate_continuous_metadata
+            validate_continuous_metadata(metadata)
         _json(output / "traits.private.json", metadata)
         artifacts = {}
         for path in sorted(output.glob("*.npy")):
@@ -509,7 +534,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                 "sum_imputed_samples": sum(q["imputed_n"] for q in rows),
                 "empty_traits": sum(q["analysis_complete_samples"] == 0 for q in rows)}
         anonymous = {"status": "complete", "cache_sample_count": len(axis), "phenotype_count": len(traits),
-                     "rm_nan": rm_nan, "binary_only": binary_only,
+                     "rm_nan": rm_nan, "binary_only": binary_only, "input_contract": input_contract,
                      "missing_policy": _missing_policy(rm_nan, binary_only),
                      "covariate_count": len(covariate_names), "unique_covariate_profiles": len(profile_indices),
                      "families": family_counts, "phenotype_parse": p_parse, "covariate_parse": c_parse,
@@ -524,7 +549,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                      "elapsed_seconds": time.perf_counter() - started,
                      "array_bytes": sum(v["bytes"] for k, v in artifacts.items() if k.endswith(".npy"))}
         manifest = {"schema": 1, "status": "complete", "sample_count": len(axis), "trait_count": len(traits),
-                    "rm_nan": rm_nan, "binary_only": binary_only,
+                    "rm_nan": rm_nan, "binary_only": binary_only, "input_contract": input_contract,
                     "missing_policy": _missing_policy(rm_nan, binary_only),
                     "covariate_count": len(covariate_names), "profile_count": len(profile_indices),
                     "array_dtype": "float64", "array_order": "C", "sample_order": "input_cache_axis",
@@ -534,6 +559,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
             manifest["trait_options"] = {
                 "rm_nan": rm_nan,
                 "binary_only": binary_only,
+                "input_contract": input_contract,
                 "phenotype_families": dict(phenotype_families) if isinstance(phenotype_families, Mapping) else "auto",
                 "phenotype_covariates": {name: list(columns) for name, columns in (phenotype_covariates or {}).items()}}
         _json(output / "manifest.private.json", manifest)
@@ -579,6 +605,21 @@ class PhewasInputs:
         # A default at the public API must never reinterpret an old fitted input.
         self.rm_nan = self.manifest.get("rm_nan", False)
         self.binary_only = self.manifest.get("binary_only", False)
+        trait_options = self.manifest.get("trait_options", {})
+        self.input_contract = self.manifest.get("input_contract", trait_options.get("input_contract", "mixed"))
+        # The first continuous-only release stored its contract in trait_options
+        # alone. New manifests also bind metadata directly; old mixed inputs
+        # retain their original default rather than being reinterpreted.
+        metadata_default = (trait_options.get("input_contract", "mixed")
+                            if "input_contract" not in self.manifest else "mixed")
+        if (self.input_contract not in ("mixed", "continuous")
+                or self.metadata.get("input_contract", metadata_default) != self.input_contract
+                or trait_options.get("input_contract", "mixed") != self.input_contract
+                or (self.binary_only and self.input_contract != "mixed")):
+            raise ValueError("Prepared phenotype input contract binding is invalid")
+        if self.input_contract == "continuous":
+            from .continuous_run import validate_continuous_metadata
+            validate_continuous_metadata(self.metadata)
         if (type(self.binary_only) is not bool
                 or self.metadata.get("binary_only", False) != self.binary_only
                 or ("trait_options" in self.manifest and
@@ -697,7 +738,7 @@ class PhewasInputs:
                 "available_n": policy["available_n"], "mother_n": policy["mother_n"],
                 "imputed_n": policy["imputed_n"], "imputation_mean": policy["imputation_mean"],
                 "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
-                "binary_only": self.binary_only,
+                "binary_only": self.binary_only, "input_contract": self.input_contract,
                 **{key: policy[key] for key in ("analysis_cases", "analysis_controls",
                     "available_cases", "available_controls", "imputed_controls")}}
 

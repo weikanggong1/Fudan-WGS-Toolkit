@@ -3,6 +3,8 @@
 Dispatch changes neither fitted models nor mathematical/checkpoint identity.
 Large fitted banks can stay within each GPU's cache by assigning whole ordered
 cohorts to one worker, while each such worker scans the complete genetic plan.
+Continuous-only runs assign each complete chromosome to exactly one worker;
+all traits stay available through the existing bounded model repository.
 """
 from __future__ import annotations
 
@@ -134,7 +136,7 @@ def build_trait_dispatch(entries,worker_count,configuration,*,source_binding,
     """
     if type(worker_count) is not int or worker_count<1:
         raise ValueError('dispatch worker count must be a positive integer')
-    if strategy not in ('auto','genetic_jobs','ordered_cohorts','cohort_tiles','whole_chromosomes'):
+    if strategy not in ('auto','genetic_jobs','ordered_cohorts','cohort_tiles','chromosomes','whole_chromosomes'):
         raise ValueError('unknown association partition strategy')
     if type(trait_batch_size) is not int or trait_batch_size<1:
         raise ValueError('trait batch size must be a positive integer')
@@ -147,7 +149,7 @@ def build_trait_dispatch(entries,worker_count,configuration,*,source_binding,
         raise ValueError('trait dispatch requires ordered distinct global trait indices')
     jobs = genetic_schedule(configuration)
     selected,footprint = strategy,None
-    if strategy not in ('genetic_jobs','whole_chromosomes') and worker_count>1:
+    if strategy not in ('genetic_jobs','chromosomes','whole_chromosomes') and worker_count>1:
         from .phewas_model_footprint import estimate_fitted_model_storage
         footprint = estimate_fitted_model_storage(entries,binary_normal_cache=binary_normal_cache)
     if strategy=='auto':
@@ -158,7 +160,7 @@ def build_trait_dispatch(entries,worker_count,configuration,*,source_binding,
                     and total>model_cache_capacity_bytes else 'genetic_jobs')
     workers = [dict(worker_id=i,trait_indices=[],trait_tiles=[],estimated_persistent_model_bytes=0)
                for i in range(worker_count)]
-    cohorts,tiles = [],[]
+    cohorts,tiles,chromosome_assignments = [],[],[]
     chromosomes = []
     if selected == 'whole_chromosomes':
         names = [str(reference['name']) for reference in configuration['chromosomes']]
@@ -237,12 +239,32 @@ def build_trait_dispatch(entries,worker_count,configuration,*,source_binding,
     else:
         for worker in workers:
             worker['trait_indices'] = list(indices)
+    if selected=='chromosomes':
+        names=[str(reference['name']) for reference in configuration['chromosomes']]
+        if len(set(names))!=len(names):
+            raise ValueError('chromosome dispatch requires distinct chromosome names')
+        loads=[0]*worker_count
+        chromosome_assignments=[dict(chromosome_index=index,name=str(reference['name']),
+            genetic_job_groups=len(reference['jobs']))
+            for index,reference in enumerate(configuration['chromosomes']) if reference['jobs']]
+        # Job counts are a scheduling proxy, not measured runtime. Longest
+        # chromosome plans go first; ties retain scientific input order.
+        for chromosome in sorted(chromosome_assignments,
+                key=lambda value:(-value['genetic_job_groups'],value['chromosome_index'])):
+            owner=min(range(worker_count),key=lambda index:(loads[index],index))
+            chromosome['worker_id']=owner
+            loads[owner]+=chromosome['genetic_job_groups']
+        for worker in workers:
+            worker['chromosomes']=[record['name'] for record in chromosome_assignments
+                if record['worker_id']==worker['worker_id']]
     for worker in workers:
         assigned_jobs = ([job for unit in chromosomes if unit['worker_id']==worker['worker_id']
                          for job in unit['genetic_schedule']] if selected=='whole_chromosomes' else
             ((jobs if worker['trait_indices'] else [])
             if selected in ('ordered_cohorts','cohort_tiles') else jobs[worker['worker_id']::worker_count])
             )
+        if selected=='chromosomes':
+            assigned_jobs=[job for job in jobs if job[0] in worker['chromosomes']]
         worker.update(genetic_job_visits=len(assigned_jobs),genetic_schedule_sha256=_hash(assigned_jobs))
     record = dict(schema_version=1,strategy=selected,requested_strategy=strategy,
         worker_count=worker_count,global_trait_indices=indices,source_binding=source_binding,
@@ -258,6 +280,9 @@ def build_trait_dispatch(entries,worker_count,configuration,*,source_binding,
         workers=workers,ordered_cohorts=cohorts,cohort_tiles=tiles,chromosome_units=chromosomes,
         trait_batch_size=trait_batch_size,
         model_estimate_scope='metadata geometry; resident tensor estimate, not measured GPU memory')
+    if selected=='chromosomes':
+        record.update(chromosome_assignments=chromosome_assignments,
+            chromosome_assignment_cost='number of genetic job groups; not measured elapsed time')
     record['dispatch_binding_sha256'] = _hash(record)
     return record
 
@@ -344,6 +369,26 @@ def _validate_dispatch(dispatch):
                     or worker['genetic_schedule_sha256']!=_hash(local)
                     or worker['trait_indices']!=(indices if local else [])):
                 raise ValueError('whole-chromosome worker ownership/trait coverage differs')
+    elif dispatch['strategy']=='chromosomes':
+        chromosomes=dispatch.get('chromosome_assignments',[])
+        names=[record.get('name') for record in chromosomes]
+        positions=[record.get('chromosome_index') for record in chromosomes]
+        if (any(worker['trait_indices']!=indices for worker in workers)
+                or sum(visits)!=dispatch['global_unique_genetic_job_groups']
+                or len(set(names))!=len(names)
+                or any(not isinstance(name,str) or not name for name in names)
+                or any(type(index) is not int or index<0 for index in positions)
+                or positions!=sorted(set(positions))
+                or any(type(record.get('worker_id')) is not int or not 0<=record['worker_id']<count
+                    or type(record.get('genetic_job_groups')) is not int or record['genetic_job_groups']<1
+                    for record in chromosomes)
+                or sum(record['genetic_job_groups'] for record in chromosomes)!=sum(visits)):
+            raise ValueError('chromosome dispatch must assign every whole chromosome exactly once')
+        for worker in workers:
+            owned=[record for record in chromosomes if record['worker_id']==worker['worker_id']]
+            if (worker.get('chromosomes')!=[record['name'] for record in owned]
+                    or worker['genetic_job_visits']!=sum(record['genetic_job_groups'] for record in owned)):
+                raise ValueError('chromosome ownership or complete job coverage changed')
     elif dispatch['strategy']=='genetic_jobs':
         if (any(worker['trait_indices']!=indices for worker in workers)
                 or sum(visits)!=dispatch['global_unique_genetic_job_groups']):
@@ -370,7 +415,9 @@ def dispatch_configuration(configuration,dispatch,worker_id):
             if ((dispatch['strategy'] in ('ordered_cohorts','cohort_tiles') and dispatch['workers'][worker_id]['trait_indices'])
                     or (dispatch['strategy']=='genetic_jobs' and ordinal%dispatch['worker_count']==worker_id)
                     or (dispatch['strategy']=='whole_chromosomes' and chromosome_index in
-                        dispatch['workers'][worker_id]['chromosome_indices'])):
+                        dispatch['workers'][worker_id]['chromosome_indices'])
+                    or (dispatch['strategy']=='chromosomes'
+                        and str(original['name']) in dispatch['workers'][worker_id]['chromosomes'])):
                 jobs.append(job)
             ordinal += 1
         if jobs:
@@ -378,6 +425,10 @@ def dispatch_configuration(configuration,dispatch,worker_id):
     result['chromosomes'] = chromosomes
     if dispatch['strategy']=='cohort_tiles':
         result['_association_trait_tiles'] = dispatch['workers'][worker_id]['trait_tiles']
+    if dispatch['strategy']=='chromosomes':
+        if (_hash(genetic_schedule(configuration))!=dispatch['global_genetic_schedule_sha256']
+                or _hash(genetic_schedule(result))!=dispatch['workers'][worker_id]['genetic_schedule_sha256']):
+            raise ValueError('chromosome configuration differs from the bound genetic schedule')
     return result
 
 
@@ -421,6 +472,8 @@ def verify_dispatch_reports(dispatch,reports):
                 or report.get('genetic_schedule_coverage_verified') is not True
                 or report.get('observed_finished_genetic_jobs')!=expected['genetic_job_visits']):
             raise RuntimeError('actual finished chromosome schedule coverage differs from dispatch')
+        if dispatch['strategy']=='chromosomes' and report.get('assigned_chromosomes')!=expected['chromosomes']:
+            raise RuntimeError('association chromosome ownership differs from bound dispatch')
         if 'trait_rows' in report and report['job_groups']:
             if {int(index) for index in report['trait_rows']}!=set(expected['trait_indices']):
                 raise RuntimeError('association report omitted or added a dispatched trait')

@@ -107,3 +107,53 @@ def test_diagnostic_or_exit_write_failure_does_not_replace_worker_error(isolated
     monkeypatch.setattr(run,'atomic_json',disk_failure)
     with pytest.raises(ArithmeticError,match='primary calculation'):
         run.execute_worker(plan)
+
+
+@pytest.mark.parametrize('fail_start',[False,True])
+def test_spawned_workers_inherit_bounded_blas_environment_and_parent_is_restored(tmp_path,monkeypatch,fail_start):
+    import json
+    import multiprocessing
+    from types import SimpleNamespace
+    from fudan_wgs_toolkit import cpu_budget,phewas_partition
+    names=('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','NUMEXPR_NUM_THREADS')
+    monkeypatch.setenv(names[0],'3');monkeypatch.delenv(names[1],raising=False)
+    monkeypatch.setenv(names[2],'7');monkeypatch.delenv(names[3],raising=False)
+    original={name:run.os.environ.get(name) for name in names}
+    configuration=dict(chromosomes=[dict(name='21',jobs=[dict(kind='coding')]),
+        dict(name='22',jobs=[dict(kind='individual')])])
+    monkeypatch.setattr(run,'prepare_phewas_run',lambda *args,**kwargs:dict(
+        output_directory=str(tmp_path),attempt_id='fixture',configuration=configuration))
+    monkeypatch.setattr(cpu_budget,'detect_cpu_capacity',lambda:dict(effective_cores=8))
+    monkeypatch.setattr(run.os,'sched_getaffinity',lambda pid:set(range(8)))
+    monkeypatch.setattr(phewas_partition,'gpu_model_cache_capacity',lambda *args,**kwargs:1024)
+    observed=[];processes=[]
+    class Process:
+        def __init__(self,target,kwargs):self.kwargs=kwargs;self.exitcode=None;processes.append(self)
+        def start(self):
+            observed.append({name:run.os.environ.get(name) for name in names})
+            if fail_start and self.kwargs['worker_id']==1:raise OSError('injected owned start failure')
+            plan=self.kwargs['plan']
+            dispatch=phewas_partition.build_trait_dispatch([dict(trait_index=0,sha256='a'*64),
+                dict(trait_index=1,sha256='b'*64)],2,configuration,source_binding={},strategy='chromosomes')
+            phewas_partition.publish_trait_dispatch(tmp_path,dispatch,plan['attempt_id'])
+            worker=dispatch['workers'][self.kwargs['worker_id']]
+            report=dict(worker_id=worker['worker_id'],assigned_trait_indices=worker['trait_indices'],
+                assigned_chromosomes=worker['chromosomes'],association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
+                assigned_genetic_schedule_sha256=worker['genetic_schedule_sha256'],job_groups=worker['genetic_job_visits'])
+            (tmp_path/f'worker_{worker["worker_id"]}.report.private.json').write_text(json.dumps(report))
+            self.exitcode=0
+        def is_alive(self):return False
+        def join(self,timeout=None):pass
+        def terminate(self):raise AssertionError('an exited child must not be terminated')
+    monkeypatch.setattr(multiprocessing,'get_context',lambda method:SimpleNamespace(Process=Process))
+    if fail_start:
+        with pytest.raises(OSError,match='owned start failure'):
+            run.run_phewas('p','c','cache',output_directory=tmp_path,gpu_ids=(4,5),cpu_threads=4,
+                association_partition_strategy='chromosomes')
+    else:
+        results=run.run_phewas('p','c','cache',output_directory=tmp_path,gpu_ids=(4,5),cpu_threads=4,
+            association_partition_strategy='chromosomes')
+        assert [report['assigned_chromosomes'] for report in results]==[['21'],['22']]
+        assert all(process.kwargs['plan']['association_partition_strategy']=='chromosomes' for process in processes)
+    assert len(observed)==2 and all(value==dict.fromkeys(names,'4') for value in observed)
+    assert {name:run.os.environ.get(name) for name in names}==original
