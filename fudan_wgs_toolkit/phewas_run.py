@@ -191,6 +191,133 @@ def _model_inventory_fingerprint(inventory):
                                     allow_nan=False).encode()).hexdigest()
 
 
+def _gaussian_consumption_component_fingerprints():
+    """Unchanged consumers actually reached by selected Gaussian models.
+
+    The changed prepared-input consumer is certified separately, on the fixed
+    inputs. Binary and SPA factories are excluded only by the family/selection
+    gates below, never by asserting that their implementations are identical.
+    """
+    return {name: value for name, value in _consumption_component_fingerprints().items()
+            if not name.startswith('binary_null.py:')
+            and name not in ('phewas_storage.py:load_spa_source', 'phewas_inputs.py:PhewasInputs')}
+
+
+def _gaussian_stored_consumption_proof(plan, proof, fit_source, consumer):
+    """Authorize a fixed Gaussian selection; leave schema 1/2 gates intact."""
+    selected = plan.get('selected_trait_indices')
+    bindings = dict(model_fit_source_implementation_sha256=fit_source,
+        consumer_source_implementation_sha256=consumer,
+        prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+        cohort_sha256=plan.get('cohort_sha256'), kinship_sha256=plan['kinship_sha256'],
+        continuous_transform=plan.get('continuous_transform', 'paper'),
+        model_count=plan['trait_count'], rm_nan=plan.get('rm_nan', False))
+    if (type(proof.get('schema_version')) is not int or proof['schema_version'] != 3
+            or proof.get('kind') != 'immutable_fitted_gaussian_consumption'
+            or not isinstance(selected, list) or not selected
+            or any(type(index) is not int or not 0 <= index < plan['trait_count'] for index in selected)
+            or selected != sorted(set(selected)) or proof.get('selected_trait_indices') != selected
+            or type(plan.get('analysis_trait_count')) is not int
+            or plan['analysis_trait_count'] != len(selected)
+            or type(proof.get('analysis_trait_count')) is not int
+            or proof.get('analysis_trait_count') != len(selected)
+            or type(plan.get('rm_nan', False)) is not bool or type(proof.get('rm_nan')) is not bool
+            or plan.get('input_contract', 'mixed') != 'mixed' or plan.get('binary_only', False)
+            or proof.get('complete') is not True or proof.get('source_unchanged_during_review') is not True
+            or any(proof.get(key) is not False for key in ('compatible_null_fit_math',
+                'fitting_implementation_equivalence_verified', 'scientific_model_input_changes'))
+            or any(proof.get(key) is not True for key in ('model_fitting_disabled',
+                'input_preparation_disabled', 'kinship_spectrum_from_sparse_disabled',
+                'binary_consumption_disabled', 'spa_consumption_disabled'))
+            or type(proof.get('models_refitted')) is not int or proof['models_refitted'] != 0
+            or not set(bindings) <= proof.keys()
+            or any(proof.get(key) != value for key, value in bindings.items())):
+        raise ValueError('Gaussian stored-model consumption selection or scientific bindings differ')
+    parent = _bound_json(proof['parent_consumption_receipt'], proof['parent_consumption_sha256'])
+    if (parent.get('schema_version') != 2 or parent.get('kind') != 'immutable_fitted_model_consumption'
+            or parent.get('complete') is not True
+            or parent.get('model_fit_source_implementation_sha256') != fit_source
+            or parent.get('consumer_source_implementation_sha256') != proof.get('previous_consumer_source_implementation_sha256')
+            or any(parent.get(key) != value for key, value in bindings.items()
+                   if key not in ('consumer_source_implementation_sha256', 'rm_nan'))):
+        raise ValueError('Gaussian consumption parent proof/source/input binding differs')
+    actual = _gaussian_consumption_component_fingerprints()
+    components = proof.get('components')
+    if not isinstance(components, dict) or set(components) != set(actual):
+        raise ValueError('Gaussian consumption requires the complete actual Gaussian consumer closure')
+    joined = hashlib.sha256()
+    for name, value in sorted(actual.items()):
+        record = components[name]; prior = parent.get('components', {}).get(name, {})
+        if (not isinstance(record, dict) or record.get('identical') is not True
+                or record.get('old_fingerprint') != value or record.get('new_fingerprint') != value
+                or prior.get('identical') is not True or prior.get('new_fingerprint') != value
+                or prior.get('old_fingerprint') != value):
+            raise ValueError('Gaussian consumption unchanged component differs from parent or actual source')
+        joined.update(name.encode()); joined.update(bytes.fromhex(value))
+    if proof.get('gaussian_consumption_component_fingerprint') != joined.hexdigest():
+        raise ValueError('Gaussian consumption aggregate fingerprint differs')
+    change = proof.get('prepared_input_consumer_change', {})
+    current_input = _consumption_component_fingerprints()['phewas_inputs.py:PhewasInputs']
+    old_input = parent.get('components', {}).get('phewas_inputs.py:PhewasInputs', {}).get('new_fingerprint')
+    if (not isinstance(change, dict) or change.get('identical') is not False
+            or not _hash(old_input) or old_input == current_input
+            or change.get('old_fingerprint') != old_input or change.get('new_fingerprint') != current_input):
+        raise ValueError('Gaussian input consumer change must report the genuine different ASTs')
+    semantic = _bound_json(proof['input_semantic_receipt'], proof['input_semantic_sha256'])
+    required = dict(schema_version=1, kind='fixed_existing_gaussian_inputs_semantic_equality',
+        old_consumer_source_implementation_sha256=proof['previous_consumer_source_implementation_sha256'],
+        new_consumer_source_implementation_sha256=consumer,
+        parent_consumption_sha256=proof['parent_consumption_sha256'],
+        prepared_inputs_manifest_sha256=bindings['prepared_inputs_manifest_sha256'],
+        cohort_sha256=bindings['cohort_sha256'], kinship_sha256=bindings['kinship_sha256'],
+        continuous_transform=bindings['continuous_transform'], rm_nan=bindings['rm_nan'],
+        old_input_consumer_fingerprint=old_input, new_input_consumer_fingerprint=current_input,
+        new_input_module_sha256=hashlib.sha256((Path(__file__).parent/'phewas_inputs.py').read_bytes()).hexdigest(),
+        selected_trait_indices=selected, compared_trait_count=len(selected),
+        fields=['sample_indices', 'sample_ids', 'y_raw', 'covariates', 'covariate_names',
+                'missing_policy', 'available_n', 'mother_n', 'imputed_n', 'imputation_mean',
+                'recoded_nonbinary_n'],
+        complete=True, exact_values_equal=True, ordered_sample_axes_equal=True,
+        new_design_arrays_readonly=True, repeated_design_values_equal=True,
+        model_fitting_disabled=True, input_preparation_disabled=True, models_refitted=0)
+    if (any(semantic.get(key) != value for key, value in required.items())
+            or type(semantic.get('schema_version')) is not int
+            or type(semantic.get('compared_trait_count')) is not int
+            or type(semantic.get('models_refitted')) is not int
+            or not _hash(semantic.get('old_input_module_sha256'))
+            or not isinstance(semantic.get('python_version'), list)
+            or semantic['python_version'][:2] != [3, 12]
+            or not isinstance(semantic.get('traits'), list)
+            or any(not isinstance(item, dict) for item in semantic.get('traits', []))
+            or [item.get('trait_index') for item in semantic['traits'] if isinstance(item, dict)] != selected
+            or any(item.get('family') != 'gaussian' or item.get('exact_values_equal') is not True
+                   or not _hash(item.get('values_sha256')) for item in semantic['traits'])):
+        raise ValueError('Gaussian fixed-input semantic comparison is incomplete or unbound')
+    root = Path(plan['prepared_inputs_directory'])
+    manifest = _bound_json(root/'manifest.private.json', bindings['prepared_inputs_manifest_sha256'])
+    artifacts = manifest.get('artifacts', {})
+    if not isinstance(artifacts, dict) or any(not isinstance(name, str) or Path(name).name != name
+                                              for name in artifacts):
+        raise ValueError('Gaussian fixed-input artifact closure differs')
+    files = [root/'manifest.private.json', *(root/name for name in artifacts)]
+    for path_key, hash_key in (('cohort_rows', 'cohort_sha256'), ('kinship_npz', 'kinship_sha256')):
+        path = plan.get(path_key)
+        if (path is None) != (plan.get(hash_key) is None):
+            raise ValueError('Gaussian fixed-input cohort/kinship paths differ')
+        if path is not None:
+            files.append(Path(path))
+    identities = semantic.get('fixed_input_file_identities')
+    actual_identities = {str(path.resolve()): _file_stat(path) for path in files}
+    if not isinstance(identities, dict) or identities != actual_identities:
+        raise ValueError('Gaussian fixed-input identities changed after actual semantic comparison')
+    qualification = proof.get('existing_models_reuse', {})
+    if not isinstance(qualification, dict) or any(qualification.get(key) is not True for key in (
+            'scientifically_compatible', 'original_model_metadata_and_array_hashes_must_be_preserved',
+            'consumer_and_fit_source_binding_must_be_separate', 'missing_reuse_target_must_hard_fail',
+            'no_new_fits_may_be_labelled_as_old_source')):
+        raise ValueError('Gaussian stored consumption lacks strict immutable reuse qualification')
+
+
 def _stored_model_consumption_schema(plan, proof, context):
     """Check complete serialized field geometry without fitting or array copies."""
     if proof.get('immutable_inventory_fingerprint') != _model_inventory_fingerprint(context['inventory']):
@@ -318,7 +445,9 @@ def _reuse_context(plan):
     if type(plan.get('trait_count')) is not int or plan['trait_count'] < 1:
         raise ValueError('reuse requires a positive complete phenotype count')
     proof = _bound_json(plan['null_fit_compatibility_receipt'], plan['null_fit_compatibility_sha256'])
-    if proof.get('schema_version') == 2:
+    if proof.get('schema_version') == 3:
+        _gaussian_stored_consumption_proof(plan, proof, fit_source, consumer)
+    elif proof.get('schema_version') == 2:
         _stored_model_consumption_proof(plan, proof, fit_source, consumer)
     else:
         if (proof.get('schema_version') != 1 or proof.get('complete') is not True
@@ -439,9 +568,14 @@ def _reuse_context(plan):
                     or entry.get('family') != record['family'] or entry.get('n') != record['n']):
                 raise ValueError('original fitted-model receipts differ from the import inventory')
     context = dict(fit_source=fit_source, inventory=inventory, models=by_index)
-    if proof.get('schema_version') == 2:
+    if proof.get('schema_version') in (2, 3):
         _stored_model_consumption_schema(plan, proof, context)
-        context['reuse_receipt_kind'] = 'immutable_fitted_model_consumption'
+        context['reuse_receipt_kind'] = proof['kind']
+        if proof.get('schema_version') == 3:
+            selected = proof['selected_trait_indices']
+            if any(by_index[index]['family'] != 'gaussian' for index in selected):
+                raise ValueError('Gaussian consumption selection contains a binary model')
+            context['selected_trait_indices'] = selected
     return context
 
 
@@ -798,7 +932,9 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
     output = Path(plan['output_directory'])
     models = output/'models'
     models.mkdir(exist_ok=True)
-    inputs = PhewasInputs(plan['prepared_inputs_directory'])
+    inputs = (PhewasInputs(plan['prepared_inputs_directory'], verify_arrays=False)
+              if context is not None and context.get('reuse_receipt_kind') == 'immutable_fitted_gaussian_consumption'
+              else PhewasInputs(plan['prepared_inputs_directory']))
     if plan.get('rm_nan', False) != inputs.manifest.get('rm_nan', False):
         inputs.close()
         raise ValueError('prepared phenotype missing policy differs from the immutable plan')
@@ -831,7 +967,13 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                if context is None and plan.get('kinship_npz') else None)
     cohort = None if context is not None else (np.load(plan['cohort_rows'], allow_pickle=False)
                                               if plan.get('cohort_rows') else None)
-    assigned = list(range(worker_id, inputs.manifest['trait_count'], worker_count)) if trait_indices is None else list(trait_indices)
+    selected = None if context is None else context.get('selected_trait_indices')
+    expected_assignment = (list(range(worker_id, inputs.manifest['trait_count'], worker_count))
+                           if selected is None else selected[worker_id::worker_count])
+    assigned = expected_assignment if trait_indices is None else list(trait_indices)
+    if selected is not None and assigned != expected_assignment:
+        inputs.close()
+        raise ValueError('Gaussian reuse verification must retain its exact selected worker assignment')
     started, successes, errors = time.time(), [], []
     structures = FitStructureCache() if context is None else None
     try:
@@ -904,7 +1046,8 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                       fit_structure_cache=None if structures is None else structures.stats())
         if callable(getattr(inputs,'design_cache_summary',None)):
             result['prepared_design_cache'] = inputs.design_cache_summary()
-        if context is not None and context.get('reuse_receipt_kind') == 'immutable_fitted_model_consumption':
+        if context is not None and context.get('reuse_receipt_kind') in (
+                'immutable_fitted_model_consumption', 'immutable_fitted_gaussian_consumption'):
             result.update(reuse_receipt_kind=context['reuse_receipt_kind'], compatible_null_fit_math=False,
                 fitting_implementation_equivalence_verified=False, model_fitting_disabled=True,
                 input_preparation_disabled=True, models_refitted=0)
@@ -1063,17 +1206,21 @@ def _all_models(plan, worker_count, *, association_only=False):
                 raise ValueError('association-only existing fresh-fit worker/provenance coverage differs')
     if context is not None:
         for i, result in enumerate(results):
+            assigned = (list(range(i, plan['trait_count'], worker_count))
+                        if 'selected_trait_indices' not in context
+                        else context['selected_trait_indices'][i::worker_count])
             if (type(result.get('worker_id')) is not int or result['worker_id'] != i
                     or result.get('mode') != 'verified_reuse' or result.get('errors') != []
                     or result.get('model_fit_source_implementation_sha256') != context['fit_source']
                     or result.get('consumer_source_implementation_sha256') != plan['source_implementation_sha256']
                     or result.get('null_fit_compatibility_sha256') != plan['null_fit_compatibility_sha256']
                     or result.get('model_import_sha256') != plan['model_import_sha256']
-                    or result.get('assigned') != len(range(i, plan['trait_count'], worker_count))
+                    or result.get('assigned') != len(assigned)
                     or [entry.get('trait_index') for entry in result.get('models', [])]
-                        != list(range(i, plan['trait_count'], worker_count))):
+                        != assigned):
                 raise ValueError('current reuse verification receipt worker/provenance coverage differs')
-            if context.get('reuse_receipt_kind') == 'immutable_fitted_model_consumption' and (
+            if context.get('reuse_receipt_kind') in ('immutable_fitted_model_consumption',
+                    'immutable_fitted_gaussian_consumption') and (
                     result.get('reuse_receipt_kind') != context['reuse_receipt_kind']
                     or result.get('compatible_null_fit_math') is not False
                     or result.get('fitting_implementation_equivalence_verified') is not False
@@ -1084,8 +1231,13 @@ def _all_models(plan, worker_count, *, association_only=False):
     if any(result['errors'] for result in results):
         raise RuntimeError('one or more null fits failed; full association cannot silently omit phenotypes')
     models = sorted((entry for result in results for entry in result['models']), key=lambda entry: entry['trait_index'])
-    if [entry['trait_index'] for entry in models] != list(range(plan['trait_count'])):
+    expected_indices = (context['selected_trait_indices'] if context is not None
+                        and 'selected_trait_indices' in context else list(range(plan['trait_count'])))
+    if [entry['trait_index'] for entry in models] != expected_indices:
         raise RuntimeError('fitted-model coverage differs from the complete phenotype plan')
+    if context is not None and 'selected_trait_indices' in context and any(
+            entry.get('family') != 'gaussian' for entry in models):
+        raise ValueError('Gaussian association cannot consume binary or SPA models')
     if association_only and any(type(entry.get('trait_index')) is not int for entry in models):
         raise ValueError('association-only fitted trait identities must be integer indices')
     expected = dict(input_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
