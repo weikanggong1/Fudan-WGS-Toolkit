@@ -220,7 +220,9 @@ def test_binary_repository_reuses_verified_source_for_normal_and_spa(tmp_path, m
                 torch.testing.assert_close(spa.projection_left, fitted.spa_model.projection_left,
                                            rtol=1e-12, atol=1e-12)
     assert repository.summary()['spa_source_loads'] == 1
-    assert repository.summary()['spa_source_hits'] == 3
+    assert repository.summary()['spa_source_hits'] == 2
+    assert repository.summary()['binary_normal_derivations'] == 1
+    assert repository.summary()['binary_normal_cache_hits'] == 1
     assert repository.spa_pinned[(0, 'cpu')] == 0
 
 

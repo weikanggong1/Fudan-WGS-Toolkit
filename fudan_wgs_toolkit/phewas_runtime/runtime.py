@@ -1356,16 +1356,18 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                         if model.family == 'binomial':
                                             from ..binary import prepare_binary_burdens, staar_binary_phewas
                                             if burdens is None:
-                                                burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
-                                                    prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,
-                                                    rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
-                                            value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
-                                                prepared['annotations'], prepared['names'],
-                                                spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
-                                                prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
-                                                rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
-                                                p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
-                                                max_iter=options.spa_max_iter, return_diagnostics=True)
+                                                with p.profiler.measure('gene_binary_shared_burdens', gpu=True):
+                                                    burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
+                                                        prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,
+                                                        rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
+                                            with p.profiler.measure('gene_binary_nominal_and_spa', gpu=True):
+                                                value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
+                                                    prepared['annotations'], prepared['names'],
+                                                    spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
+                                                    prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
+                                                    rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
+                                                    p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
+                                                    max_iter=options.spa_max_iter, return_diagnostics=True)
                                             selected = int(diagnostic['spa_selected'].sum())
                                             failed = int(diagnostic['spa'].failed.sum())
                                             report['binary_spa_selected'] += selected
@@ -1460,9 +1462,10 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                     result = ({category: rows[number] for category, rows in outputs.items()}
                               if isinstance(outputs, dict) else outputs[number])
                     values.append((descriptor['trait_index'], result))
-                writer.write_tile(kind, chromosome, values, job_index=job_index,
-                    binary_counts={name: sum(binary_counts[d['trait_index']][name] for d in tile)
-                                   for name in ('selected', 'failed')})
+                with selector.profiler.measure('gene_checkpoint_write'):
+                    writer.write_tile(kind, chromosome, values, job_index=job_index,
+                        binary_counts={name: sum(binary_counts[d['trait_index']][name] for d in tile)
+                                       for name in ('selected', 'failed')})
 
 
 def run_batched_configuration(configuration, *, model_repository, reader_factory, writer,

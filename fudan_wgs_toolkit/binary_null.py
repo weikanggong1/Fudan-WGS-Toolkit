@@ -505,7 +505,7 @@ class ImmutableFittedBinarySource:
     this ownership contract, as it bypasses Torch's own version mechanism.
     """
     __slots__ = ("_ids", "_tensors", "_stamps", "_binding", "_method",
-                 "_has_kinship", "_iterations", "_provenance", "_sealed")
+                 "_has_kinship", "_iterations", "_provenance", "_sealed", "__weakref__")
 
     def __setattr__(self, name, value):
         if getattr(self, "_sealed", False):

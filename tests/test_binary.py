@@ -4,13 +4,15 @@ import torch
 from fudan_wgs_toolkit.binary import binary_spa, individual_score_test_spa
 
 
-def test_spa_degenerate_projection_explicitly_reports_original_failure_policy():
+def test_spa_degenerate_projection_explicitly_reports_failure_policy_without_root_search():
     genotype = torch.zeros((4, 2), dtype=torch.float64)
     probability = torch.full((4,), .1, dtype=torch.float64)
     with pytest.warns(RuntimeWarning, match="returned p=1"):
         result = binary_spa(torch.zeros(2), genotype, probability)
     assert result.failed.all()
-    assert result.used_bisection.all()
+    assert not result.used_bisection.any()
+    assert not result.iterations.any()
+    assert not result.converged.any()
     torch.testing.assert_close(result.pvalues, torch.ones(2, dtype=torch.float64))
 
 

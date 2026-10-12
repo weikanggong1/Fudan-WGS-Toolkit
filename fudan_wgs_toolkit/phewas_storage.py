@@ -410,6 +410,11 @@ class ModelRepository:
         # X remains deduplicated while any live model/source owns it. The memo
         # itself never pins a tensor after its last fitted state is retired.
         self.models, self.pinned = OrderedDict(), {}
+        # Derived normals participate in the same physical-storage LRU as
+        # stored normals and FP64 sources. Guards retain only scalar stamps
+        # and a weak source reference, never otherwise unaccounted FP64 data.
+        self._derived_normal_guards = {}
+        self.binary_normal_derivations = self.binary_normal_cache_hits = 0
         self.tensor_cache = weakref.WeakValueDictionary()
         self.spa_sources, self.spa_pinned = OrderedDict(), {}
         self.spa_source_loads = self.spa_source_hits = 0
@@ -487,6 +492,7 @@ class ModelRepository:
                 or self._workspace_reservations or self._memory_policies):
             raise RuntimeError('cannot close fitted-state bank with active model/workspace contexts')
         self.models.clear()
+        self._derived_normal_guards.clear()
         self.spa_sources.clear()
         self.tensor_cache.clear()
         self._sample_axes.clear()
@@ -620,6 +626,8 @@ class ModelRepository:
         namespace, index, device = token
         bank = self.models if namespace == 'normal' else self.spa_sources
         bank.pop((index, device), None)
+        if namespace == 'normal':
+            self._derived_normal_guards.pop((index, device), None)
         self._cache_lru.pop(token, None)
         for storage in self._entry_storages.pop(token, {}):
             owners = self._storage_owners[storage]
@@ -805,22 +813,102 @@ class ModelRepository:
                 self._retire_entry(token)
                 return True
         return False
+    @staticmethod
+    def _normal_fitted_stamp(model):
+        """Constant-size mutation/identity guard; lazy projection caches are separate."""
+        from .binary_null import ImmutableFittedBinarySource
+        fields = ('x', 'scaled_residuals', 'fitted_probability', 'xw',
+                  'projection_left', 'fixed_effect_covariance', 'precision',
+                  'precision_x', 'coefficients', 'phenotype', 'working_phenotype')
+        tensors = tuple(ImmutableFittedBinarySource._stamp(getattr(model, name, None))
+                        for name in fields)
+        ids = model.sample_ids
+        if not isinstance(ids, np.ndarray) or ids.flags.writeable:
+            raise ValueError('derived binary normal sample identities must remain immutable')
+        axis = (id(ids), ids.shape, ids.dtype.str, ids.strides,
+                ids.__array_interface__['data'][0], ids.flags.writeable)
+        metadata = tuple(getattr(model, name, None) for name in (
+            'family', 'n_pheno', 'use_spa', 'matmul_mode', 'has_kinship',
+            'null_fit_source_sha256', 'source_matmul_mode', 'iterations',
+            'converged', 'fit_method'))
+        return tensors, axis, metadata
+
+    @staticmethod
+    def _binary_source_stamp(source):
+        current = tuple(source._stamp(value) for value in source._tensors)
+        if current != source._stamps:
+            raise ValueError('immutable binary fitted source was mutated')
+        return current
+
+    def _bind_derived_normal(self, key, model, source):
+        binding = source.null_fit_source_sha256
+        if (not isinstance(binding, str) or len(binding) != 64
+                or any(ch not in '0123456789abcdef' for ch in binding)
+                or getattr(model, 'null_fit_source_sha256', None) != binding):
+            raise ValueError('derived binary normal differs from its authenticated fitted source')
+        self._derived_normal_guards[key] = dict(
+            fitted_source_sha256=binding, source=weakref.ref(source),
+            source_stamp=self._binary_source_stamp(source),
+            normal_stamp=self._normal_fitted_stamp(model))
+
+    def _validate_derived_normal(self, key, model):
+        guard = self._derived_normal_guards.get(key)
+        if guard is None or self._normal_fitted_stamp(model) != guard['normal_stamp']:
+            raise ValueError('cached derived binary normal fitted state was mutated')
+        source = guard['source']()
+        if source is not None:
+            if (source.null_fit_source_sha256 != guard['fitted_source_sha256']
+                    or self._binary_source_stamp(source) != guard['source_stamp']):
+                raise ValueError('cached binary normal source identity changed')
+        current = self.spa_sources.get(key)
+        if current is not None and current is not source:
+            self._validate_binary_source_binding(key, current)
+
+    def _validate_binary_source_binding(self, key, source):
+        guard = self._derived_normal_guards.get(key)
+        if guard is not None:
+            if source.null_fit_source_sha256 != guard['fitted_source_sha256']:
+                raise ValueError('binary normal and SPA fitted-source bindings differ')
+            self._binary_source_stamp(source)
+
     @contextmanager
     def acquire(self, indices, device):
-        from contextlib import ExitStack
         self._check_open()
         keys, models = [], []
-        contexts = ExitStack()
         try:
             for i in indices:
                 family = self._descriptor(i)['family']
-                if family == 'binomial' and self.binary_normal_cache == 'derived_fp64':
-                    source = contexts.enter_context(self._acquire_binary_source(int(i), device))
-                    self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source),
-                                phase='binary_normal_derivation')
-                    models.append(source.normal())
-                    continue
                 key = (int(i), str(device))
+                if family == 'binomial' and self.binary_normal_cache == 'derived_fp64':
+                    if key not in self.models:
+                        with self._acquire_binary_source(int(i), device) as source:
+                            self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source),
+                                        phase='binary_normal_derivation')
+                            normal = source.normal()
+                            self._bind_derived_normal(key, normal, source)
+                            self.models[key] = normal
+                            self.loads += 1
+                            self.binary_normal_derivations += 1
+                            self.pinned[key] = self.pinned.get(key, 0)+1
+                            keys.append(key)
+                            self._touch_entry('normal', key)
+                            self._trim_cache(device)
+                        # A normal tile owns its FP32 storage. Keeping its
+                        # FP64 source pinned until the whole tile completes
+                        # needlessly prevents the shared LRU from freeing it.
+                        del source
+                    else:
+                        self._validate_derived_normal(key, self.models[key])
+                        self.pinned[key] = self.pinned.get(key, 0)+1
+                        keys.append(key)
+                        self._admit(device, phase='binary_normal_cache_hit',
+                                    protect=(('normal', *key),))
+                        self.hits += 1
+                        self.binary_normal_cache_hits += 1
+                        self._touch_entry('normal', key)
+                    self.models.move_to_end(key)
+                    models.append(self.models[key])
+                    continue
                 if key not in self.models:
                     if torch.device(device).type == 'cuda':
                         path = Path(self.entries[i]['path'])/'normal'
@@ -859,22 +947,20 @@ class ModelRepository:
                 models.append(self.models[key])
             yield models
         finally:
-            try:
-                contexts.close()
-            finally:
-                # Release every pin before bookkeeping so an exceptional
-                # nested SPA context cannot leave unrelated normal pins live.
-                for key in keys:
-                    self.pinned[key] -= 1
-                for key in keys:
-                    self._refresh_entry('normal', key)
-                self._trim_cache(device)
+            # Release every pin before bookkeeping so an exceptional nested
+            # SPA or cache admission cannot leave unrelated normal pins live.
+            for key in keys:
+                self.pinned[key] -= 1
+            for key in keys:
+                self._refresh_entry('normal', key)
+            self._trim_cache(device)
     @contextmanager
     def _acquire_binary_source(self, index, device):
         self._check_open()
         if not self._descriptor(index)['spa_available']:
             raise ValueError('binary SPA sidecar is missing')
         key = (int(index), str(device))
+        loaded = False
         if key not in self.spa_sources:
             meta = json.loads((Path(self.entries[index]['path'])/'spa'/'state.private.json').read_text())
             estimated = _binary_source_peak_bytes(meta)
@@ -884,10 +970,19 @@ class ModelRepository:
             self.spa_sources[key] = self._load_with_file_descriptor_admission(device, lambda:
                 ImmutableFittedBinarySource(**load_spa_source(self.entries[index]['path'],
                     device=device, tensor_cache=self.tensor_cache)))
+            loaded = True
             self.spa_source_loads += 1
         else:
             self.spa_source_hits += 1
             self._admit(device, phase='binary_fitted_source_hit', protect=(('spa', *key),))
+        try:
+            self._validate_binary_source_binding(key, self.spa_sources[key])
+        except BaseException:
+            if loaded:
+                # Validation happens before pin/admission into the ledger;
+                # rejected reloads must not retain unaccounted FP64 storage.
+                self.spa_sources.pop(key, None)
+            raise
         self.spa_sources.move_to_end(key)
         self.spa_pinned[key] = self.spa_pinned.get(key, 0)+1
         try:
@@ -966,6 +1061,9 @@ class ModelRepository:
                     resident_spa_sources=len(self.spa_sources), spa_projection_reconstructed_on_gpu=True,
                     binary_normal_from_same_fp64_source=self.binary_normal_cache == 'derived_fp64',
                     binary_normal_cache_policy=self.binary_normal_cache,
+                    binary_normal_derivations=self.binary_normal_derivations,
+                    binary_normal_cache_hits=self.binary_normal_cache_hits,
+                    resident_derived_binary_normals=len(self._derived_normal_guards),
                     binary_normal_state_provenance=('derived_from_authenticated_fp64_source'
                         if self.binary_normal_cache == 'derived_fp64' else 'authenticated_stored_native'),
                     binary_spa_state_provenance='authenticated_original_fp64_source',

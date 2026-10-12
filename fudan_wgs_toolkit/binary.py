@@ -2,7 +2,7 @@
 
 SPDX-License-Identifier: GPL-3.0-only
 Algorithm attribution is recorded in NOTICE.md.
-Retains alternate cumulant formulas and failure diagnostics."""
+Uses stable equivalent Bernoulli cumulants and explicit failure diagnostics."""
 from __future__ import annotations
 from dataclasses import dataclass
 import math
@@ -16,90 +16,170 @@ from .precision_audit import explicit_binary_spa_fp64
 
 @dataclass
 class SPAResult:
-    """Device-resident p values, branch flags and Newton iteration counts."""
+    """Device-resident probabilities and actual solver/support diagnostics."""
     pvalues: torch.Tensor
     used_bisection: torch.Tensor
     failed: torch.Tensor
     iterations: torch.Tensor
     iteration_limit: torch.Tensor
+    converged: torch.Tensor | None = None
+    root_residual: torch.Tensor | None = None
+    support_boundary: torch.Tensor | None = None
+    outside_support: torch.Tensor | None = None
+    bracket_iterations: torch.Tensor | None = None
+
+
+@dataclass
+class _SPARootResult:
+    root: torch.Tensor
+    converged: torch.Tensor
+    residual: torch.Tensor
+    iterations: torch.Tensor
+    used_bisection: torch.Tensor
+    iteration_limit: torch.Tensor
+    bracket_iterations: torch.Tensor
+
+
+def _unassessed_spa_result(pvalues):
+    false = torch.zeros_like(pvalues, dtype=torch.bool)
+    counts = torch.zeros_like(pvalues, dtype=torch.int64)
+    return SPAResult(pvalues, false.clone(), false.clone(), counts.clone(), false.clone(),
+        false.clone(), torch.full_like(pvalues, float('nan')), false.clone(), false.clone(), counts.clone())
+
+
+def _copy_spa_result(target, index, source):
+    for name in ('used_bisection', 'failed', 'iterations', 'iteration_limit', 'converged',
+                 'root_residual', 'support_boundary', 'outside_support', 'bracket_iterations'):
+        getattr(target, name)[index] = getattr(source, name)
+
+
+def _score_support(mu, g):
+    """Exact extrema of sum(g*(Bernoulli(mu)-mu)), including signed g."""
+    lower = torch.where(g > 0, -mu*g, (1-mu)*g).sum(0)
+    upper = torch.where(g > 0, (1-mu)*g, -mu*g).sum(0)
+    return lower, upper
 
 
 def _cumulant(x, mu, g, *, alternate=False):
     z = g * x[None, :]
-    if alternate:
-        # Preserve the author's alternate expression, including its centering.
-        return torch.log((1 - mu) * torch.exp(-z) + mu).sum(0)
-    return (-z * mu + torch.log(1 - mu + mu * torch.exp(z))).sum(0)
+    # Both official forms are the same centered CGF. Factor the larger
+    # exponential before logaddexp; do not lose the alternate linear term.
+    log_mu, log_control = torch.log(mu), torch.log1p(-mu)
+    positive = ((1-mu)*z + torch.logaddexp(log_mu, log_control-z))
+    negative = (-mu*z + torch.logaddexp(log_control, log_mu+z))
+    ordinary = torch.where(z >= 0, positive, negative)
+    # Preserve K(0)=0 and its quadratic leading term without subtracting two
+    # nearly identical logs. expm1 only sees a bounded argument.
+    small_z = z.clamp(-.5, .5)
+    nearby = torch.log1p(mu*torch.expm1(small_z)) - mu*small_z
+    return torch.where(z.abs() <= .5, nearby, ordinary).sum(0)
 
 
-def _first(x, mu, g, q, *, alternate=False):
-    if alternate:
-        e = torch.exp(g * x[None, :])
-        return (-mu * g + mu * g * e / (mu * e + 1 - mu)).sum(0) - q
-    e = torch.exp(-g * x[None, :])
-    return (-mu * g + mu * g / (mu + (1 - mu) * e)).sum(0) - q
-
-
-def _second(x, mu, g, *, alternate=False):
-    if alternate:
-        e = torch.exp(g * x[None, :])
-        # This is the frozen author's expression, without adding exp(z).
-        return (mu * (1 - mu) * g.square() / (mu * e + 1 - mu).square()).sum(0)
-    e = torch.exp(-g * x[None, :])
-    return (mu * (1 - mu) * g.square() * e / (mu + (1 - mu) * e).square()).sum(0)
-
-
-def _first_finite(x, mu, g, q):
-    value = _first(x, mu, g, q)
-    bad = ~torch.isfinite(value)
-    if bool(bad.any()):
-        value = torch.where(bad, _first(x, mu, g, q, alternate=True), value)
-    return value
-
-
-def _second_finite(x, mu, g):
-    value = _second(x, mu, g)
-    bad = ~torch.isfinite(value)
-    if bool(bad.any()):
-        value = torch.where(bad, _second(x, mu, g, alternate=True), value)
-    return value
-
-
-def _newton_derivatives(x, mu, g, q):
-    """Share the FP64 exponential without changing either reduction formula."""
-    e = torch.exp(-g * x[None, :])
-    first = (-mu * g + mu * g / (mu + (1 - mu) * e)).sum(0) - q
-    second = (mu * (1 - mu) * g.square() * e / (mu + (1 - mu) * e).square()).sum(0)
+def _derivatives_from_log_odds(x, mu, g, q, log_odds):
+    tilted = log_odds + g*x[None, :]
+    probability = torch.sigmoid(tilted)
+    # sigmoid(-a) retains the tiny control probability when sigmoid(a)
+    # rounds to one. Their product is the stable official K'' expression,
+    # including the exp(z) numerator missing from the old alternate port.
+    variance = probability*torch.sigmoid(-tilted)
+    first = ((probability-mu)*g).sum(0) - q
+    second = (variance*g.square()).sum(0)
     return first, second
 
 
-def _newton(mu, g, q, tol, max_iter):
-    current = torch.zeros_like(q)
-    first, second = _newton_derivatives(current, mu, g, q)
-    update = torch.where(first.abs() > tol, current - first / second, current)
+def _first(x, mu, g, q, *, alternate=False):
+    return _newton_derivatives(x, mu, g, q)[0]
+
+
+def _second(x, mu, g, *, alternate=False):
+    return _newton_derivatives(x, mu, g, torch.zeros_like(x))[1]
+
+
+def _first_finite(x, mu, g, q):
+    return _first(x, mu, g, q)
+
+
+def _second_finite(x, mu, g):
+    return _second(x, mu, g)
+
+
+def _newton_derivatives(x, mu, g, q):
+    """Stable shared tilted-Bernoulli derivatives, all on the input device."""
+    return _derivatives_from_log_odds(x, mu, g, q, torch.log(mu)-torch.log1p(-mu))
+
+
+def _safeguarded_root(mu, g, q, tol, max_iter, *, newton=True):
+    """Bracket the monotone K' and evaluate only still-active columns.
+
+    Residuals certify convergence; a small/NaN Newton step does not. A single
+    active-index extraction per round supplies the termination check and
+    compacts all subsequent sample operations on device. Fixed +/-100 bounds
+    and the non-monotone golden-section search are unnecessary.
+    """
+    zero = torch.zeros_like(q)
+    flags = torch.zeros_like(q, dtype=torch.bool)
     counts = torch.zeros_like(q, dtype=torch.int64)
-    while True:
-        first, second = _newton_derivatives(update, mu, g, q)
-        active = (torch.isfinite(update) & ((update-current).abs() > tol)
-                  & (first.abs() > tol) & (counts < max_iter))
-        if not bool(active.any()):
+    result = _SPARootResult(zero.clone(), flags.clone(), torch.full_like(q, float('inf')),
+        counts.clone(), flags.clone(), flags.clone(), counts.clone())
+    log_odds = torch.log(mu)-torch.log1p(-mu)
+    variance = (mu*(1-mu)*g.square()).sum(0)
+    lower, upper = _score_support(mu, g)
+    valid = (variance > 0) & torch.isfinite(variance) & (q > lower) & (q < upper)
+    centered = valid & (q == 0)
+    result.converged[centered] = True
+    result.residual[centered] = 0
+    # An accuracy target scaled to the statistic, independent of burden units.
+    residual_tol = min(tol, 1e-10)*torch.maximum(variance.sqrt(), q.abs())
+    step = (q/variance).abs().clamp(min=1e-3, max=8.)
+    end = torch.where(q > 0, step, -step)
+    pending = valid & ~centered
+    bracketed = flags.clone()
+    for _ in range(128):
+        index = torch.nonzero(pending, as_tuple=True)[0]
+        if not len(index):
             break
-        counts = counts + active.to(torch.int64)
-        current = torch.where(active, update, current)
-        # Active current columns equal the update used above. Reuse their
-        # first derivative and curvature, preserving the original alternate
-        # formulas independently for each nonfinite derivative. Values on
-        # inactive columns are discarded by the same update mask below.
-        first_bad = active & ~torch.isfinite(first)
-        second_bad = active & ~torch.isfinite(second)
-        if bool((first_bad | second_bad).any()):
-            first = torch.where(first_bad, _first(current, mu, g, q, alternate=True), first)
-            second = torch.where(second_bad, _second(current, mu, g, alternate=True), second)
-        candidate = current - first / second
-        update = torch.where(active, candidate, update)
-    # The original max-iteration guard evaluates its w at xhat=0, yielding
-    # an undefined normal statistic; it leaves the last iterate unchanged.
-    return torch.where(torch.isfinite(update), update, current), counts
+        first, _ = _derivatives_from_log_odds(end[index], mu, g[:, index], q[index], log_odds)
+        result.bracket_iterations[index] += 1
+        found = torch.isfinite(first) & torch.where(q[index] > 0, first >= 0, first <= 0)
+        bracketed[index] = found
+        pending[index] = ~found
+        end[index] = torch.where(found, end[index], end[index]*2)
+    lo, hi = torch.minimum(end, zero), torch.maximum(end, zero)
+    current = q/variance
+    ordinary = torch.isfinite(current) & (current > lo) & (current < hi)
+    current = torch.where(ordinary, current, lo+(hi-lo)/2)
+    result.used_bisection = bracketed & ~ordinary
+    active = bracketed.clone()
+    for _ in range(max_iter):
+        index = torch.nonzero(active, as_tuple=True)[0]
+        if not len(index):
+            break
+        first, curvature = _derivatives_from_log_odds(
+            current[index], mu, g[:, index], q[index], log_odds)
+        result.iterations[index] += 1
+        result.root[index] = current[index]
+        result.residual[index] = first.abs()
+        done = torch.isfinite(first) & (first.abs() <= residual_tol[index])
+        result.converged[index] = done
+        lo[index] = torch.where(first < 0, current[index], lo[index])
+        hi[index] = torch.where(first >= 0, current[index], hi[index])
+        candidate = current[index]-first/curvature if newton else torch.full_like(first, float('nan'))
+        take_newton = (torch.isfinite(candidate) & (curvature > 0)
+                       & (candidate > lo[index]) & (candidate < hi[index]))
+        midpoint = lo[index]+(hi[index]-lo[index])/2
+        update = torch.where(take_newton, candidate, midpoint)
+        result.used_bisection[index] |= ~take_newton & ~done
+        # Floating point stagnation is a failure unless the residual passed.
+        continues = ~done & torch.isfinite(first) & (update != current[index])
+        active[index] = continues
+        current[index] = update
+    result.iteration_limit = active
+    return result
+
+
+def _newton(mu, g, q, tol, max_iter):
+    state = _safeguarded_root(mu, g, q, tol, max_iter)
+    return state.root, state.iterations
 
 
 def _same_sign(a, b):
@@ -107,63 +187,40 @@ def _same_sign(a, b):
 
 
 def _bisection(mu, g, q, tol, max_iter):
-    a, b = torch.full_like(q, -100.), torch.full_like(q, 100.)
-    left, right = a.clone(), b.clone()
-    fl, fr = _first_finite(left, mu, g, q), _first_finite(right, mu, g, q)
-    phi = (1 + math.sqrt(5)) / 2
-    for _ in range(max_iter):
-        active = ((right-left).abs() > tol) & _same_sign(fl, fr)
-        if not bool(active.any()):
-            break
-        right = torch.where(active, b - (b-a)/phi, right)
-        left = torch.where(active, a + (b-a)/phi, left)
-        fl, fr = _first_finite(left, mu, g, q), _first_finite(right, mu, g, q)
-        b = torch.where(active & (fr < fl), left, b)
-        a = torch.where(active & ~(fr < fl), right, a)
-    lo, hi = torch.minimum(left, right), torch.maximum(left, right)
-    fl, fr = _first_finite(lo, mu, g, q), _first_finite(hi, mu, g, q)
-    valid = torch.isfinite(fl) & torch.isfinite(fr) & ~_same_sign(fl, fr)
-    root, derivative = torch.zeros_like(q), torch.ones_like(q)
-    # Width 200 / tolerance guarantees fewer than 1075 iterations even at
-    # double precision's smallest positive tolerance.
-    for _ in range(2048):
-        active = valid & ((hi-lo).abs() > tol) & (derivative.abs() > tol)
-        if not bool(active.any()):
-            return root
-        root = torch.where(active, (hi+lo)/2, root)
-        derivative = _first_finite(root, mu, g, q)
-        same = _same_sign(fl, derivative)
-        lo = torch.where(active & same, root, lo)
-        hi = torch.where(active & ~same, root, hi)
-        fl = _first_finite(lo, mu, g, q)
-    raise ArithmeticError("binary SPA bisection did not converge")
+    state = _safeguarded_root(mu, g, q, tol, max_iter, newton=False)
+    return torch.where(state.converged, state.root, float('nan'))
 
 
 def _tail(root, mu, g, q, *, lower):
-    w = torch.sqrt(2 * (root*q - _cumulant(root, mu, g)))
-    bad = ~torch.isfinite(w)
-    if bool(bad.any()):
-        alternate = torch.sqrt(2 * (root*q - _cumulant(root, mu, g, alternate=True)))
-        w = torch.where(bad, alternate, w)
-    w = torch.where(root < 0, -w, w)
-    ki = root * torch.sqrt(_second(root, mu, g))
-    bad = ~torch.isfinite(ki)
-    if bool(bad.any()):
-        ki = torch.where(bad, root*torch.sqrt(_second(root, mu, g, alternate=True)), ki)
-    z = w + torch.log(ki/w)/w
+    cumulant = _cumulant(root, mu, g)
+    action = root*q-cumulant
+    roundoff = 32*torch.finfo(g.dtype).eps*(1+(root*q).abs()+cumulant.abs())
+    action = torch.where((action < 0) & (action >= -roundoff), 0., action)
+    w = torch.sign(root)*torch.sqrt(2*action)
+    curvature = _second(root, mu, g)
+    log_ratio = torch.log(root.abs())+.5*torch.log(curvature)-torch.log(w.abs())
+    z = w+log_ratio/w
     probability = 0.5 * torch.erfc((-z if lower else z) / math.sqrt(2))
-    return torch.where(root.abs() < 1e-4, 1., probability)
+    variance = (mu*(1-mu)*g.square()).sum(0)
+    standardized = q/variance.sqrt()
+    central = standardized.abs() < 1e-4
+    normal = .5*torch.erfc((-standardized if lower else standardized)/math.sqrt(2))
+    return torch.where(central & (variance > 0), normal, probability)
 
 
 def binary_spa(score, projected_genotype, fitted_probability, *, tol=2**-13,
                max_iter=1000, warn_failures=True) -> SPAResult:
-    """Original two-sided SPA for U and residualized genotype columns.
+    """Stable two-sided SPA for U and residualized genotype columns.
 
     ``projected_genotype`` is G-XXWX_inv@(XW@G), shape [n,p]; fitted
     probabilities have shape [n]. The null state must come from the same
     samples and design. Every numeric operation retains the input device.
-    The frozen package uses Newton, then golden-section/bisection on failure.
-    Its failure p=1 is reported by ``failed`` and an optional warning.
+    Centered Bernoulli cumulants and the original modified-normal tail formula
+    are evaluated in FP64. Bracketed Newton only reports residual-certified
+    roots. Reflected tails outside support are zero; support endpoints use
+    their exact discrete mass, a boundary extension to the continuous SPA.
+    A zero score with positive variance is valid p=1. Genuine failures retain
+    p=1, ``failed`` and an optional warning, without using P itself as a flag.
     """
     g = _double(projected_genotype)
     u, mu = _double(score, device=g.device), _double(fitted_probability, device=g.device)
@@ -173,30 +230,65 @@ def binary_spa(score, projected_genotype, fitted_probability, *, tol=2**-13,
         _finite(value,name)
     if bool(((mu <= 0) | (mu >= 1)).any()):
         raise ValueError("fitted probabilities must lie strictly between zero and one")
-    if not math.isfinite(tol) or tol <= 0 or not isinstance(max_iter,int) or max_iter < 1:
+    if not math.isfinite(tol) or tol <= 0 or type(max_iter) is not int or max_iter < 1:
         raise ValueError("tol must be positive and max_iter a positive integer")
+    # t*G and t*q are invariant under a common positive column rescaling.
+    # Avoid dependence on annotation/burden units and roots beyond +/-100.
+    scale = torch.maximum(g.amax(0).abs(), g.amin(0).abs())
+    scale = torch.where(scale > 0, scale, 1.)
+    g, u = g/scale, u/scale
     mu = mu[:,None]
+    lower_bound, upper_bound = _score_support(mu, g)
+    support_tol = 16*torch.finfo(g.dtype).eps*g.abs().sum(0)
+    variance = (mu*(1-mu)*g.square()).sum(0)
+    outside = (u < lower_bound-support_tol) | (u > upper_bound+support_tol)
+    valid = (variance > 0) & torch.isfinite(variance) & ~outside
     used = torch.zeros_like(u,dtype=torch.bool)
     iteration_limit = torch.zeros_like(used)
+    converged = valid.clone()
+    boundary = torch.zeros_like(used)
+    residual = torch.where(valid, torch.zeros_like(u), float('nan'))
+    bracket_counts = torch.zeros_like(u,dtype=torch.int64)
     tails, counts = [], torch.zeros_like(u,dtype=torch.int64)
     for lower, q in ((False,u.abs()),(True,-u.abs())):
-        root, iterations = _newton(mu,g,q,tol,max_iter)
-        counts += iterations
-        iteration_limit |= iterations >= max_iter
-        value = _tail(root,mu,g,q,lower=lower)
-        retry = ~torch.isfinite(value) | (value == 1)
-        if bool(retry.any()):
-            alternate = _bisection(mu,g[:,retry],q[retry],tol,max_iter)
-            value[retry] = _tail(alternate,mu,g[:,retry],q[retry],lower=lower)
-            used |= retry
+        bound = lower_bound if lower else upper_bound
+        endpoint = valid & ((q-bound).abs() <= support_tol)
+        exterior = valid & ((q < bound-support_tol) if lower else (q > bound+support_tol))
+        central = valid & (q == 0)
+        value = torch.zeros_like(u)
+        value[central] = .5
+        # Enumerating only the extremal configuration is exact and avoids
+        # the endpoint's infinite saddlepoint. Zero coefficients impose no Y.
+        index = torch.nonzero(endpoint, as_tuple=True)[0]
+        if len(index):
+            columns = g[:,index]
+            cases = (columns < 0) if lower else (columns > 0)
+            log_mass = torch.where(columns == 0, 0.,
+                torch.where(cases, torch.log(mu), torch.log1p(-mu))).sum(0)
+            value[index] = log_mass.exp()
+        boundary |= endpoint
+        ordinary = valid & ~endpoint & ~exterior & ~central
+        index = torch.nonzero(ordinary, as_tuple=True)[0]
+        if len(index):
+            state = _safeguarded_root(mu,g[:,index],q[index],tol,max_iter)
+            probability = _tail(state.root,mu,g[:,index],q[index],lower=lower)
+            tail_ok = state.converged & torch.isfinite(probability) & (probability >= 0) & (probability <= 1)
+            value[index] = probability
+            converged[index] &= tail_ok
+            used[index] |= state.used_bisection
+            counts[index] += state.iterations
+            iteration_limit[index] |= state.iteration_limit
+            residual[index] = torch.maximum(residual[index],state.residual)
+            bracket_counts[index] += state.bracket_iterations
         tails.append(value)
-    failed = ~torch.isfinite(tails[0]) | (tails[0]==1) | ~torch.isfinite(tails[1]) | (tails[1]==1)
+    failed = ~converged
     result = torch.where(failed, 1., torch.clamp(tails[0]+tails[1],max=1.))
     if warn_failures and bool(failed.any()):
-        warnings.warn(f"original binary SPA failed for {int(failed.sum())} tests; returned p=1",RuntimeWarning,stacklevel=2)
+        warnings.warn(f"binary SPA failed for {int(failed.sum())} tests; returned p=1",RuntimeWarning,stacklevel=2)
     if warn_failures and bool(iteration_limit.any()):
-        warnings.warn(f"original binary SPA reached the Newton iteration limit for {int(iteration_limit.sum())} tests",RuntimeWarning,stacklevel=2)
-    return SPAResult(result,used,failed,counts,iteration_limit)
+        warnings.warn(f"binary SPA reached the solver iteration limit for {int(iteration_limit.sum())} tests",RuntimeWarning,stacklevel=2)
+    return SPAResult(result,used,failed,counts,iteration_limit,converged,residual,boundary,
+                     outside,bracket_counts)
 
 
 def individual_score_test_spa(genotype, residual, fitted_probability, xw,
@@ -224,17 +316,14 @@ def individual_score_test_spa(genotype, residual, fitted_probability, xw,
         if p.shape != mask.shape or not bool(torch.isfinite(p).all()) or bool(((p<0)|(p>1)).any()) or not 0 < p_filter_cutoff <= 1:
             raise ValueError("normal_pvalues must be valid p values; cutoff must lie in (0,1]")
         mask = p < p_filter_cutoff
-    used, failed = torch.zeros_like(mask), torch.zeros_like(mask)
-    limit = torch.zeros_like(mask)
-    counts = torch.zeros_like(mask,dtype=torch.int64)
+    diagnostics = _unassessed_spa_result(p)
     if bool(mask.any()):
         columns = g[:,mask]
         score = columns.T@r if _score is None else _double(_score,device=g.device)[mask]
         state = binary_spa(score,columns-left@(xw@columns),fitted_probability,tol=tol,max_iter=max_iter)
-        p[mask],used[mask],failed[mask],counts[mask] = state.pvalues,state.used_bisection,state.failed,state.iterations
-        limit[mask] = state.iteration_limit
-    state = SPAResult(p,used,failed,counts,limit)
-    return state if return_diagnostics else p
+        p[mask] = state.pvalues
+        _copy_spa_result(diagnostics,mask,state)
+    return diagnostics if return_diagnostics else p
 
 
 def _spa_combination(values):
@@ -518,8 +607,7 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
     nominal = _chi1_from_score(score, variance)
     pvalues = nominal.clone()
     choose = nominal < p_filter_cutoff if use_spa else torch.zeros_like(nominal, dtype=torch.bool)
-    flags = SPAResult(pvalues, torch.zeros_like(choose), torch.zeros_like(choose),
-                      torch.zeros_like(choose, dtype=torch.int64), torch.zeros_like(choose))
+    flags = _unassessed_spa_result(pvalues)
     with _spa_context(model, spa_model, spa_acquire, choose) as spa_model:
         if bool(choose.any()):
             index = torch.nonzero(choose, as_tuple=True)[0]
@@ -540,10 +628,7 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
             corrected = binary_spa(exact_scores, projected, spa_model.fitted_probability,
                                    tol=tol, max_iter=max_iter)
             pvalues[index] = corrected.pvalues
-            flags.used_bisection[index] = corrected.used_bisection
-            flags.failed[index] = corrected.failed
-            flags.iterations[index] = corrected.iterations
-            flags.iteration_limit[index] = corrected.iteration_limit
+            _copy_spa_result(flags,index,corrected)
             del exact_weights, exact_burdens, projected
     result = dict(num_variant=count, cMAC=prepared.cmac)
     width = k + 1
@@ -614,8 +699,7 @@ def binary_single_phewas(model, genotype, *, spa_model=None, spa_acquire=None,
     values = nominal.clone()
     corrected_log10 = normal_log10.clone()
     selected = nominal < p_filter_cutoff if use_spa else torch.zeros_like(nominal, dtype=torch.bool)
-    flags = SPAResult(values, torch.zeros_like(selected), torch.zeros_like(selected),
-        torch.zeros_like(selected, dtype=torch.int64), torch.zeros_like(selected))
+    flags = _unassessed_spa_result(values)
     zero_unverified = torch.zeros_like(selected)
     with _spa_context(model, spa_model, spa_acquire, selected) as spa_model:
         indices = torch.nonzero(selected, as_tuple=True)[0].cpu().numpy()
@@ -631,10 +715,7 @@ def binary_single_phewas(model, genotype, *, spa_model=None, spa_acquire=None,
             values[target] = state.pvalues
             corrected_log10[target] = -torch.log10(state.pvalues)
             zero_unverified[target] = state.pvalues == 0
-            flags.used_bisection[target] = state.used_bisection
-            flags.failed[target] = state.failed
-            flags.iterations[target] = state.iterations
-            flags.iteration_limit[target] = state.iteration_limit
+            _copy_spa_result(flags,target,state)
     return dict(score=score, variance=variance, normal_pvalues=nominal,
         normal_pvalue_log10=normal_log10, pvalues=values,
         pvalue_log10=corrected_log10, pvalue_log=corrected_log10*math.log(10.),
