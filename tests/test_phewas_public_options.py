@@ -368,7 +368,7 @@ def test_unified_and_phewas_cli_forward_shared_host_budget(monkeypatch,tmp_path,
     def unified(**options):
         calls.append(options)
         return {'completed':True}
-    monkeypatch.setattr(public,'run_WGS_all',unified)
+    monkeypatch.setattr(public,'run_WGS_all_binanry',unified)
     public.main(['phenotypes.csv','covariates.csv','prepared','--output-directory','output',
                  '--host-memory-limit-gib','64'])
     assert calls[-1]['host_memory_limit_gib']==64

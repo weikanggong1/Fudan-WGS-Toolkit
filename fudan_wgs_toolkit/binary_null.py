@@ -7,6 +7,9 @@ it never replaces that GRM with an ordinary model implicitly.
 """
 from __future__ import annotations
 from dataclasses import dataclass
+import hashlib
+import threading
+import weakref
 import numpy as np
 import torch
 from .statistics import score_covariance
@@ -461,6 +464,28 @@ def compact_binary_normal_from_fitted_arrays(*, sample_ids, covariates, residual
     return model
 
 
+# Weak ownership retains an axis only while admitted sources or derived models
+# actually use it. Equal cohorts avoid one anonymous ID bytes copy per trait.
+_IMMUTABLE_BINARY_ID_AXES = weakref.WeakValueDictionary()
+_IMMUTABLE_BINARY_ID_AXES_LOCK = threading.Lock()
+
+
+def _intern_immutable_binary_sample_ids(ids):
+    """Reuse validated ordered IDs without owning their lifetime or fitted state."""
+    contiguous = np.ascontiguousarray(ids)
+    key = (contiguous.dtype.str, contiguous.shape,
+           hashlib.sha256(memoryview(contiguous).cast("B")).digest())
+    with _IMMUTABLE_BINARY_ID_AXES_LOCK:
+        existing = _IMMUTABLE_BINARY_ID_AXES.get(key)
+        if existing is not None and np.array_equal(existing, contiguous):
+            return existing
+        # bytes backing makes readonly irreversible; a NumPy flag alone would
+        # permit mutation of the shared identity axis via setflags(True).
+        owned = np.frombuffer(contiguous.tobytes(), dtype=contiguous.dtype)
+        _IMMUTABLE_BINARY_ID_AXES[key] = owned
+        return owned
+
+
 class ImmutableFittedBinarySource:
     """Validate a receipt-bound FP64 bank entry once, then derive normal/SPA tiles.
 
@@ -470,6 +495,8 @@ class ImmutableFittedBinarySource:
     accepts a boolean ``trusted`` shortcut. NumPy inputs are copied once so a
     mutable external array cannot silently change the admitted tensors. Existing
     Torch sources, including a shared GPU X, retain their original storage.
+    Equal ordered ID axes share immutable bytes through weak ownership; the
+    pool does not retain unused axes or share fitted model tensors.
 
     Source tensors must remain immutable while this object is alive. Each
     derivation checks storage, geometry and Torch mutation versions in constant
@@ -537,7 +564,7 @@ class ImmutableFittedBinarySource:
         if ids.shape != (x.shape[0],) or len(np.unique(ids)) != len(ids) or np.any(ids == ""):
             raise ValueError("immutable binary sample IDs must be unique and aligned")
         # A bytes-backed array cannot be made writable via setflags(True).
-        self._ids = np.frombuffer(ids.tobytes(), dtype=ids.dtype)
+        self._ids = _intern_immutable_binary_sample_ids(ids)
         beta, y = None, None
         if coefficients is not None:
             beta = self._owned_array(coefficients).to(device=device)

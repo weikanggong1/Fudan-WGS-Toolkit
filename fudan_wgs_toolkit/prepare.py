@@ -1063,7 +1063,7 @@ def prepare_WGS_data(source_directory=None, output_directory=None, *, prefixes=N
                      variant_indices=None, memory_limit_gib=8, cpu_threads=8,
                      hardlink_annotations=True, resume=False, max_frames=None,
                      chunk_size=256):
-    """Prepare chromosome data before :func:`run_WGS_all`.
+    """Prepare chromosome data before :func:`run_WGS_all_binanry`.
 
     ``prefixes`` maps chromosome names to source BED/BIM/FAM prefixes; otherwise
     BED files are discovered in ``source_directory``. ``annotation_directory``

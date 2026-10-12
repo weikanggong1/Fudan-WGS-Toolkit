@@ -100,7 +100,7 @@ def test_effective_setting_must_match_request(monkeypatch):
 def test_public_cli_cpu_threads_are_forwarded_without_reading_inputs(tmp_path, monkeypatch, requested):
     from fudan_wgs_toolkit import run as public
     calls=[]
-    monkeypatch.setattr(public,'run_WGS_all',lambda **arguments:calls.append(arguments) or {'completed':True})
+    monkeypatch.setattr(public,'run_WGS_all_binanry',lambda **arguments:calls.append(arguments) or {'completed':True})
     arguments=['phenotypes.csv','covariates.csv','prepared','--output-directory',str(tmp_path/'results')]
     if requested is not None:arguments+=['--cpu-threads',str(requested)]
     cli.main(arguments)
@@ -118,10 +118,10 @@ def test_cli_rejects_invalid_threads_before_input_reads(tmp_path,value):
 
 @pytest.mark.parametrize('value',[True,False,0,-1,1.5,'2',None])
 def test_public_python_cpu_threads_fail_before_input_read(tmp_path,monkeypatch,value):
-    from fudan_wgs_toolkit.run import run_WGS_all
+    from fudan_wgs_toolkit.run import run_WGS_all_binanry
     monkeypatch.setattr(runtime,'_run',lambda *args,**kwargs:pytest.fail('invalid threads ran'))
     with pytest.raises(ValueError,match='positive integer'):
-        run_WGS_all('missing.csv','missing_covariates.csv','missing_prepared',
+        run_WGS_all_binanry('missing.csv','missing_covariates.csv','missing_prepared',
                     output_directory=tmp_path/'results',cpu_threads=value)
     assert not (tmp_path/'results').exists()
 

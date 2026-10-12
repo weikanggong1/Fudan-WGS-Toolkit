@@ -298,7 +298,7 @@ def test_failed_score_frames_and_temporaries_released_before_same_mode_fallback(
             # A cycle exercises explicit gc beyond normal frame refcounting.
             cycle = [temporary]; cycle.append(cycle)
             raise failure("mock allocation failure")
-        assert sys.exception() is None, "fallback invoked inside active except"
+        assert sys.exc_info()[1] is None, "fallback invoked inside active except"
         assert all(reference() is None for reference in references), "failed tensor frame still alive"
         return original_score(genotype, **kwargs)
     candidate.models[0].score_covariance = failing_score
@@ -323,7 +323,7 @@ def test_oom_during_mask_tail_releases_union_partial_results_before_retry():
         if calls == 2:
             references.append(weakref.ref(payload["covariance"]))
             raise torch.OutOfMemoryError("mock tail allocation failure")
-        assert sys.exception() is None
+        assert sys.exc_info()[1] is None
         assert all(reference() is None for reference in references)
         return evaluate(payload, model)
     candidate._evaluate_prepared = tail

@@ -13,7 +13,7 @@ import pytest
 from fudan_wgs_toolkit import prepared_association as prepared
 from fudan_wgs_toolkit.identity import sample_keys, pairs_from_keys
 from fudan_wgs_toolkit.phewas_models import prepare_phewas_model
-from fudan_wgs_toolkit.run import run_WGS_all
+from fudan_wgs_toolkit.run import run_WGS_all_binanry
 
 
 def fixture(tmp_path):
@@ -25,9 +25,9 @@ def fixture(tmp_path):
     phenotype, covariate = tmp_path/'phenotypes.csv', tmp_path/'covariates.csv'
     with phenotype.open('w', newline='') as stream:
         writer = csv.writer(stream)
-        writer.writerow(['FID', 'IID', 'continuous', 'binary'])
+        writer.writerow(['FID', 'IID', 'binary_a', 'binary'])
         for i, pair in enumerate(pairs):
-            writer.writerow([*pair, ['NA', 3.2, 1.1, 5.3, 2.8, 4.7][i], [0, 'NA', 1, 0, 1, 0][i]])
+            writer.writerow([*pair, ['NA', 0, 1, 0, 1, 0][i], [0, 'NA', 1, 0, 1, 0][i]])
     with covariate.open('w', newline='') as stream:
         writer = csv.writer(stream)
         writer.writerow(['FID', 'IID', 'age'])
@@ -42,6 +42,9 @@ def injected_execution(monkeypatch):
     calls = {'fits': [], 'computed': [], 'runner': []}
     monkeypatch.setattr(run.torch.cuda, 'is_available', lambda: True)
     monkeypatch.setattr(run.torch.cuda, 'device_count', lambda: 2)
+    from fudan_wgs_toolkit import phewas_partition
+    monkeypatch.setattr(phewas_partition, "gpu_model_cache_capacity",
+                        lambda gpu_ids, **policy: 8*2**30)
     def fit(*args, **kwargs):
         assert prepared.torch.get_num_threads() == 1
         calls['fits'].append(kwargs.copy())
@@ -59,12 +62,12 @@ def injected_execution(monkeypatch):
                 assert len(models[0].sample_ids) == 5
         assert descriptors[1]['spa_available'] is True
         rows = dict.fromkeys(('individual', 'coding', 'noncoding', 'ncrna'), 0)
-        for reference in configuration['chromosomes']:
+        for chromosome_index, reference in enumerate(configuration['chromosomes']):
             with reader_factory(reference) as resources:
                 np.testing.assert_array_equal(resources['metadata'].sample_ids(), sample_keys(
                     pairs_from_keys(resources['metadata'].sample_ids())))
                 assert resources['portable_axis'] is True
-            for job in reference['jobs']:
+            for local_job_index, job in enumerate(reference['jobs']):
                 kind, index = job['kind'], job['checkpoint_job_index']
                 key = dict(block_index=0, block_identity='contract-block', ordinal_before=0)
                 reused = writer.checkpoint_tile(kind, reference['name'], index, [0, 1], **key)
@@ -76,6 +79,8 @@ def injected_execution(monkeypatch):
                 else:
                     record = reused
                 rows[kind] += record['rows']
+                kwargs['emit'](dict(event='finished', chromosome_index=chromosome_index,
+                                    job_index=local_job_index, kind=kind))
         return dict(association_rows=rows, job_groups=sum(len(e['jobs']) for e in configuration['chromosomes']),
                     output=writer.finish())
     monkeypatch.setattr(runtime, 'run_batched_configuration', associate)
@@ -83,10 +88,10 @@ def injected_execution(monkeypatch):
 
 
 def call(root, phenotype, covariate, output, **kwargs):
-    kwargs.setdefault('rm_nan', False)
-    return run_WGS_all(phenotype, covariate, root, output_directory=output,
+    kwargs.setdefault('impute_missing', False)
+    return run_WGS_all_binanry(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
-        phenotype_covariates={'continuous': ['age'], 'binary': []}, **kwargs)
+        phenotype_covariates={'binary_a': ['age'], 'binary': []}, **kwargs)
 
 
 def test_modern_shared_models_identity_and_verified_resume(tmp_path, monkeypatch):
@@ -95,7 +100,7 @@ def test_modern_shared_models_identity_and_verified_resume(tmp_path, monkeypatch
     output = tmp_path/'results'
     first = call(root, phenotype, covariate, output)
     assert first['completed'] and first['association_rows']['individual'] == 6
-    assert [entry['family'] for entry in calls['fits']] == ['gaussian', 'binomial']
+    assert [entry['family'] for entry in calls['fits']] == ['binomial', 'binomial']
     assert all(entry['kinship'] is None for entry in calls['fits'])
     assert calls['computed'] == [0, 1, 2]
     assert calls['runner'][0]['resources']['memory_limit_gib'] is None
@@ -105,7 +110,7 @@ def test_modern_shared_models_identity_and_verified_resume(tmp_path, monkeypatch
     assert len(calls['fits']) == 2 and calls['computed'] == [0, 1, 2]
     assert second['workers'][0]['output']['reused_blocks'] == 3
     index = list(csv.DictReader((output/'trait_index.private.csv').open()))
-    assert [entry['family'] for entry in index] == ['gaussian', 'binomial']
+    assert [entry['family'] for entry in index] == ['binomial', 'binomial']
     with pytest.raises(FileExistsError, match='fresh output'):
         call(root, phenotype, covariate, output)
 
@@ -116,7 +121,7 @@ def test_failed_resume_cannot_leave_old_success_as_current_attempt(tmp_path, mon
     output = tmp_path/'results'
     first = call(root, phenotype, covariate, output)
     with pytest.raises(ValueError, match='source/input/schedule'):
-        call(root, phenotype, covariate, output, resume=True, continuous_transform='rint')
+        call(root, phenotype, covariate, output, resume=True, impute_missing=True)
     assert not (output/'report.private.json').exists()
     archived = list(output.glob('report.previous.*.private.json'))
     assert len(archived)==1 and json.loads(archived[0].read_text())==first
@@ -163,32 +168,26 @@ def test_intercept_only_trait_does_not_require_unselected_covariate_rows(tmp_pat
     assert counts['analysis_samples']==3 and names==('Intercept',)
 
 
-@pytest.mark.parametrize('options, gaussian_transform, metadata_transform', [
-    ({}, 'none', 'none'),
-    ({'continuous_transform': 'none'}, 'none', 'none'),
-    ({'continuous_transform': 'paper'}, 'paper', 'OLS_residual_RINT_original_sd'),
-    ({'continuous_transform': 'rint'}, 'rint', 'raw_RINT'),
-    ({'transform': 'rint'}, 'rint', 'raw_RINT'),
-])
-def test_modern_transform_default_and_explicit_values_reach_actual_fitter(
-        tmp_path, monkeypatch, options, gaussian_transform, metadata_transform):
+@pytest.mark.parametrize("option", ["continuous_transform", "transform", "phenotype_families",
+                                  "null_fit_mode", "long_mask_method", "long_mask_threshold",
+                                  "long_mask_rank", "gpu_ids"])
+def test_removed_generic_options_fail_before_models_or_results(tmp_path, monkeypatch, option):
     root, phenotype, covariate, _ = fixture(tmp_path)
     calls = injected_execution(monkeypatch)
-    output = tmp_path/'results'
-    assert call(root, phenotype, covariate, output, **options)['completed']
-    assert [entry['continuous_transform'] for entry in calls['fits']] == [gaussian_transform, 'none']
-    plan = json.loads((output/'plan.private.json').read_text())
-    assert plan['transform'] == gaussian_transform
-    continuous = json.loads((output/'models/trait_0000/model.private.json').read_text())
-    assert continuous['fit']['transform'] == metadata_transform
-    # A transform changes the model, whereas an omitted value and explicit
-    # "none" have the same established schema-2 input semantics.
-    if not options:
-        again = call(root, phenotype, covariate, output, resume=True, continuous_transform='none')
-        assert again['completed'] and len(calls['fits']) == 2
-        with pytest.raises(ValueError, match='source/input/schedule'):
-            call(root, phenotype, covariate, output, resume=True, continuous_transform='paper')
-        assert len(calls['fits']) == 2
+    output = tmp_path / "results"
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        call(root, phenotype, covariate, output, **{option: "removed"})
+    assert not output.exists() and calls["fits"] == []
+
+
+def test_binary_public_fits_keep_no_continuous_transform(tmp_path, monkeypatch):
+    root, phenotype, covariate, _ = fixture(tmp_path)
+    calls = injected_execution(monkeypatch)
+    output = tmp_path / "results"
+    assert call(root, phenotype, covariate, output)["completed"]
+    assert [entry["family"] for entry in calls["fits"]] == ["binomial", "binomial"]
+    assert all(entry["continuous_transform"] == "none" for entry in calls["fits"])
+    assert json.loads((output / "plan.private.json").read_text())["transform"] == "none"
 
 
 def test_portable_grm_exact_family_identity_and_reordered_submatrix(tmp_path):
@@ -302,13 +301,13 @@ def test_missing_grm_and_incomplete_id_coverage_reject_before_dispatch(tmp_path,
     injected_execution(monkeypatch)
     output = tmp_path/'results'
     with pytest.raises(ValueError, match='sparse GRM requires'):
-        run_WGS_all(phenotype, covariate, root, output_directory=output, analyses=('individual',))
+        run_WGS_all_binanry(phenotype, covariate, root, output_directory=output, analyses=('individual',))
     assert not output.exists()
     path = tmp_path/'grm.npz'
     np.savez(path, sample_ids=sample_keys(pairs[:2]), diagonal=np.ones(2),
         edge_rows=np.asarray([], dtype=np.int64), edge_cols=np.asarray([], dtype=np.int64), edge_values=np.asarray([]))
     with pytest.raises(ValueError, match='every analysis sample'):
-        run_WGS_all(phenotype, covariate, root, output_directory=output, analyses=('individual',),
+        run_WGS_all_binanry(phenotype, covariate, root, output_directory=output, analyses=('individual',),
             grm_file=path, phenotype_covariates={'binary': []}, cpu_threads=1)
 
 
@@ -322,9 +321,9 @@ def test_default_covariates_reduce_constant_and_collinear_columns_per_trait(tmp_
     inputs = prepared.run.read_csv_inputs(phenotype, covariate)
     # Existing direct callers retain their strict default. The public shared
     # pipeline reduces the same fixed-effect span after per-trait missingness.
-    with pytest.raises(ValueError, match='rank deficient'):
-        prepared.run.aligned_phenotype(*inputs, pairs, 'continuous')
-    selected = prepared.run.aligned_phenotype(*inputs, pairs, 'continuous', reduce_redundant=True)
+    with pytest.raises(ValueError, match='rank[- ]deficient'):
+        prepared.run.aligned_phenotype(*inputs, pairs, 'binary_a')
+    selected = prepared.run.aligned_phenotype(*inputs, pairs, 'binary_a', reduce_redundant=True)
     assert selected[3] == ('Intercept', 'age')
     design = selected[-1]['covariate_design']
     assert design['dropped_covariate_names'] == ['sex', 'age_twice']
@@ -332,17 +331,17 @@ def test_default_covariates_reduce_constant_and_collinear_columns_per_trait(tmp_
     raw = np.column_stack((np.ones(5), np.ones(5), np.arange(1., 6.), np.arange(2., 12., 2.)))
     np.testing.assert_allclose(selected[2]@np.linalg.pinv(selected[2]), raw@np.linalg.pinv(raw), atol=1e-12)
     output = tmp_path/'results'
-    first = run_WGS_all(phenotype, covariate, root, output_directory=output,
+    first = run_WGS_all_binanry(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
-        phenotype_covariates={'binary': []}, rm_nan=False)
+        phenotype_covariates={'binary': []}, impute_missing=False)
     assert first['completed'] and len(calls['fits']) == 2
     meta = json.loads((output/'models/trait_0000/model.private.json').read_text())
     assert meta['fit']['covariate_names'] == ['Intercept', 'age']
     assert meta['fit']['covariate_design'] == design
     assert meta['fit']['prepared_association_binding']['covariate_design'] == design
-    resumed = run_WGS_all(phenotype, covariate, root, output_directory=output,
+    resumed = run_WGS_all_binanry(phenotype, covariate, root, output_directory=output,
         analyses=('individual',), grm='none', cpu_threads=1, single_region_size=10,
-        phenotype_covariates={'binary': []}, rm_nan=False, resume=True)
+        phenotype_covariates={'binary': []}, impute_missing=False, resume=True)
     assert resumed['completed'] and len(calls['fits']) == 2
 
 
@@ -428,7 +427,7 @@ def test_modern_host_budget_uses_shared_gate_and_can_change_on_resume(tmp_path,m
 
 @pytest.mark.parametrize('failed',[False,True])
 def test_modern_worker_closes_model_mappings_and_preserves_original_failure(tmp_path,monkeypatch,failed):
-    from fudan_wgs_toolkit.phewas_trait_csv import PerTraitCheckpointCSVWriter
+    from fudan_wgs_toolkit.chromosome_csv import ChromosomeCheckpointCSVWriter
     from fudan_wgs_toolkit.phewas_runtime import runtime
     root,phenotype,covariate,_=fixture(tmp_path)
     injected_execution(monkeypatch)
@@ -440,12 +439,12 @@ def test_modern_worker_closes_model_mappings_and_preserves_original_failure(tmp_
             actions.append('close')
             if failed:raise MemoryError('secondary close failure')
     monkeypatch.setattr(prepared,'ModelRepository',Repository)
-    original_abort=PerTraitCheckpointCSVWriter.abort
+    original_abort=ChromosomeCheckpointCSVWriter.abort
     def abort(writer):
         actions.append('abort')
         original_abort(writer)
         if failed:raise MemoryError('secondary abort failure')
-    monkeypatch.setattr(PerTraitCheckpointCSVWriter,'abort',abort)
+    monkeypatch.setattr(ChromosomeCheckpointCSVWriter,'abort',abort)
     if failed:
         def association(*args,**kwargs):raise ArithmeticError('primary association failure')
         monkeypatch.setattr(runtime,'run_batched_configuration',association)

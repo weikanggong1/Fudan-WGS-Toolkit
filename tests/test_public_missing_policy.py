@@ -56,7 +56,8 @@ def test_available_alignment_and_empty_profile_keep_the_original_cases():
 
 
 def test_rm_nan_public_defaults_and_numeric_plan_identity(api_inputs):
-    for function in (run.run_WGS_all,phewas_run.prepare_phewas_run,phewas_run.run_phewas):
+    assert inspect.signature(run.run_WGS_all_binanry).parameters['impute_missing'].default is True
+    for function in (phewas_run.prepare_phewas_run,phewas_run.run_phewas):
         assert inspect.signature(function).parameters['rm_nan'].default is True
     options=dict(api_inputs,rm_nan=True)
     plan=phewas_run.prepare_phewas_run(**options,analyses=('coding',),
@@ -101,8 +102,8 @@ def test_modern_rm_nan_is_scientific_and_cannot_resume_old_nulls(tmp_path,monkey
 
 @pytest.mark.parametrize('bad',[None,0,1,'False',[],{}])
 def test_rm_nan_is_strict_boolean_before_inputs_or_output(tmp_path,bad):
-    with pytest.raises(ValueError,match='rm_nan'):
-        run.run_WGS_all('missing.csv','missing.csv','missing',output_directory=tmp_path/'run',rm_nan=bad)
+    with pytest.raises(ValueError,match='impute_missing'):
+        run.run_WGS_all_binanry('missing.csv','missing.csv','missing',output_directory=tmp_path/'run',impute_missing=bad)
     with pytest.raises(ValueError,match='rm_nan'):
         phewas_run.prepare_phewas_run('missing.csv','missing.csv','missing',
             output_directory=tmp_path/'plan',rm_nan=bad)
@@ -111,12 +112,12 @@ def test_rm_nan_is_strict_boolean_before_inputs_or_output(tmp_path,bad):
 
 def test_cli_modes_forward_true_default_and_explicit_available(monkeypatch,tmp_path):
     calls=[]
-    monkeypatch.setattr(run,'run_WGS_all',lambda **options: calls.append(options) or {'completed':True})
+    monkeypatch.setattr(run,'run_WGS_all_binanry',lambda **options: calls.append(options) or {'completed':True})
     arguments=['phenotype.csv','covariate.csv','prepared','--output-directory','results']
     run.main(arguments)
-    assert calls[-1]['rm_nan'] is True
-    run.main(arguments+['--no-rm-nan'])
-    assert calls[-1]['rm_nan'] is False
+    assert calls[-1]['impute_missing'] is True
+    run.main(arguments+['--no-impute-missing'])
+    assert calls[-1]['impute_missing'] is False
     monkeypatch.setattr(phewas_run,'run_phewas',lambda *args,**options: calls.append(options) or [])
     arguments=['--phenotype-csv','p.csv','--covariate-csv','c.csv',
         '--cache-directory','prepared','--output-directory','results']

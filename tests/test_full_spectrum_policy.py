@@ -27,7 +27,7 @@ def call_native(**options):
 
 
 def test_public_and_bound_defaults_choose_full_spectrum():
-    for function in (statistics.association_test, run.run_WGS_all, phewas_run.build_configuration,
+    for function in (statistics.association_test, phewas_run.build_configuration,
                      phewas_run.prepare_phewas_run, phewas_run.run_phewas):
         assert inspect.signature(function).parameters['long_mask_method'].default == 'full'
     assert AnalysisOptions().long_mask_method == 'full'
@@ -154,15 +154,16 @@ def test_invalid_method_rejected_without_scientific_fallback(method):
         AnalysisOptions(long_mask_method=method)
 
 
-def test_public_cli_exposes_explicit_spectrum_policy(monkeypatch):
+@pytest.mark.parametrize("option", ["--long-mask-method", "--long-mask-threshold", "--long-mask-rank"])
+def test_binary_public_cli_rejects_spectrum_options(monkeypatch, option):
+    signature = inspect.signature(run.run_WGS_all_binanry)
+    assert "long_mask_method" not in signature.parameters
     selected = []
-    monkeypatch.setattr(run, 'run_WGS_all', lambda **kwargs: selected.append(kwargs) or {'completed': True})
-    run.main(['phenotypes.csv', 'covariates.csv', 'prepared', '--output-directory', 'results',
-              '--long-mask-method', 'liu'])
-    assert selected[0]['long_mask_method'] == 'liu'
-    selected.clear()
-    run.main(['phenotypes.csv', 'covariates.csv', 'prepared', '--output-directory', 'results'])
-    assert selected[0]['long_mask_method'] == 'full'
+    monkeypatch.setattr(run, "run_WGS_all_binanry", lambda **kwargs: selected.append(kwargs) or {"completed": True})
+    with pytest.raises(SystemExit) as error:
+        run.main(["phenotypes.csv", "covariates.csv", "prepared", "--output-directory", "results",
+                  option, "1"])
+    assert error.value.code == 2 and selected == []
 
 
 def test_existing_plan_cli_cannot_change_bound_spectrum_policy(tmp_path, monkeypatch):

@@ -197,7 +197,7 @@ def _metadata(profiles, names, covariate_names, dictionary=None, *,
 
 
 def _parse(path, cache_ids, target, *, families=None, infer_families=False,
-           chunk_rows=8192, emit=None, phase=None, rm_nan=False):
+           chunk_rows=8192, emit=None, phase=None, rm_nan=False, binary_only=False):
     import pandas as pd  # Existing project dependency; only needed for preparation.
     header = _header(path)
     identity_width = _identity_width(header)
@@ -230,8 +230,10 @@ def _parse(path, cache_ids, target, *, families=None, infer_families=False,
                 finite = np.isfinite(numeric)
                 any_nonmissing |= finite.any(axis=0)
                 binary_compatible &= ~(finite & (numeric != 0) & (numeric != 1)).any(axis=0)
-            if binary_indices and not rm_nan:
-                binary = numeric[:, binary_indices]
+            if binary_indices and (binary_only or not rm_nan):
+                # A pure disease table already has precisely these columns.
+                # Avoid a second chunk-sized float64 panel at large trait counts.
+                binary = numeric if len(binary_indices) == numeric.shape[1] else numeric[:, binary_indices]
                 if np.any(np.isfinite(binary) & (binary != 0) & (binary != 1)):
                     raise ValueError("Binary phenotype values must be zero, one or missing")
             positions, indices = _lookup(cache_ids, chunk_ids, lookup_index)
@@ -260,18 +262,21 @@ def _release(array):
         mapping.close()
 
 
-def _missing_policy(rm_nan):
-    return {"schema_version": 1,
+def _missing_policy(rm_nan, binary_only=False):
+    return {"schema_version": 2 if binary_only else 1,
             "sample_selection": "phenotype_present_and_selected_covariates_valid" if rm_nan
                                 else "finite_phenotype_and_selected_covariates_valid",
-            "gaussian": "eligible_finite_mean_fill_nan" if rm_nan else "finite_available_samples",
-            "binomial": "one_is_case_all_other_finite_or_nan_are_controls" if rm_nan
+            "gaussian": "not_accepted" if binary_only else
+                        "eligible_finite_mean_fill_nan" if rm_nan else "finite_available_samples",
+            "binomial": ("finite_exact_zero_or_one_and_nan_zero" if binary_only else
+                         "one_is_case_all_other_finite_or_nan_are_controls") if rm_nan
                         else "finite_exact_zero_or_one",
             "covariates": "selected_columns_complete_no_imputation",
             "infinite_values": "rejected"}
 
 
-def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_valid):
+def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_valid,
+                                   binary_only=False):
     """Select one trait's rows and apply its explicit missing-value policy.
 
     ``covariate_valid`` identifies the eligible analysis population, including
@@ -284,10 +289,14 @@ def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_val
     """
     if type(rm_nan) is not bool:
         raise ValueError("rm_nan must be a boolean")
+    if type(binary_only) is not bool:
+        raise ValueError("binary_only must be a boolean")
     if family == "binary":
         family = "binomial"
     if family not in ("gaussian", "binomial"):
         raise ValueError("phenotype family must be gaussian or binomial")
+    if binary_only and family != "binomial":
+        raise ValueError("Binary-only analysis accepts only binomial phenotypes")
     values = np.asarray(values, dtype=np.float64)
     eligible = np.asarray(covariate_valid)
     if values.ndim != 1 or eligible.shape != values.shape or eligible.dtype != np.bool_:
@@ -297,8 +306,9 @@ def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_val
     finite = np.isfinite(values)
     available = eligible & finite
     available_n, mother_n = int(available.sum()), int(eligible.sum())
-    if family == "binomial" and not rm_nan and np.any(finite & (values != 0) & (values != 1)):
-        raise ValueError("Binary phenotype values must be zero, one or missing when rm_nan=False")
+    if family == "binomial" and (binary_only or not rm_nan) and np.any(finite & (values != 0) & (values != 1)):
+        raise ValueError("Binary phenotype values must be zero, one or missing" +
+                         (" in binary-only analysis" if binary_only else " when rm_nan=False"))
     selected = eligible if rm_nan else available
     indices = np.flatnonzero(selected)
     mean = None
@@ -316,20 +326,33 @@ def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_val
     missing = np.isnan(result)
     if rm_nan:
         if family == "binomial":
-            result = (result == 1).astype(np.float64)
+            if binary_only:
+                result[missing] = 0
+            else:
+                result = (result == 1).astype(np.float64)
         elif mean is not None:
             result[missing] = mean
+    cases = int((result == 1).sum()) if family == "binomial" else None
+    controls = int((result == 0).sum()) if family == "binomial" else None
+    if binary_only and (cases == 0 or controls == 0):
+        raise ValueError("Every binary phenotype requires at least one analysis case and one control")
     return {"values": result, "sample_indices": indices, "available_n": available_n,
             "mother_n": mother_n, "imputed_n": int(missing.sum()) if rm_nan else 0,
             "recoded_nonbinary_n": int((finite & eligible & (values != 0) & (values != 1)).sum())
                                    if rm_nan and family == "binomial" else 0,
-            "imputation_mean": mean, "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan)}
+            "imputation_mean": mean, "rm_nan": rm_nan, "binary_only": binary_only,
+            "analysis_cases": cases, "analysis_controls": controls,
+            "available_cases": int((available & (values == 1)).sum()) if family == "binomial" else None,
+            "available_controls": int((available & (values == 0)).sum()) if family == "binomial" else None,
+            "imputed_controls": int(missing.sum()) if family == "binomial" and rm_nan else 0,
+            "missing_policy": _missing_policy(rm_nan, binary_only)}
 
 
 def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profiles=None,
                          phenotype_dictionary=None, phenotype_manifest=None,
                          covariate_manifest=None, chunk_rows=8192, emit=None,
-                         phenotype_families="auto", phenotype_covariates=None, rm_nan=True):
+                         phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
+                         binary_only=False):
     """Create immutable raw float64 arrays in cache sample order.
 
     ``output`` must not exist.  No intercept, RINT, residualization, ancestry
@@ -345,9 +368,17 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
     nonempty column containing only exact 0/1 is binomial, all other columns
     (including entirely missing columns) are Gaussian. This generic profile
     does not reproduce a paper-specific covariate protocol.
+
+    ``binary_only=True`` requires at least two columns, validates exact 0/1
+    across every source row, and requires both cases and controls in each
+    eligible trait. Only NaNs may become controls; participants absent from
+    the phenotype CSV are never created as controls. The legacy generic
+    missing-value policy remains available to internal callers.
     """
     if type(rm_nan) is not bool:
         raise ValueError("rm_nan must be a boolean")
+    if type(binary_only) is not bool:
+        raise ValueError("binary_only must be a boolean")
     if not isinstance(chunk_rows, int) or chunk_rows <= 0:
         raise ValueError("chunk_rows must be a positive integer")
     started = time.perf_counter()
@@ -362,9 +393,16 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
     covariate_names = covariate_header[_identity_width(covariate_header):]
     if not phenotype_names:
         raise ValueError("The phenotype CSV must have at least one numeric column")
+    if binary_only and len(phenotype_names) < 2:
+        raise ValueError("Binary-only analysis requires at least two phenotype columns")
     traits, profile_indices, dictionary = _metadata(profiles, phenotype_names, covariate_names,
         phenotype_dictionary, phenotype_families=phenotype_families,
         phenotype_covariates=phenotype_covariates)
+    if binary_only:
+        for trait in traits:
+            if trait["family"] not in (None, "binomial"):
+                raise ValueError("Binary-only analysis accepts only binomial phenotypes")
+            trait["family"] = "binomial"
     pm, expected_p = _source_manifest(phenotype_manifest, phenotypes, "output_sha256")
     cm, expected_c = _source_manifest(covariate_manifest, covariates, "covariate_output_sha256")
     sources = {"phenotypes": _binding(phenotypes, expected_p),
@@ -391,7 +429,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         infer_families = any(trait["family"] is None for trait in traits)
         p_parse, p_present = _parse(phenotypes, axis, y, families=[r["family"] for r in traits],
                                    infer_families=infer_families,
-                                   chunk_rows=chunk_rows, emit=emit, phase="phenotypes", rm_nan=rm_nan)
+                                   chunk_rows=chunk_rows, emit=emit, phase="phenotypes", rm_nan=rm_nan,
+                                   binary_only=binary_only)
         if infer_families:
             for trait, family in zip(traits, p_parse.pop("inferred_families")):
                 if trait["family"] is None:
@@ -413,7 +452,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
             if rm_nan:
                 eligible = eligible & p_present
             policy = apply_phenotype_missing_policy(values, family=trait["family"],
-                rm_nan=rm_nan, covariate_valid=eligible)
+                rm_nan=rm_nan, covariate_valid=eligible, binary_only=binary_only)
             analyzed = policy["values"]
             quality = {"index": trait["index"], "family": trait["family"],
                        "phenotype_nonmissing": int(finite.sum()),
@@ -425,8 +464,11 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                        "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
                        "minimum": float(values[finite].min()) if finite.any() else None,
                        "maximum": float(values[finite].max()) if finite.any() else None,
-                       "analysis_cases": int((analyzed == 1).sum()) if trait["family"] == "binomial" else None,
-                       "analysis_controls": int((analyzed == 0).sum()) if trait["family"] == "binomial" else None}
+                       "analysis_cases": policy["analysis_cases"],
+                       "analysis_controls": policy["analysis_controls"],
+                       "available_cases": policy["available_cases"],
+                       "available_controls": policy["available_controls"],
+                       "imputed_controls": policy["imputed_controls"]}
             trait_counts.append(quality)
         np.save(output / "sample_ids.npy", axis, allow_pickle=False)
         np.save(output / "profile_complete.npy", complete, allow_pickle=False)
@@ -437,12 +479,14 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         for binding in sources.values():
             _unchanged(binding)
         metadata = {"traits": traits, "covariate_names": covariate_names,
-                    "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
+                    "rm_nan": rm_nan, "binary_only": binary_only,
+                    "missing_policy": _missing_policy(rm_nan, binary_only),
                     "profile_covariate_indices": profile_indices,
                     "phenotype_dictionary": dictionary, "quality": trait_counts,
                     "profile_scope": ("explicit_profiles" if profiles is not None else
                         "explicit_trait_covariates" if phenotype_covariates else "all_covariates_generic"),
-                    "family_assignment": ("declared_by_profile" if profiles is not None else
+                    "family_assignment": ("strict_binary_only" if binary_only else
+                        "declared_by_profile" if profiles is not None else
                         "auto_with_explicit_overrides" if isinstance(phenotype_families, Mapping) and phenotype_families else
                         "inferred_exact_01_from_all_source_rows")}
         _json(output / "traits.private.json", metadata)
@@ -465,7 +509,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                 "sum_imputed_samples": sum(q["imputed_n"] for q in rows),
                 "empty_traits": sum(q["analysis_complete_samples"] == 0 for q in rows)}
         anonymous = {"status": "complete", "cache_sample_count": len(axis), "phenotype_count": len(traits),
-                     "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
+                     "rm_nan": rm_nan, "binary_only": binary_only,
+                     "missing_policy": _missing_policy(rm_nan, binary_only),
                      "covariate_count": len(covariate_names), "unique_covariate_profiles": len(profile_indices),
                      "families": family_counts, "phenotype_parse": p_parse, "covariate_parse": c_parse,
                      "cache_axis_preserved": True, "ancestry_selection_applied": False,
@@ -479,7 +524,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                      "elapsed_seconds": time.perf_counter() - started,
                      "array_bytes": sum(v["bytes"] for k, v in artifacts.items() if k.endswith(".npy"))}
         manifest = {"schema": 1, "status": "complete", "sample_count": len(axis), "trait_count": len(traits),
-                    "rm_nan": rm_nan, "missing_policy": _missing_policy(rm_nan),
+                    "rm_nan": rm_nan, "binary_only": binary_only,
+                    "missing_policy": _missing_policy(rm_nan, binary_only),
                     "covariate_count": len(covariate_names), "profile_count": len(profile_indices),
                     "array_dtype": "float64", "array_order": "C", "sample_order": "input_cache_axis",
                     "cohort_scope": "all_supplied_cache_samples; analysis cohort not locked",
@@ -487,6 +533,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
         if profiles is None:
             manifest["trait_options"] = {
                 "rm_nan": rm_nan,
+                "binary_only": binary_only,
                 "phenotype_families": dict(phenotype_families) if isinstance(phenotype_families, Mapping) else "auto",
                 "phenotype_covariates": {name: list(columns) for name, columns in (phenotype_covariates or {}).items()}}
         _json(output / "manifest.private.json", manifest)
@@ -512,7 +559,9 @@ class PhewasInputs:
     fitting code should add its intercept then record/drop rank-redundant
     columns with a rank-revealing factorization, rather than alter this input.
     """
-    def __init__(self, directory, *, verify_arrays=True):
+    def __init__(self, directory, *, verify_arrays=True, design_cache_limit_bytes=128 << 20):
+        if type(design_cache_limit_bytes) is not int or design_cache_limit_bytes < 0:
+            raise ValueError("design_cache_limit_bytes must be a nonnegative integer")
         self.directory = Path(directory)
         self.manifest = json.loads((self.directory / "manifest.private.json").read_text())
         status = json.loads((self.directory / "status.anonymous.json").read_text())
@@ -529,13 +578,21 @@ class PhewasInputs:
         # Pre-policy manifests retain their original available-sample behavior.
         # A default at the public API must never reinterpret an old fitted input.
         self.rm_nan = self.manifest.get("rm_nan", False)
+        self.binary_only = self.manifest.get("binary_only", False)
+        if (type(self.binary_only) is not bool
+                or self.metadata.get("binary_only", False) != self.binary_only
+                or ("trait_options" in self.manifest and
+                    self.manifest["trait_options"].get("binary_only", False) != self.binary_only)
+                or (self.binary_only and (self.manifest["trait_count"] < 2 or
+                    any(trait.get("family") != "binomial" for trait in self.metadata["traits"])) )):
+            raise ValueError("Prepared binary-only input binding is invalid")
         if (type(self.rm_nan) is not bool
                 or self.metadata.get("rm_nan", False) != self.rm_nan
                 or ("trait_options" in self.manifest and
                     self.manifest["trait_options"].get("rm_nan", False) != self.rm_nan)
                 or ((self.rm_nan or "missing_policy" in self.manifest or "missing_policy" in self.metadata)
-                    and (self.manifest.get("missing_policy") != _missing_policy(self.rm_nan)
-                         or self.metadata.get("missing_policy") != _missing_policy(self.rm_nan)))):
+                    and (self.manifest.get("missing_policy") != _missing_policy(self.rm_nan, self.binary_only)
+                         or self.metadata.get("missing_policy") != _missing_policy(self.rm_nan, self.binary_only)))):
             raise ValueError("Prepared phenotype missing-value policy binding is invalid")
         self.sample_ids = np.load(self.directory / "sample_ids.npy", mmap_mode="r", allow_pickle=False)
         self.phenotypes = np.load(self.directory / "phenotypes.npy", mmap_mode="r", allow_pickle=False)
@@ -551,6 +608,52 @@ class PhewasInputs:
                 or (self.rm_nan and (self.phenotype_source_present.shape != (n,)
                                      or self.phenotype_source_present.dtype != np.bool_))):
             raise ValueError("Prepared input array schema is invalid")
+        self._design_cache = collections.OrderedDict()
+        self._design_cache_bytes = 0
+        self._design_cache_limit_bytes = design_cache_limit_bytes
+        self._design_cache_hits = self._design_cache_misses = self._design_cache_evictions = 0
+
+    @staticmethod
+    def _immutable_array(value):
+        """A bytes-backed array cannot be made writable by a downstream fit."""
+        value = np.asarray(value)
+        return np.frombuffer(value.tobytes(order="C"), dtype=value.dtype).reshape(value.shape)
+
+    def _shared_design(self, indices, trait):
+        """Share only identical ordered samples and covariate columns, bounded.
+
+        Phenotype values and fitted models remain independent. Different NaN
+        patterns reuse the raw covariate mmap but never a mismatched design.
+        """
+        indices = np.asarray(indices, dtype=np.int64)
+        columns = tuple(trait["covariate_indices"])
+        key = columns, len(indices), hashlib.sha256(memoryview(indices).cast("B")).digest()
+        cached = self._design_cache.get(key)
+        if cached is not None and np.array_equal(indices, cached["sample_indices"]):
+            self._design_cache.move_to_end(key)
+            self._design_cache_hits += 1
+            return cached
+        self._design_cache_misses += 1
+        arrays = {"sample_indices": self._immutable_array(indices),
+                  "sample_ids": self._immutable_array(self.sample_ids[indices]),
+                  "covariates": self._immutable_array(
+                      self.covariates[np.ix_(indices, columns)])}
+        size = sum(value.nbytes for value in arrays.values())
+        if size <= self._design_cache_limit_bytes:
+            while self._design_cache and self._design_cache_bytes + size > self._design_cache_limit_bytes:
+                _, evicted = self._design_cache.popitem(last=False)
+                self._design_cache_bytes -= sum(value.nbytes for value in evicted.values())
+                self._design_cache_evictions += 1
+            self._design_cache[key] = arrays
+            self._design_cache_bytes += size
+        return arrays
+
+    def design_cache_summary(self):
+        """Owned CPU input reuse counters; no fitted covariance is shared."""
+        return {"entries": len(self._design_cache), "resident_bytes": self._design_cache_bytes,
+                "limit_bytes": self._design_cache_limit_bytes, "hits": self._design_cache_hits,
+                "misses": self._design_cache_misses, "evictions": self._design_cache_evictions,
+                "shared_fitted_models": False}
 
     def trait(self, index, *, cohort_indices=None):
         """Return phenotype-wise rows under the bound policy, no intercept.
@@ -579,22 +682,28 @@ class PhewasInputs:
                     raise ValueError("Cohort indices must be unique cache-axis row indices")
                 mask = np.zeros(len(keep), dtype=bool); mask[selected] = True; keep &= mask
         policy = apply_phenotype_missing_policy(values, family=trait["family"],
-            rm_nan=self.rm_nan, covariate_valid=keep)
+            rm_nan=self.rm_nan, covariate_valid=keep, binary_only=self.binary_only)
         indices = policy["sample_indices"]
         covariate_indices = trait["covariate_indices"]
+        design = self._shared_design(indices, trait)
         return {"index": index, "name": trait["name"], "family": trait["family"],
-                "profile": trait["profile"], "sample_indices": indices,
-                "sample_ids": np.asarray(self.sample_ids[indices]),
+                "profile": trait["profile"], "sample_indices": design["sample_indices"],
+                "sample_ids": design["sample_ids"],
                 "y_raw": policy["values"],
-                "covariates": np.asarray(self.covariates[np.ix_(indices, covariate_indices)], dtype=np.float64),
+                "covariates": design["covariates"],
                 "covariate_names": [self.metadata["covariate_names"][i] for i in covariate_indices],
                 "intercept_added": False, "rm_nan": self.rm_nan,
                 "missing_policy": policy["missing_policy"],
                 "available_n": policy["available_n"], "mother_n": policy["mother_n"],
                 "imputed_n": policy["imputed_n"], "imputation_mean": policy["imputation_mean"],
-                "recoded_nonbinary_n": policy["recoded_nonbinary_n"]}
+                "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
+                "binary_only": self.binary_only,
+                **{key: policy[key] for key in ("analysis_cases", "analysis_controls",
+                    "available_cases", "available_controls", "imputed_controls")}}
 
     def close(self):
+        self._design_cache.clear()
+        self._design_cache_bytes = 0
         for value in (self.sample_ids, self.phenotypes, self.covariates, self.profile_complete,
                       self.phenotype_source_present):
             mapping = getattr(value, "_mmap", None)

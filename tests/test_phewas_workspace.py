@@ -159,6 +159,10 @@ def test_batched_runtime_installs_cap_and_reserve_then_restores_policy_on_error(
     monkeypatch.setattr(torch.cuda, 'init', lambda: None)
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda device: None)
     monkeypatch.setattr(torch.cuda, 'get_device_properties', lambda device: SimpleNamespace(total_memory=80*2**30))
+    # Inject the complete CUDA accounting boundary on this CPU contract test.
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (80*2**30, 80*2**30))
+    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 0)
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 0)
     monkeypatch.setattr(runtime.cli, '_weighted_eigensolver_settings', lambda *args: {'effective': 'torch'})
     repository = ModelRepository([], workspace_bytes=0)
     repository._descriptors = [descriptor(0, np.arange(1))]

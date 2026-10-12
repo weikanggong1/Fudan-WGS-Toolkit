@@ -115,6 +115,7 @@ def test_runtime_owns_cleanup_without_masking_original_error(initialized_runtime
     with pytest.raises(ArithmeticError) as raised:
         case.invoke({})
     assert raised.value is case.primary and case.observed[0].closed
-    assert any('RuntimeError' in note for note in getattr(raised.value, '__notes__', []))
+    if hasattr(raised.value, 'add_note'):
+        assert any('RuntimeError' in note for note in raised.value.__notes__)
     assert case.aborted == [True]
     assert tiles.current_lobpcg_context() == (None, None)

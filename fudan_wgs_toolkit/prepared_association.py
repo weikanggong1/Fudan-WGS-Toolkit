@@ -13,6 +13,7 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import stat
 import sys
 from pathlib import Path
 import time
@@ -26,6 +27,7 @@ from . import run
 from .cpu_budget import detect_cpu_capacity
 from .identity import sample_keys
 from .phewas_models import SparseKinshipData, prepare_phewas_model
+from ._fit_structure_cache import FitStructureCache
 from .phewas_cache import _stream_bindings, _verify_stream_bindings
 from .phewas_storage import (ModelRepository, atomic_json, digest_file,
                              save_model_store, trait_index_sha256, write_trait_index)
@@ -73,6 +75,72 @@ def _verify_inputs(binding):
     if (root/'COMPLETE').read_text().strip() != binding['dataset_sha256']:
         raise ValueError('prepared dataset completion binding changed')
     _verify_stream_bindings(binding['genotype_streams'])
+
+
+def _input_file_identity(path):
+    """Immutable regular-file identity; include inode and change time."""
+    try:
+        value = Path(path).stat()
+    except OSError as error:
+        raise ValueError('prepared association scientific input became inaccessible') from error
+    if not stat.S_ISREG(value.st_mode):
+        raise ValueError('prepared association scientific input must remain a regular file')
+    return dict(dev=value.st_dev,ino=value.st_ino,size=value.st_size,
+        mtime_ns=value.st_mtime_ns,ctime_ns=value.st_ctime_ns)
+
+
+class _BinaryInputVerification:
+    """Hash binary fit inputs at both boundaries, stat-check between fits.
+
+    The starting hashes authenticate the exact immutable identity used during
+    the loop; same-size edits and same-byte inode replacements fail closed.
+    Full boundary hashing is bracketed by identical identities to reject
+    changes during reads. Genotype streams retain their existing stat binding
+    and per-frame checksum verification. No fitted array/source binding changes.
+    """
+    def __init__(self,binding,*,loaded_input_stats=None):
+        self.binding = binding
+        self.paths = sorted(set(binding['files']) |
+            {str(Path(binding['prepared_directory'])/'COMPLETE')})
+        self.full_hash_passes = self.stat_check_passes = 0
+        self.final_full_hash_verified = False
+        self.identities = None
+        before = self._identities()
+        if loaded_input_stats is not None and any(before.get(path)!=identity
+                for path,identity in loaded_input_stats.items()):
+            raise ValueError('binary input source changed after the phenotype matrices were read')
+        _verify_inputs(binding)
+        after = self._identities()
+        if before!=after:
+            raise ValueError('binary input identity changed during the starting full checksum pass')
+        self.identities = after
+        self.full_hash_passes += 1
+
+    def _identities(self):
+        return {path:_input_file_identity(path) for path in self.paths}
+
+    def check(self):
+        if self._identities()!=self.identities:
+            raise ValueError('binary input source inode or content identity changed during null fitting')
+        _verify_stream_bindings(self.binding['genotype_streams'])
+        self.stat_check_passes += 1
+
+    def finish(self):
+        before = self._identities()
+        if before!=self.identities:
+            raise ValueError('binary input identity changed before the final full checksum pass')
+        _verify_inputs(self.binding)
+        after = self._identities()
+        if after!=before:
+            raise ValueError('binary input identity changed during the final full checksum pass')
+        self.full_hash_passes += 1
+        self.final_full_hash_verified = True
+
+    def summary(self):
+        return dict(full_hash_passes=self.full_hash_passes,stat_check_passes=self.stat_check_passes,
+            verified_files=len(self.paths),final_full_hash_verified=self.final_full_hash_verified,
+            file_identity_fields=['dev','ino','size','mtime_ns','ctime_ns'],
+            scope='binary null-fit loop; full starting/ending SHA-256, immutable identities between traits')
 
 
 @contextmanager
@@ -242,48 +310,79 @@ def _fit_models(plan, phenotypes, covariates, population, kinship, options, devi
     output, entries = Path(plan['output_directory']), []
     lookup = {key: i for i, key in enumerate(sample_keys(population))}
     cohort = _cohort_pairs(Path(plan['input_binding']['prepared_directory']), plan['dataset'], population)
-    for index, name in enumerate(phenotypes.names):
-        family = plan['families'][name]
-        ids, y, x, names, counts = run.aligned_phenotype(phenotypes, covariates, cohort, name,
-            covariate_names=plan['covariate_selection'].get(name), reduce_redundant=True,
-            rm_nan=plan.get('rm_nan', False), family=family)
-        rows = np.asarray([lookup[key] for key in ids], dtype=np.int64)
-        expected = dict(input_manifest_sha256=plan['scientific_binding_sha256'],
-            source_implementation_sha256=plan['source_implementation_sha256'], trait_index=index,
-            family=family, rm_nan=plan.get('rm_nan', False), sample_rows_sha256=_array_hash(rows), sample_ids_sha256=_array_hash(ids),
-            phenotype_sha256=_array_hash(y), design_sha256=_array_hash(x), covariate_names=list(names),
-            covariate_design=counts['covariate_design'])
-        target = output/'models'/f'trait_{index:04d}'
-        receipt = output/'models'/f'trait_{index:04d}.complete.private.json'
-        if target.exists() or receipt.exists():
-            if not options['resume']:
-                raise FileExistsError('existing fitted store requires resume=True')
+    alignment_cache = run.AlignedInputCache(phenotypes, covariates, cohort)
+    structures = FitStructureCache()
+    verifier = (_BinaryInputVerification(plan['input_binding'],
+                    loaded_input_stats=options.get('_loaded_input_stats')) if plan.get('binary_only') else None)
+    def verify_fit_inputs():
+        if verifier is None:
             _verify_inputs(plan['input_binding'])
-            entry = _verify_model(target, expected, receipt)
         else:
-            _verify_inputs(plan['input_binding'])
-            before = time.perf_counter()
-            fitted = prepare_phewas_model(y, ids, x, family=family, kinship=kinship,
-                continuous_transform=plan['transform'] if family == 'gaussian' else 'none',
-                device=device, association_mode='tf32', use_spa=True)
-            if not fitted.model.converged:
-                raise ArithmeticError('prepared phenotype null fit did not converge')
-            selected = rows[fitted.sample_indices]
-            if not np.array_equal(selected, rows):
-                raise ValueError('null fitter unexpectedly changed the aligned complete-case axis')
-            metadata = dict(fitted.metadata, trait_index=index, phenotype=name,
-                covariate_names=list(names), alignment=counts,
-                covariate_design=counts['covariate_design'],
-                prepared_association_binding=expected, wall_seconds=time.perf_counter()-before,
-                source_implementation_sha256=plan['source_implementation_sha256'])
-            entry = save_model_store(fitted.model, target, sample_rows=selected,
-                fit_metadata=metadata, spa_model=fitted.spa_model)
-            entry['trait_index'] = index
-            _verify_inputs(plan['input_binding'])
-            atomic_json(receipt, entry)
-            del fitted
-            gc.collect()
-        entries.append(entry)
+            verifier.check()
+    try:
+        for index, name in enumerate(phenotypes.names):
+            family = plan['families'][name]
+            ids, y, x, names, counts = run.aligned_phenotype(phenotypes, covariates, cohort, name,
+                covariate_names=plan['covariate_selection'].get(name), reduce_redundant=True,
+                rm_nan=plan.get('rm_nan', False), family=family,
+                alignment_cache=alignment_cache, binary_only=plan.get('binary_only',False))
+            if plan.get('binary_only'):
+                cases, controls = int(np.count_nonzero(y==1)), int(np.count_nonzero(y==0))
+                if cases+controls!=len(y) or cases==0 or controls==0:
+                    raise ValueError(f'binary phenotype {name} requires both disease cases and controls after alignment')
+                counts.update(analysis_cases=cases, analysis_controls=controls,
+                    imputed_controls=counts['imputed_n'], available_cases=cases,
+                    available_controls=controls-counts['imputed_n'])
+            rows = np.asarray([lookup[key] for key in ids], dtype=np.int64)
+            expected = dict(input_manifest_sha256=plan['scientific_binding_sha256'],
+                source_implementation_sha256=plan['source_implementation_sha256'], trait_index=index,
+                family=family, rm_nan=plan.get('rm_nan', False), sample_rows_sha256=_array_hash(rows), sample_ids_sha256=_array_hash(ids),
+                phenotype_sha256=_array_hash(y), design_sha256=_array_hash(x), covariate_names=list(names),
+                covariate_design=counts['covariate_design'])
+            if plan.get('binary_only'):
+                expected['binary_only'] = True
+            target = output/'models'/f'trait_{index:04d}'
+            receipt = output/'models'/f'trait_{index:04d}.complete.private.json'
+            if target.exists() or receipt.exists():
+                if not options['resume']:
+                    raise FileExistsError('existing fitted store requires resume=True')
+                verify_fit_inputs()
+                entry = _verify_model(target, expected, receipt)
+            else:
+                verify_fit_inputs()
+                before = time.perf_counter()
+                fitted = prepare_phewas_model(y, ids, x, family=family, kinship=kinship,
+                    continuous_transform=plan['transform'] if family == 'gaussian' else 'none',
+                    device=device, association_mode='tf32', use_spa=True, fit_structure_cache=structures)
+                if not fitted.model.converged:
+                    raise ArithmeticError('prepared phenotype null fit did not converge')
+                selected = rows[fitted.sample_indices]
+                if not np.array_equal(selected, rows):
+                    raise ValueError('null fitter unexpectedly changed the aligned complete-case axis')
+                metadata = dict(fitted.metadata, trait_index=index, phenotype=name,
+                    covariate_names=list(names), alignment=counts,
+                    covariate_design=counts['covariate_design'],
+                    prepared_association_binding=expected, wall_seconds=time.perf_counter()-before,
+                    source_implementation_sha256=plan['source_implementation_sha256'],
+                    alignment_cache=alignment_cache.summary(), fit_structure_cache=structures.stats())
+                if plan.get('binary_only'):
+                    metadata.update(binary_only=True, **{key:counts[key] for key in
+                        ('analysis_cases','analysis_controls','available_cases','available_controls','imputed_controls')})
+                entry = save_model_store(fitted.model, target, sample_rows=selected,
+                    fit_metadata=metadata, spa_model=fitted.spa_model)
+                entry['trait_index'] = index
+                verify_fit_inputs()
+                atomic_json(receipt, entry)
+                del fitted
+                gc.collect()
+            entries.append(entry)
+        if verifier is not None:
+            verifier.finish()
+            atomic_json(output/'model_fit.runtime.private.json',dict(schema_version=1,complete=True,
+                binary_only=True,trait_count=len(entries),input_verification=verifier.summary(),
+                alignment_cache=alignment_cache.summary(),fit_structure_cache=structures.stats()))
+    finally:
+        structures.close()
     return entries
 
 
@@ -370,6 +469,8 @@ def _inline_cpu_policy(resources):
 
 def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_affinity=False):
     """Run this invocation's own partition; parent affinity stays unchanged."""
+    from .worker_file_resources import configure_worker_file_capacity
+    file_admission = configure_worker_file_capacity(plan.get('trait_count', 0))
     from .phewas_trait_csv import PerTraitCheckpointCSVWriter
     from .phewas_runtime.runtime import run_batched_configuration
     from .phewas_resources import HostMemoryGate
@@ -409,11 +510,21 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
             configuration_sha256=_hash(dict(configuration=plan['configuration'],
                                            trait_batch_size=resources['trait_batch_size'])),
             models=[dict(trait_index=entry['trait_index'], sha256=entry['sha256']) for entry in entries])
-        writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
-            resume=resources['resume'], worker_id=str(worker_id),
-            minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0))
+        if dispatch['strategy']=='whole_chromosomes':
+            from .chromosome_csv import ChromosomeCheckpointCSVWriter
+            writer = ChromosomeCheckpointCSVWriter(output/'csv', binding=binding,
+                chromosomes=dispatch['workers'][worker_id]['assigned_chromosomes'],
+                resume=resources['resume'], worker_id=str(worker_id),
+                minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
+                file_descriptor_admission=file_admission)
+        else:
+            writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
+                resume=resources['resume'], worker_id=str(worker_id),
+                minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0))
         gate = HostMemoryGate(output, **_host_memory_policy(plan))
         configuration = dispatch_configuration(plan['configuration'],dispatch,worker_id)
+        from .phewas_partition import GeneticScheduleAudit
+        schedule_audit = GeneticScheduleAudit(configuration)
         if configuration['chromosomes']:
             report = run_batched_configuration(configuration, model_repository=repository,
                 reader_factory=prepared_reader, writer=writer, device=device,
@@ -422,6 +533,7 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
                 cpu_threads=resources['cpu_threads'], device_cache_bytes=resources['device_cache_bytes'],
                 compact_cache_bytes=resources['compact_cache_bytes'],
                 metadata_cache_bytes=resources['metadata_cache_bytes'],
+                emit=schedule_audit.observe,
                 host_memory_lease_factory=gate.lease_factory)
         else:
             report = dict(association_rows=dict.fromkeys(_KINDS, 0), job_groups=0,
@@ -432,9 +544,13 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
         report.update(worker_id=worker_id, worker_count=worker_count,
             end_to_end_seconds=time.perf_counter()-started,
             source_implementation_sha256=plan['source_implementation_sha256'],
+            assigned_chromosomes=[entry['name'] for entry in configuration['chromosomes']],
+            file_descriptors=report['output'].get('file_descriptors',file_admission),
             assigned_trait_indices=assigned_traits,assigned_trait_tiles=dispatch['workers'][worker_id]['trait_tiles'],association_partition_strategy=dispatch['strategy'],
             association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
             assigned_genetic_schedule_sha256=dispatch['workers'][worker_id]['genetic_schedule_sha256'])
+        if dispatch['strategy']=='whole_chromosomes':
+            report.update(schedule_audit.finish())
         atomic_json(prefix.with_name(prefix.name+'.report.private.json'), report)
         exit_code = 0
         return report
@@ -542,13 +658,29 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     from .phewas_run import _validate_host_memory_limit
     if type(options.get('rm_nan', True)) is not bool:
         raise ValueError('rm_nan must be a boolean')
+    if type(options.get('binary_only',False)) is not bool:
+        raise ValueError('binary_only must be a boolean')
     options.setdefault('rm_nan', True)
     options['host_memory_limit_gib'] = _validate_host_memory_limit(options.get('host_memory_limit_gib'))
     cpu_resources = _cpu_resources(options['cpu_threads'])
     root, manifest_path, manifest, entries, population = run._dataset(prepared_directory, chromosomes)
     phenotype_csv, covariate_csv = Path(phenotype_csv).resolve(), Path(covariate_csv).resolve()
-    phenotypes, covariates = run.read_csv_inputs(phenotype_csv, covariate_csv)
-    families = run._family_selection(options['phenotype_families'], phenotypes.names, phenotypes.values, rm_nan=options['rm_nan'])
+    if options.get('binary_only'):
+        loaded_input_stats = {str(path):_input_file_identity(path) for path in (phenotype_csv,covariate_csv)}
+    if options.get('binary_only'):
+        phenotypes, covariates = run.read_csv_inputs(phenotype_csv, covariate_csv,
+            host_memory_limit_gib=options['host_memory_limit_gib'])
+    else:
+        phenotypes, covariates = run.read_csv_inputs(phenotype_csv, covariate_csv)
+    if options.get('binary_only'):
+        if any(_input_file_identity(path)!=identity for path,identity in loaded_input_stats.items()):
+            raise ValueError('binary input source changed while the phenotype matrices were read')
+        options['_loaded_input_stats'] = loaded_input_stats
+    binary_only = options.get('binary_only',False)
+    families = (run._validate_binary_phenotypes(phenotypes) if binary_only else
+        run._family_selection(options['phenotype_families'], phenotypes.names, phenotypes.values, rm_nan=options['rm_nan']))
+    if binary_only and transform!='none':
+        raise ValueError('binary WGS requires transform=none')
     selections = _covariate_selection(options['phenotype_covariates'], phenotypes.names, covariates.names)
     kinship_file, kinship = None, None
     if options['grm'] == 'sparse':
@@ -569,14 +701,17 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     dictionary_sha = trait_index_sha256(phenotypes.names, families)
     scientific = dict(input_binding=input_binding, configuration=configuration, transform=transform,
         families=families, covariate_selection=selections, trait_names=list(phenotypes.names),
-        grm=options['grm'], rm_nan=options['rm_nan'], trait_batch_size=options['trait_batch_size'], trait_index_sha256=dictionary_sha)
+        grm=options['grm'], rm_nan=options['rm_nan'], binary_only=binary_only,
+        trait_batch_size=options['trait_batch_size'], trait_index_sha256=dictionary_sha)
     scientific_sha = _hash(scientific)
     plan = dict(schema_version=1, workflow='prepared_fid_iid_shared_association',
         source_implementation_sha256=source, scientific_binding_sha256=scientific_sha,
         output_directory=str(output), input_binding=input_binding, configuration=configuration,
-        families=families, covariate_selection=selections, transform=transform, rm_nan=options['rm_nan'], dataset=manifest,
+        families=families, covariate_selection=selections, transform=transform, rm_nan=options['rm_nan'],
+        binary_only=binary_only, dataset=manifest,
         trait_count=len(phenotypes.names), trait_index_sha256=dictionary_sha,
-        host_memory_limit_gib=options['host_memory_limit_gib'],association_partition_strategy='cohort_tiles',
+        host_memory_limit_gib=options['host_memory_limit_gib'],
+        association_partition_strategy=('whole_chromosomes' if binary_only else options.get('association_partition_strategy','cohort_tiles')),
         csv_output_layout='per_trait_checkpoint')
     from .phewas_partition import gpu_model_cache_capacity
     plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,

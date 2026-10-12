@@ -155,7 +155,10 @@ def test_pool_exit_retains_computation_error_over_cleanup_error(monkeypatch):
         with pool:
             raise ArithmeticError('original precision failure')
     assert len(calls) == 2 and pool.metadata()['stream_count'] == 0
-    assert any('cleanup also failed: RuntimeError' in note for note in retained.value.__notes__)
+    # Native exception notes are available from Python 3.11; error priority
+    # and complete cleanup remain mandatory on supported Python 3.10.
+    if hasattr(retained.value, 'add_note'):
+        assert any('cleanup also failed: RuntimeError' in note for note in retained.value.__notes__)
 
 
 def test_pipeline_scope_error_releases_lazy_owner_and_restores_context(monkeypatch):
@@ -189,4 +192,5 @@ def test_manual_exitstack_secondary_error_preserves_primary_and_finishes_cleanup
     stack.callback(failure)
     streams.close_preserving_error(stack.close, primary)
     assert closed == ['first', 'second']
-    assert any('cleanup also failed: RuntimeError' in note for note in primary.__notes__)
+    if hasattr(primary, 'add_note'):
+        assert any('cleanup also failed: RuntimeError' in note for note in primary.__notes__)

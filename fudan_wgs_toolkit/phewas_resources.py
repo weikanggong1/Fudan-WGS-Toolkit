@@ -596,8 +596,11 @@ def host_output_lease_scope(factory,rows,traits,*,chromosome_index,job_index,
                     pass  # The admission error and its identity-bound retirement win.
                 if isinstance(error,HostMemoryRequestTooLarge):
                     error.reason = "single_output_tile_exceeds_host_capacity"
-                    error.add_note(f"Single output tile: at most {rows} rows per trait, {traits} traits; "
-                                   "reduce the output tile or increase the host budget")
+                    # Python 3.10 has no exception notes. Keep the capacity
+                    # error intact rather than masking it with AttributeError.
+                    if hasattr(error, "add_note"):
+                        error.add_note(f"Single output tile: at most {rows} rows per trait, {traits} traits; "
+                                       "reduce the output tile or increase the host budget")
                     raise
                 attempts += 1
                 elapsed = time.monotonic()-started

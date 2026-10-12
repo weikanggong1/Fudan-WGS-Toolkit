@@ -1,8 +1,8 @@
 """Fudan WGS Toolkit: GPU association analysis."""
-__version__ = "0.9.0"
-from .run import run_WGS_all
+__version__ = "0.10.0"
+from .run import run_WGS_all_binanry
 
-__all__ = ["prepare_WGS_data", "run_WGS_all"]
+__all__ = ["prepare_WGS_data", "run_WGS_all_binanry"]
 
 
 def __getattr__(name):

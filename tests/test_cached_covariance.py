@@ -181,7 +181,7 @@ def test_long_cached_pipeline_guard_cleans_before_planning_and_uses_fresh_budget
     pipeline = PheWASPipeline.__new__(PheWASPipeline)
     pipeline.options = SimpleNamespace(sample_block_size=None, long_mask_threshold=5000,
         covariance_backend="cached", cached_variant_tile_size=4096,
-        memory_limit_gib=20, long_mask_rank=512)
+        memory_limit_gib=20, long_mask_rank=512, long_mask_method="fastskat")
     model = SimpleNamespace(n=340795, n_pheno=1, matmul_mode="tf32", use_spa=False,
         spectrum=SimpleNamespace(blocks=[]), x=SimpleNamespace(shape=(340795, 23)),
         device="cuda:3")

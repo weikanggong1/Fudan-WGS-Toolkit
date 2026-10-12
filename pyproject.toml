@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fudan-wgs-toolkit"
-version = "0.9.0"
-description = "Fudan WGS Toolkit: Python GPU single-variant and gene association analysis"
+version = "0.10.0"
+description = "Fudan WGS Toolkit: Python GPU association analysis for multiple binary phenotypes"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-only"}
 dependencies = ["numpy>=1.26,<2", "pandas>=1.4", "scipy>=1.13", "torch>=2.4", "zstandard>=0.22", "triton>=3.0; platform_system == 'Linux'"]
@@ -18,7 +18,7 @@ annotations = ["rdata==0.11.2"]
 [project.scripts]
 fudan-wgs = "fudan_wgs_toolkit.run:main"
 prepare-WGS-data = "fudan_wgs_toolkit.prepare:main"
-run-WGS-all = "fudan_wgs_toolkit.run:main"
+run-WGS-all-binanry = "fudan_wgs_toolkit.run:main"
 
 [tool.setuptools.packages.find]
 include = ["fudan_wgs_toolkit*"]

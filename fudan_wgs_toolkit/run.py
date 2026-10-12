@@ -1,6 +1,7 @@
-"""Single and multiple phenotype association on prepared genetic data."""
+"""Multiple binary phenotype association on prepared genetic data."""
 from __future__ import annotations
 import argparse
+from collections import OrderedDict
 import csv
 from dataclasses import dataclass
 from functools import partial
@@ -68,7 +69,7 @@ def _normalise_devices(device, gpu_ids=None):
         except (ValueError, RuntimeError) as error:
             raise ValueError("invalid CUDA device name") from error
         if selected.type != "cuda":
-            raise ValueError("run_WGS_all requires CUDA devices")
+            raise ValueError("run_WGS_all_binanry requires CUDA devices")
         indices.append(0 if selected.index is None else selected.index)
     if len(set(indices)) != len(indices):
         raise ValueError("device must select distinct GPUs")
@@ -125,6 +126,44 @@ def _json_write(path, value):
     temporary.replace(path)
 
 
+def _binary_sample_counts(output):
+    """Read small fitted metadata, never reopen phenotype/genotype matrices."""
+    rows = []
+    for path in sorted((output / 'models').glob('trait_*/model.private.json')):
+        model = json.loads(path.read_text())
+        fit = model['fit']
+        counts = dict(fit.get('alignment', {}), **fit)
+        fields = ('analysis_cases', 'analysis_controls', 'available_cases',
+                  'available_controls', 'imputed_controls')
+        if model['family'] != 'binomial' or any(type(counts.get(f)) is not int or counts[f] < 0 for f in fields):
+            raise ValueError('completed binary model is missing verified case/control counts')
+        if (min(counts['analysis_cases'], counts['analysis_controls']) == 0 or
+                counts['analysis_cases'] + counts['analysis_controls'] != model['n']):
+            raise ValueError('completed binary model counts differ from actual analysis samples')
+        rows.append(dict(trait_index=int(path.parent.name.removeprefix('trait_')),
+                         phenotype=fit.get('phenotype', fit.get('name')),
+                         samples=model['n'], cases=counts['analysis_cases'],
+                         controls=counts['analysis_controls'],
+                         available_cases=counts['available_cases'],
+                         available_controls=counts['available_controls'],
+                         imputed_controls=counts['imputed_controls']))
+    if (output / 'plan.private.json').is_file():
+        plan = json.loads((output / 'plan.private.json').read_text())
+        if len(rows) != plan['trait_count'] or len(rows) < 2:
+            raise ValueError('completed binary run is missing a phenotype model')
+    if rows:
+        target = output / 'phenotype_sample_counts.csv'
+        temporary = target.with_name(target.name + f'.{os.getpid()}.tmp')
+        with temporary.open('w', newline='', encoding='utf-8') as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(target)
+    return rows
+
+
 @dataclass(frozen=True)
 class NumericCSV:
     sample_pairs: np.ndarray
@@ -136,10 +175,32 @@ class NumericCSV:
         return sample_keys(self.sample_pairs)
 
 
-def _read_csv(path, *, require_columns):
+def _csv_stat(path):
+    value = Path(path).stat()
+    return (value.st_dev, value.st_ino, value.st_size,
+            value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _csv_unchanged(path, identity, handle=None):
+    """Bind both parsing passes to the same static file and opened inode."""
+    current = _csv_stat(path)
+    if handle is not None:
+        value = os.fstat(handle.fileno())
+        opened = (value.st_dev, value.st_ino, value.st_size,
+                  value.st_mtime_ns, value.st_ctime_ns)
+        if opened != identity:
+            raise ValueError(f"{Path(path).name}: CSV changed while being read")
+    if current != identity:
+        raise ValueError(f"{Path(path).name}: CSV changed while being read")
+
+
+def _csv_layout(path, *, require_columns):
+    """Count rows and identifier width without retaining their cells."""
     path = Path(path)
-    pairs, rows = [], []
+    identity = _csv_stat(path)
+    count, width = 0, 1
     with path.open(newline="", encoding="utf-8-sig") as handle:
+        _csv_unchanged(path, identity, handle)
         reader = csv.reader(handle)
         header = next(reader, None)
         if not header:
@@ -158,9 +219,83 @@ def _read_csv(path, *, require_columns):
                 continue
             if len(row) != len(header):
                 raise ValueError(f"{path.name}:{line}: number of columns differs from the header")
-            pairs.append([row[fid], row[iid]])
-            values = []
-            for column in columns:
+            count += 1
+            width = max(width, len(row[fid]), len(row[iid]))
+        _csv_unchanged(path, identity, handle)
+    if not count:
+        raise ValueError(f"{path.name}: no participant rows")
+    pair_bytes = count * 2 * np.dtype(f"U{width}").itemsize
+    # NumPy's structured stable sort checks complete pairs without a Python
+    # tuple/set per participant. Allow its copy, merge scratch and comparisons.
+    workspace_bytes = 2 * pair_bytes + count + 65536 + 64 * len(header)
+    return dict(path=path, identity=identity, header=header, fid=fid, iid=iid,
+                columns=columns, rows=count, identifier_width=width,
+                array_bytes=count * len(columns) * 8 + pair_bytes,
+                workspace_bytes=workspace_bytes)
+
+
+def _csv_host_admission(required_bytes, *, host_memory_limit_gib=None,
+                        host_memory_reserve_gib=None):
+    """Forecast new arrays against every live constraint; this is not an RSS cap."""
+    from .phewas_resources import (GiB, _gib_bytes, read_host_memory,
+                                  HostMemoryDeferred, HostMemoryRequestTooLarge)
+    memory = read_host_memory()
+    constraints = memory.get("constraints", [memory])
+    detected = min(int(item["limit_bytes"]) for item in constraints)
+    limit = (detected if host_memory_limit_gib is None else
+             _gib_bytes(host_memory_limit_gib, "host_memory_limit_gib"))
+    reserve = (min(20 * GiB, min(limit, detected) // 10)
+               if host_memory_reserve_gib is None else
+               _gib_bytes(host_memory_reserve_gib, "host_memory_reserve_gib", allow_zero=True))
+    if reserve > limit or (limit and reserve == limit):
+        raise ValueError("host memory reserve must be smaller than its limit")
+    capacity = max(0, min(limit, detected) - reserve)
+    if required_bytes > capacity:
+        raise HostMemoryRequestTooLarge(required_bytes, capacity)
+    headrooms, project_scope_seen = [], False
+    for item in constraints:
+        maximum = int(item["limit_bytes"])
+        # A wider ancestor includes unrelated jobs. Apply the requested project
+        # limit to its own first finite cgroup, not to those wider ancestors.
+        if item["scope"].startswith("cgroup") and not project_scope_seen:
+            maximum = min(maximum, limit)
+            project_scope_seen = True
+        headrooms.append(maximum - int(item["effective_current_bytes"]) - reserve)
+    available = min(capacity, *headrooms)
+    if required_bytes > available:
+        raise HostMemoryDeferred(required_bytes, available_bytes=available,
+                                 reason="numeric_csv_arrays_and_identity_workspace")
+    return dict(required_bytes=int(required_bytes), available_bytes=max(0, available),
+                resolved_limit_bytes=limit, reserve_bytes=reserve)
+
+
+def _read_csv(path, *, require_columns, host_memory_limit_gib=None,
+              host_memory_reserve_gib=None, _layout=None):
+    """Preallocate one numeric array, then retain only one CSV row at a time."""
+    from .identity import _identifier
+    path = Path(path)
+    layout = _csv_layout(path, require_columns=require_columns) if _layout is None else _layout
+    _csv_unchanged(path, layout["identity"])
+    _csv_host_admission(layout["array_bytes"] + layout["workspace_bytes"],
+                       host_memory_limit_gib=host_memory_limit_gib,
+                       host_memory_reserve_gib=host_memory_reserve_gib)
+    pairs = np.empty((layout["rows"], 2), dtype=f"U{layout['identifier_width']}")
+    values = np.empty((layout["rows"], len(layout["columns"])), dtype=np.float64)
+    cursor = 0
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        _csv_unchanged(path, layout["identity"], handle)
+        reader = csv.reader(handle)
+        if [name.strip() for name in next(reader, [])] != layout["header"]:
+            raise ValueError(f"{path.name}: CSV changed while being read")
+        for line, row in enumerate(reader, 2):
+            if not row or all(not cell.strip() for cell in row):
+                continue
+            if len(row) != len(layout["header"]):
+                raise ValueError(f"{path.name}:{line}: number of columns differs from the header")
+            if cursor >= layout["rows"]:
+                raise ValueError(f"{path.name}: CSV changed while being read")
+            numeric = []  # At most one row; never all participant/trait cells.
+            for column in layout["columns"]:
                 token = row[column].strip()
                 if token.lower() in _MISSING:
                     value = float("nan")
@@ -168,25 +303,149 @@ def _read_csv(path, *, require_columns):
                     try:
                         value = float(token)
                     except ValueError as error:
-                        raise ValueError(f"{path.name}:{line}: {header[column]} must contain numeric or missing values") from error
-                    if not np.isfinite(value):
+                        raise ValueError(f"{path.name}:{line}: {layout['header'][column]} must contain numeric or missing values") from error
+                    if not math.isfinite(value):
                         raise ValueError(f"{path.name}:{line}: infinity is not a valid numeric value")
-                values.append(value)
-            rows.append(values)
-    if not rows:
-        raise ValueError(f"{path.name}: no participant rows")
-    pairs = validate_sample_pairs(np.asarray(pairs, dtype=str), where=path.name)
-    names = tuple(header[column] for column in columns)
-    return NumericCSV(pairs, names, np.asarray(rows, dtype=np.float64).reshape(len(rows), len(names)))
+                numeric.append(value)
+            pair = tuple(_identifier(row[index], where=path.name)
+                         for index in (layout["fid"], layout["iid"]))
+            if max(map(len, pair)) > layout["identifier_width"]:
+                raise ValueError(f"{path.name}: CSV changed while being read")
+            pairs[cursor] = pair
+            values[cursor] = numeric
+            cursor += 1
+        _csv_unchanged(path, layout["identity"], handle)
+    if cursor != layout["rows"]:
+        raise ValueError(f"{path.name}: CSV changed while being read")
+    paired = pairs.view(np.dtype([("FID", pairs.dtype), ("IID", pairs.dtype)])).reshape(-1)
+    ordered = np.sort(paired, order=("FID", "IID"), kind="stable")
+    if np.any(ordered[1:] == ordered[:-1]):
+        raise ValueError(f"{path.name}: duplicate FID/IID pair")
+    _csv_unchanged(path, layout["identity"])
+    names = tuple(layout["header"][column] for column in layout["columns"])
+    return NumericCSV(pairs, names, values)
 
 
-def read_csv_inputs(phenotype_csv, covariate_csv):
-    """Read numeric values using exact FID/IID strings without imputing values."""
-    return _read_csv(phenotype_csv, require_columns=True), _read_csv(covariate_csv, require_columns=False)
+def read_csv_inputs(phenotype_csv, covariate_csv, *, host_memory_limit_gib=None,
+                    host_memory_reserve_gib=None):
+    """Read exact identities and float64 values without full Python cell lists.
+
+    A count pass precedes allocation. Admission uses live cgroup ancestors and
+    physical available memory, with a default 20 GiB or 10% reserve, whichever
+    is smaller. Arrays remain in memory; this does not impose a hard RSS cap.
+    """
+    layouts = [_csv_layout(phenotype_csv, require_columns=True),
+               _csv_layout(covariate_csv, require_columns=False)]
+    _csv_host_admission(sum(item["array_bytes"] for item in layouts)
+                        + max(item["workspace_bytes"] for item in layouts),
+                        host_memory_limit_gib=host_memory_limit_gib,
+                        host_memory_reserve_gib=host_memory_reserve_gib)
+    inputs = tuple(_read_csv(item["path"], require_columns=index == 0, _layout=item,
+                             host_memory_limit_gib=host_memory_limit_gib,
+                             host_memory_reserve_gib=host_memory_reserve_gib)
+                   for index, item in enumerate(layouts))
+    for item in layouts:
+        _csv_unchanged(item["path"], item["identity"])
+    return inputs
+
+
+def _validate_binary_phenotypes(phenotypes):
+    """Reject continuous columns and unsupported codes before fitting models."""
+    if len(phenotypes.names) < 2:
+        raise ValueError("binary WGS requires at least two phenotype columns")
+    for index, name in enumerate(phenotypes.names):
+        values = phenotypes.values[:, index]
+        finite = values[np.isfinite(values)]
+        if np.any((finite != 0) & (finite != 1)):
+            raise ValueError(f"binary phenotype {name} must contain only zero, one or missing values")
+    return {name: "binomial" for name in phenotypes.names}
+
+
+class AlignedInputCache:
+    """Bounded, read-only identity/design reuse across binary phenotype fits."""
+    def __init__(self, phenotypes, covariates, cache_pairs, *, max_bytes=256*2**20):
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("alignment cache capacity must be a nonnegative integer")
+        self.phenotypes, self.covariates, self.cache_pairs = phenotypes, covariates, cache_pairs
+        self.keys = sample_keys(validate_sample_pairs(cache_pairs, where="prepared sample index"))
+        self.pheno_lookup = {key: i for i, key in enumerate(phenotypes.sample_ids)}
+        self.cov_lookup = {key: i for i, key in enumerate(covariates.sample_ids)}
+        self.items, self.bytes, self.maximum = OrderedDict(), 0, max_bytes
+        self.hits = self.misses = self.design_builds = 0
+
+    def _get(self, key, builder):
+        if key in self.items:
+            self.hits += 1
+            value, size = self.items.pop(key)
+            self.items[key] = (value, size)
+            return value
+        self.misses += 1
+        value = builder()
+        def arrays(obj):
+            if isinstance(obj, np.ndarray):
+                yield obj
+            elif isinstance(obj, dict):
+                for child in obj.values():
+                    yield from arrays(child)
+            elif isinstance(obj, (tuple, list)):
+                for child in obj:
+                    yield from arrays(child)
+        owned = {id(a): a for a in arrays(value)}
+        size = sum(a.nbytes for a in owned.values())
+        for a in owned.values():
+            a.flags.writeable = False
+        if size <= self.maximum:
+            while self.items and self.bytes + size > self.maximum:
+                _, (_, removed) = self.items.popitem(last=False)
+                self.bytes -= removed
+            self.items[key] = (value, size)
+            self.bytes += size
+        return value
+
+    def profile(self, names):
+        names = tuple(names)
+        columns = [self.covariates.names.index(name) for name in names]
+        def build():
+            matched = [(row, self.pheno_lookup[key], self.cov_lookup.get(key, -1))
+                       for row, key in enumerate(self.keys)
+                       if key in self.pheno_lookup and (not columns or key in self.cov_lookup)]
+            cached = np.asarray([item[0] for item in matched], dtype=np.int64)
+            pheno = np.asarray([item[1] for item in matched], dtype=np.int64)
+            cov = np.asarray([item[2] for item in matched], dtype=np.int64)
+            x = (np.asarray(self.covariates.values[np.ix_(cov, columns)], dtype=np.float64)
+                 if columns else np.empty((len(matched), 0), dtype=np.float64))
+            return dict(cache_rows=cached, pheno_rows=pheno, x=x,
+                        eligible=np.isfinite(x).all(axis=1))
+        return self._get(("profile", names), build)
+
+    def design(self, names, selected, x, *, reduce_redundant):
+        axis = hashlib.sha256(np.ascontiguousarray(selected, dtype=np.int64).tobytes()).digest()
+        def build():
+            self.design_builds += 1
+            has_intercept = bool(x.shape[1] and np.any(np.all(x == 1, axis=0)))
+            design = None
+            result, columns = x, tuple(names)
+            if reduce_redundant:
+                from .phewas_run import _design
+                result, design = _design(x, names)
+                columns = tuple(design["covariate_names"])
+            elif not has_intercept:
+                result = np.column_stack((np.ones(len(x)), x))
+                columns = ("Intercept", *names)
+            if len(result) <= result.shape[1] or np.linalg.matrix_rank(result) != result.shape[1]:
+                raise ValueError("insufficient binary samples or rank-deficient covariate design")
+            return result, columns, design, has_intercept
+        return self._get(("design", tuple(names), reduce_redundant, axis), build)
+
+    def summary(self):
+        return dict(capacity_bytes=self.maximum, retained_bytes=self.bytes,
+                    entries=len(self.items), hits=self.hits, misses=self.misses,
+                    design_builds=self.design_builds)
 
 
 def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_names=None,
-                      reduce_redundant=False, rm_nan=False, family="gaussian"):
+                      reduce_redundant=False, rm_nan=False, family="gaussian",
+                      binary_only=False, alignment_cache=None):
     """Align this trait and apply its explicit missing policy in cache order.
 
     This lower-level alignment helper keeps the historical available-case
@@ -194,6 +453,7 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
     """
     if trait not in phenotypes.names:
         raise ValueError("unknown phenotype column")
+    original_covariates = covariates
     if covariate_names is not None:
         if (not isinstance(covariate_names, (list, tuple)) or
                 any(not isinstance(name, str) for name in covariate_names) or
@@ -203,51 +463,38 @@ def aligned_phenotype(phenotypes, covariates, cache_pairs, trait, *, covariate_n
             raise ValueError("unknown selected covariate column")
         columns = [covariates.names.index(name) for name in covariate_names]
         covariates = NumericCSV(covariates.sample_pairs, tuple(covariate_names), covariates.values[:, columns])
-    cached = validate_sample_pairs(cache_pairs, where="prepared sample index")
-    keys = sample_keys(cached)
-    pheno_lookup = {key: i for i, key in enumerate(phenotypes.sample_ids)}
-    cov_lookup = {key: i for i, key in enumerate(covariates.sample_ids)}
-    uses_covariates = bool(covariates.names)
-    matched = [(row, pheno_lookup[key], cov_lookup.get(key, -1)) for row, key in enumerate(keys)
-               if key in pheno_lookup and (not uses_covariates or key in cov_lookup)]
-    cache_rows = np.asarray([item[0] for item in matched], dtype=np.int64)
-    pheno_rows = np.asarray([item[1] for item in matched], dtype=np.int64)
-    cov_rows = np.asarray([item[2] for item in matched], dtype=np.int64)
+    cache = (AlignedInputCache(phenotypes, original_covariates, cache_pairs, max_bytes=0)
+             if alignment_cache is None else alignment_cache)
+    if (cache.phenotypes is not phenotypes or cache.covariates is not original_covariates
+            or cache.cache_pairs is not cache_pairs):
+        raise ValueError("alignment cache is bound to different inputs or sample ordering")
+    keys, pheno_lookup, cov_lookup = cache.keys, cache.pheno_lookup, cache.cov_lookup
+    profile = cache.profile(covariates.names)
+    cache_rows, pheno_rows = profile['cache_rows'], profile['pheno_rows']
     y = phenotypes.values[pheno_rows, phenotypes.names.index(trait)]
-    x = covariates.values[cov_rows] if uses_covariates else np.empty((len(y), 0), dtype=np.float64)
+    x = profile['x']
     from .phewas_inputs import apply_phenotype_missing_policy
     policy = apply_phenotype_missing_policy(y, family=family, rm_nan=rm_nan,
-        covariate_valid=np.isfinite(x).all(axis=1))
+        covariate_valid=profile['eligible'], binary_only=binary_only)
     selected = policy['sample_indices']
     keep = np.zeros(len(y), dtype=bool)
     keep[selected] = True
     identifiers, y, x = keys[cache_rows][selected], policy['values'], x[selected]
-    has_intercept = bool(x.shape[1] and np.any(np.all(x == 1, axis=0)))
-    names = covariates.names
-    design = None
-    if reduce_redundant:
-        if not len(y):
-            raise ValueError(f"phenotype {trait}: insufficient complete-case samples for the covariate design")
-        from .phewas_run import _design
-        x, design = _design(x, names)
-        names = tuple(design['covariate_names'])
-    elif not has_intercept:
-        x = np.column_stack((np.ones(len(y)), x))
-        names = ("Intercept", *names)
-    if len(y) <= x.shape[1]:
-        raise ValueError(f"phenotype {trait}: insufficient complete-case samples for the covariate design")
-    if np.linalg.matrix_rank(x) != x.shape[1]:
-        raise ValueError(f"phenotype {trait}: covariate design is rank deficient")
+    x, names, design, has_intercept = cache.design(covariates.names, selected, x,
+        reduce_redundant=reduce_redundant)
     cache_set = set(keys)
     counts = dict(phenotype_rows=len(phenotypes.values), covariate_rows=len(covariates.values),
-        prepared_samples=len(cached), matched_rows_before_missing=len(matched),
+        prepared_samples=len(keys), matched_rows_before_missing=len(cache_rows),
         excluded_missing_rows=int((~keep).sum()), analysis_samples=len(y),
         phenotype_rows_absent_from_prepared=sum(key not in cache_set for key in pheno_lookup),
         phenotype_rows_absent_from_covariates=sum(key not in cov_lookup for key in pheno_lookup),
         intercept_added=not has_intercept, design_columns=x.shape[1],
         rm_nan=rm_nan, missing_policy=policy['missing_policy'],
         available_n=policy['available_n'], mother_n=policy['mother_n'],
-        imputed_n=policy['imputed_n'], imputation_mean=policy['imputation_mean'])
+        imputed_n=policy['imputed_n'], imputation_mean=policy['imputation_mean'],
+        binary_only=binary_only,
+        **{field: policy[field] for field in ('analysis_cases', 'analysis_controls',
+            'available_cases', 'available_controls', 'imputed_controls')})
     if design is not None:
         counts['covariate_design'] = design
     return identifiers, y, x, names, counts
@@ -435,47 +682,44 @@ def _jobs(entry, analyses, output, *, single_mac_cutoff, single_group_variants, 
     return jobs
 
 
-def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
                 chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
                 memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
-                phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
-                transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
-                covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512, seed=1729,
+                phenotype_covariates=None, impute_missing=True, gene_variant_type="SNV",
+                covariance_block_size=4096, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
                 individual_effective_block_size=1024, device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
-                gpu_ids=None, trait_batch_size=16, continuous_transform=None,
+                trait_batch_size=32,
                 grm="sparse", grm_file=None):
-    """Associate every numeric phenotype independently with existing WGS caches.
+    """Associate at least two strictly binary 0/1/missing phenotype columns.
 
     chromosomes='all' consumes all declared autosomes; a list selects a subset.
     device=['cuda:0'] selects one GPU, while integer n selects the first n GPUs.
     None uses physical GPU capacity with memory_reserve_gib kept for workspace.
     host_memory_limit_gib bounds the whole node task, shared across GPU workers;
     None detects all finite cgroup ancestor limits and physical capacity.
-    Exact finite 0/1 columns are binomial in auto mode; other columns Gaussian.
-    rm_nan=True fills Gaussian missing phenotypes with their eligible mean and
-    maps binomial values other than one, including missing, to zero. False
-    selects complete cases. Selected covariates are never imputed. Unlisted
-    traits use all supplied covariates; changing rm_nan requires new null fits.
+    impute_missing=True maps phenotype NaNs to controls after matching existing
+    input rows and valid selected covariates. False selects each phenotype's
+    observed samples. Other finite codes are rejected in either mode. Every
+    phenotype needs both cases and controls; covariates are never imputed.
+    Unlisted traits use all supplied covariates. Changing the missing policy
+    requires a fresh output directory and null fits.
     grm='sparse' requires an ID-bound GRM; grm='none' selects ordinary nulls.
     resume verifies immutable per-block CSV/model/input/source proofs and fills
     missing blocks. A new full run (resume=False) requires a fresh output folder.
     Both supported cache formats use genetic-major GPU phenotype tiles and
     emit complete compressed text CSV shards and a private trait dictionary.
-    Large fitted banks partition ordered cohorts across GPUs; when too few
-    cohorts fit the workers or a cohort exceeds cache capacity, fixed global
-    phenotype tiles divide that cohort. Smaller banks partition genetic jobs.
-    Unique jobs and worker scan visits are
-    reported separately, with global trait IDs and model bindings preserved.
-    long_mask_method="full" computes complete native FP32 gene spectra with
-    live GPU admission. fastskat/liu explicitly retain threshold-based
-    approximations; long_mask_threshold is not the default spectrum switch.
+    All GPU counts use whole-chromosome dispatch. Each active GPU processes
+    all phenotypes for its assigned chromosomes, sharing genotype reads and
+    transfers in bounded tiles. Per-phenotype fitted models and statistics
+    remain independent. Null fitting retains the validated FP64 path; main
+    association operators use native FP32/TF32 with stable tail branches.
     Genetic preparation is never invoked by this association entry point.
     """
     chromosomes = _normalise_chromosomes(chromosomes)
-    if type(rm_nan) is not bool:
-        raise ValueError("rm_nan must be a boolean")
+    if type(impute_missing) is not bool:
+        raise ValueError("impute_missing must be a boolean")
     if type(resume) is not bool:
         raise ValueError("resume must be a boolean")
     if type(cpu_threads) is not int or cpu_threads < 1:
@@ -494,20 +738,14 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
     kinds = tuple(dict.fromkeys(analyses))
     if not kinds or any(k not in _KINDS for k in kinds):
         raise ValueError("analyses must select individual, coding, noncoding or ncrna")
-    positive = (covariance_block_size, long_mask_threshold, long_mask_rank, single_mac_cutoff,
+    positive = (covariance_block_size, single_mac_cutoff,
                 single_group_variants, single_region_size, individual_effective_block_size, trait_batch_size)
     if any(type(v) is not int or v < 1 for v in positive):
         raise ValueError("block sizes, trait tiles and MAC cutoff must be positive integers")
-    if long_mask_method not in ("full", "fastskat", "liu"):
-        raise ValueError("long_mask_method must be full, fastskat or liu")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
     if any(type(v) is not int or v < 0 for v in (device_cache_bytes, compact_cache_bytes)) or type(metadata_cache_bytes) is not int or metadata_cache_bytes < 1:
         raise ValueError("cache capacities must be nonnegative; metadata capacity must be positive")
-    if transform not in ("none", "rint") or null_fit_mode not in ("fp64", "tf32"):
-        raise ValueError("transform must be none or rint; null_fit_mode must be fp64 or tf32")
-    if continuous_transform not in (None, "paper", "none", "rint"):
-        raise ValueError("continuous_transform must be None, paper, none or rint")
     if gene_variant_type not in ("SNV", "Indel", "variant"):
         raise ValueError("gene_variant_type must be SNV, Indel or variant")
     if grm not in ("sparse", "none") or (grm == "none" and grm_file is not None):
@@ -515,18 +753,13 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
     population = (Path(prepared_directory)/"cache_dataset.json").is_file()
     if population and (Path(prepared_directory)/"dataset.json").exists():
         raise ValueError("prepared directory contains ambiguous old and new dataset roots")
-    if transform != "none":
-        if continuous_transform not in (None, transform):
-            raise ValueError("conflicting phenotype transformations")
-        continuous_transform = transform
-    if continuous_transform is None:
-        continuous_transform = "paper" if population else "none"
-    devices = _normalise_devices(device, gpu_ids)
+    devices = _normalise_devices(device)
     options = dict(analyses=kinds, cpu_threads=cpu_threads, memory_limit_gib=memory_limit_gib,
-        memory_reserve_gib=float(memory_reserve_gib), host_memory_limit_gib=host_memory_limit_gib, phenotype_families=phenotype_families,
-        phenotype_covariates=phenotype_covariates, rm_nan=rm_nan, gene_variant_type=gene_variant_type,
-        covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
-        long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
+        memory_reserve_gib=float(memory_reserve_gib), host_memory_limit_gib=host_memory_limit_gib, phenotype_families="auto",
+        phenotype_covariates=phenotype_covariates, rm_nan=impute_missing, gene_variant_type=gene_variant_type,
+        binary_only=True, association_partition_strategy="whole_chromosomes",
+        covariance_block_size=covariance_block_size, long_mask_threshold=5000,
+        long_mask_method="full", long_mask_rank=512, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
@@ -542,17 +775,15 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
         _json_write(output/"status.private.json", dict(status="running", attempt_id=attempt_id))
     try:
         if population:
-            if null_fit_mode != "fp64":
-                raise ValueError("mixed PheWAS null fitting requires fp64")
             from .phewas_run import run_phewas
             workers = run_phewas(phenotype_csv, covariate_csv, prepared_directory,
                 output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
-                continuous_transform=continuous_transform, **options)
+                continuous_transform="none", **options)
         else:
             from .prepared_association import run_prepared_association
             workers = run_prepared_association(phenotype_csv, covariate_csv, prepared_directory,
                 output_directory=output_directory, gpu_ids=devices, chromosomes=chromosomes,
-                transform=continuous_transform, null_fit_mode=null_fit_mode, **options)
+                transform="none", null_fit_mode="fp64", **options)
         if not isinstance(workers, list) or len(workers) != len(devices):
             raise RuntimeError("WGS execution returned incomplete worker reports")
         rows = dict.fromkeys(_KINDS, 0)
@@ -568,8 +799,10 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
             dictionary_sha = _sha256(output/"trait_index.private.csv")
             if dictionary_sha != expected:
                 raise ValueError("completed phenotype dictionary differs from the bound input order")
-        report = dict(completed=True, schema_version=3, workflow="shared_cache_phewas",
+        report = dict(completed=True, schema_version=4, workflow="shared_cache_binary_phewas",
             attempt_id=attempt_id,
+            entry_point="run_WGS_all_binanry", impute_missing=impute_missing,
+            phenotype_counts=_binary_sample_counts(output),
             trait_index_sha256=dictionary_sha,
             eligible_association_tests=sum(rows.values()), association_rows=rows, workers=workers,
             gpu_ids=list(devices), end_to_end_seconds=time.perf_counter()-started,
@@ -606,46 +839,36 @@ def main(argv=None):
         if result < 1:
             raise argparse.ArgumentTypeError("must be a positive integer")
         return result
-    parser = argparse.ArgumentParser(description="Run WGS associations from FID/IID CSVs and prepared genetic data")
+    parser = argparse.ArgumentParser(description="Run multiple binary WGS associations from FID/IID CSVs")
     for name in ("phenotype_csv","covariate_csv","prepared_directory"):parser.add_argument(name)
     parser.add_argument("--output-directory",required=True)
     parser.add_argument("--chromosomes",nargs="+",default="all",help="all or chromosome numbers from 1 to 22")
     parser.add_argument("--analyses",nargs="+",choices=_KINDS,default=_KINDS)
     parser.add_argument("--device",nargs="+",default=["cuda:0"],help="CUDA names, or one integer selecting that many GPUs")
-    parser.add_argument("--gpu-ids",type=int,nargs="+",
-                        help="local CUDA device IDs for an existing GRM-bound population cache")
-    parser.add_argument("--trait-batch-size",type=positive_integer,default=16)
-    parser.add_argument("--continuous-transform",choices=("paper","none","rint"),default=None)
+    parser.add_argument("--trait-batch-size",type=positive_integer,default=32)
     parser.add_argument("--cpu-threads",type=positive_integer,default=8)
     parser.add_argument("--memory-limit-gib",type=float,default=_DEFAULT_MEMORY_LIMIT)
     parser.add_argument("--memory-reserve-gib",type=float,default=1.0)
     parser.add_argument("--host-memory-limit-gib",type=float,default=None,
                         help="shared host task budget in GiB; default detects physical and all finite cgroup limits")
-    parser.add_argument("--phenotype-families",default="auto",help="auto, or a JSON file mapping phenotype names to gaussian or binomial")
     parser.add_argument("--phenotype-covariates",help="JSON file mapping phenotype names to selected covariate column names")
-    parser.add_argument("--transform",choices=("none","rint"),default="none")
-    parser.add_argument("--null-fit-mode",choices=("fp64","tf32"),default="fp64")
     parser.add_argument("--gene-variant-type", choices=("SNV", "Indel", "variant"), default=_DEFAULT_GENE_VARIANT)
-    for name,default in (("covariance-block-size",4096),("long-mask-threshold",5000),("long-mask-rank",512),
+    for name,default in (("covariance-block-size",4096),
         ("seed",1729),("single-mac-cutoff",20),("single-group-variants",5000),("single-region-size",10_000_000),
         ("individual-effective-block-size",1024),("device-cache-bytes",512*2**20),
         ("compact-cache-bytes",64*2**20),("metadata-cache-bytes",256*2**20)):
         parser.add_argument("--"+name,type=int,default=default)
-    parser.add_argument("--long-mask-method", choices=("full", "fastskat", "liu"), default="full",
-                        help="full native FP32 spectra (default), or explicit legacy approximation")
-    parser.add_argument("--rm-nan", action=argparse.BooleanOptionalAction, default=True,
-        help="fill missing phenotypes (default); --no-rm-nan selects available complete cases")
+    parser.add_argument("--impute-missing", action=argparse.BooleanOptionalAction, default=True,
+        help="fill binary phenotype NaNs with zero; --no-impute-missing uses observed samples per trait")
     parser.add_argument("--resume",action="store_true")
     parser.add_argument("--grm",choices=("sparse","none"),default="sparse")
     parser.add_argument("--grm-file",help="ID-bound sparse GRM NPZ; otherwise use the prepared dataset sidecar")
     arguments = vars(parser.parse_args(argv))
     if len(arguments["device"]) == 1 and arguments["device"][0].isdecimal():
         arguments["device"] = int(arguments["device"][0])
-    if arguments["phenotype_families"] != "auto":
-        arguments["phenotype_families"] = json.loads(Path(arguments["phenotype_families"]).read_text(encoding="utf-8"))
     if arguments["phenotype_covariates"] is not None:
         arguments["phenotype_covariates"] = json.loads(Path(arguments["phenotype_covariates"]).read_text(encoding="utf-8"))
-    report = run_WGS_all(**arguments)
+    report = run_WGS_all_binanry(**arguments)
     print(json.dumps({key:report.get(key) for key in ("completed","eligible_association_tests","end_to_end_seconds","output_directory")},indent=2))
 
 
