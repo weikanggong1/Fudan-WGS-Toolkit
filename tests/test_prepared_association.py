@@ -42,6 +42,7 @@ def injected_execution(monkeypatch):
     calls = {'fits': [], 'computed': [], 'runner': []}
     monkeypatch.setattr(run.torch.cuda, 'is_available', lambda: True)
     monkeypatch.setattr(run.torch.cuda, 'device_count', lambda: 2)
+    monkeypatch.setattr(run.torch.cuda, 'mem_get_info', lambda *args: (8*2**30, 8*2**30))
     def fit(*args, **kwargs):
         assert prepared.torch.get_num_threads() == 1
         calls['fits'].append(kwargs.copy())
@@ -457,3 +458,47 @@ def test_modern_worker_closes_model_mappings_and_preserves_original_failure(tmp_
     else:
         assert call(root,phenotype,covariate,tmp_path/'results')['completed']
         assert actions==['close']
+
+
+@pytest.mark.parametrize('child_exists,transfer_cleanup_fails', [(False, False), (True, False), (False, True)])
+def test_modern_dispatch_start_failure_cleans_only_owned_children_and_restores_threads(
+        monkeypatch, child_exists, transfer_cleanup_fails):
+    import os
+    from types import SimpleNamespace
+    from fudan_wgs_toolkit import phewas_trait_csv
+    events = []
+    handle = object()
+
+    class Process:
+        pid = None
+        def __init__(self, **kwargs):
+            assert kwargs['kwargs']['invocation_lease'] is handle
+        def start(self):
+            if child_exists:
+                self.pid = 12345
+            assert os.environ['OMP_NUM_THREADS'] == '2'
+            raise OSError('injected modern spawn failure')
+        def is_alive(self):
+            return self.pid is not None
+        def terminate(self):
+            events.append('terminate_owned_child')
+        def join(self):
+            events.append('join_owned_child')
+
+    def cleanup(value):
+        assert value is handle
+        events.append('retire_unstarted_transfer')
+        if transfer_cleanup_fails:
+            raise RuntimeError('secondary transfer failure')
+
+    monkeypatch.setenv('OMP_NUM_THREADS', '7')
+    monkeypatch.setattr(prepared.mp, 'get_context', lambda mode: SimpleNamespace(Process=Process))
+    monkeypatch.setattr(phewas_trait_csv, 'invocation_lease_for_spawn', lambda: handle)
+    monkeypatch.setattr(phewas_trait_csv, 'close_pending_invocation_lease', cleanup)
+    with pytest.raises(OSError, match='modern spawn failure') as failure:
+        prepared._dispatch({}, [], {'cpu_threads': 2}, [0, 1])
+    assert events == (['terminate_owned_child', 'join_owned_child'] if child_exists
+                      else ['retire_unstarted_transfer'])
+    assert os.environ['OMP_NUM_THREADS'] == '7'
+    if transfer_cleanup_fails:
+        assert any('secondary transfer failure' in note for note in failure.value.__notes__)

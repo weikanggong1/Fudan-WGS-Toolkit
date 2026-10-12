@@ -368,7 +368,16 @@ def _inline_cpu_policy(resources):
                         pass
 
 
-def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_affinity=False):
+def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_affinity=False,
+            invocation_lease=None):
+    """Keep the invocation lock alive until this worker has finished cleanup."""
+    from .phewas_trait_csv import held_invocation_lease
+    with held_invocation_lease(invocation_lease):
+        return _worker_unleased(plan, entries, resources, worker_id=worker_id,
+            worker_count=worker_count, device=device, bind_affinity=bind_affinity)
+
+
+def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, device, bind_affinity=False):
     """Run this invocation's own partition; parent affinity stays unchanged."""
     from .phewas_trait_csv import PerTraitCheckpointCSVWriter
     from .phewas_runtime.runtime import run_batched_configuration
@@ -411,7 +420,8 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
             models=[dict(trait_index=entry['trait_index'], sha256=entry['sha256']) for entry in entries])
         writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
             resume=resources['resume'], worker_id=str(worker_id),
-            minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0))
+            minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
+            ownership_scope='chromosome' if dispatch['strategy']=='chromosomes' else 'trait')
         gate = HostMemoryGate(output, **_host_memory_policy(plan))
         configuration = dispatch_configuration(plan['configuration'],dispatch,worker_id)
         if configuration['chromosomes']:
@@ -430,6 +440,7 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
         if run._implementation_sha256() != plan['source_implementation_sha256']:
             raise ValueError('prepared association source changed during execution')
         report.update(worker_id=worker_id, worker_count=worker_count,
+            assigned_chromosomes=[entry['name'] for entry in configuration['chromosomes']],
             end_to_end_seconds=time.perf_counter()-started,
             source_implementation_sha256=plan['source_implementation_sha256'],
             assigned_trait_indices=assigned_traits,assigned_trait_tiles=dispatch['workers'][worker_id]['trait_tiles'],association_partition_strategy=dispatch['strategy'],
@@ -479,6 +490,7 @@ def _worker(plan, entries, resources, *, worker_id, worker_count, device, bind_a
 
 def _dispatch(plan, entries, resources, gpu_ids):
     from .phewas_partition import verify_dispatch_reports
+    from .phewas_trait_csv import invocation_lease_for_spawn, close_pending_invocation_lease, _note
     def verified(reports):
         path = Path(plan['output_directory'])/f'association_dispatch.{resources["attempt_id"]}.private.json'
         dispatch = json.loads(path.read_text())
@@ -491,17 +503,31 @@ def _dispatch(plan, entries, resources, gpu_ids):
             return verified([_worker(plan, entries, resources, worker_id=0, worker_count=1,
                                      device=f'cuda:{gpu_ids[0]}')])
     context = mp.get_context('spawn')
-    processes = [context.Process(target=_worker, kwargs=dict(plan=plan, entries=entries, resources=resources,
-        worker_id=i, worker_count=len(gpu_ids), device=f'cuda:{device}', bind_affinity=True))
-        for i, device in enumerate(gpu_ids)]
     names = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
     previous = {name: os.environ.get(name) for name in names}
     owned = []
     try:
         for name in names:
             os.environ[name] = str(resources['cpu_threads'])
-        for process in processes:
-            process.start()
+        for index, device in enumerate(gpu_ids):
+            handle = invocation_lease_for_spawn()
+            process = None
+            try:
+                process = context.Process(target=_worker, kwargs=dict(plan=plan, entries=entries,
+                    resources=resources, worker_id=index, worker_count=len(gpu_ids),
+                    device=f'cuda:{device}', bind_affinity=True, invocation_lease=handle))
+                process.start()
+            except BaseException as error:
+                if process is not None and getattr(process, 'pid', None) is not None:
+                    # A start error can occur after this call's OS child exists.
+                    # It remains owned and must be joined before releasing its lease.
+                    owned.append(process)
+                else:
+                    try:
+                        close_pending_invocation_lease(handle)
+                    except BaseException as cleanup:
+                        _note(error, f'invocation transfer cleanup also failed: {cleanup}')
+                raise
             owned.append(process)
     except BaseException:
         for process in owned:
@@ -550,6 +576,24 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     phenotypes, covariates = run.read_csv_inputs(phenotype_csv, covariate_csv)
     families = run._family_selection(options['phenotype_families'], phenotypes.names, phenotypes.values, rm_nan=options['rm_nan'])
     selections = _covariate_selection(options['phenotype_covariates'], phenotypes.names, covariates.names)
+    input_contract = options.get('input_contract', 'mixed')
+    strategy = options.get('association_partition_strategy', 'cohort_tiles')
+    if input_contract == 'continuous':
+        from .continuous_run import validate_continuous_values, validate_continuous_metadata
+        validate_continuous_values(phenotypes.names, phenotypes.values)
+        cohort = _cohort_pairs(root, manifest, population)
+        quality = []
+        for index, name in enumerate(phenotypes.names):
+            _, values, _, _, counts = run.aligned_phenotype(phenotypes, covariates, cohort, name,
+                rm_nan=options['rm_nan'], family='gaussian')
+            quality.append(dict(index=index, available_n=counts['available_n'],
+                eligible_minimum=float(values.min()), eligible_maximum=float(values.max())))
+        validate_continuous_metadata(dict(
+            traits=[dict(index=i, name=name, family=families[name], profile_index=0,
+                         covariate_indices=list(range(len(covariates.names))))
+                    for i, name in enumerate(phenotypes.names)], quality=quality,
+            covariate_names=list(covariates.names),
+            profile_covariate_indices=[list(range(len(covariates.names)))]))
     kinship_file, kinship = None, None
     if options['grm'] == 'sparse':
         sidecar = (manifest.get('phewas') or {}).get('kinship_npz')
@@ -570,14 +614,18 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     scientific = dict(input_binding=input_binding, configuration=configuration, transform=transform,
         families=families, covariate_selection=selections, trait_names=list(phenotypes.names),
         grm=options['grm'], rm_nan=options['rm_nan'], trait_batch_size=options['trait_batch_size'], trait_index_sha256=dictionary_sha)
+    if input_contract != 'mixed' or strategy != 'cohort_tiles':
+        scientific.update(input_contract=input_contract, association_partition_strategy=strategy)
     scientific_sha = _hash(scientific)
     plan = dict(schema_version=1, workflow='prepared_fid_iid_shared_association',
         source_implementation_sha256=source, scientific_binding_sha256=scientific_sha,
         output_directory=str(output), input_binding=input_binding, configuration=configuration,
         families=families, covariate_selection=selections, transform=transform, rm_nan=options['rm_nan'], dataset=manifest,
         trait_count=len(phenotypes.names), trait_index_sha256=dictionary_sha,
-        host_memory_limit_gib=options['host_memory_limit_gib'],association_partition_strategy='cohort_tiles',
+        host_memory_limit_gib=options['host_memory_limit_gib'],association_partition_strategy=strategy,
         csv_output_layout='per_trait_checkpoint')
+    if input_contract != 'mixed':
+        plan['input_contract'] = input_contract
     from .phewas_partition import gpu_model_cache_capacity
     plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,
         memory_limit_gib=options['memory_limit_gib'],reserve_bytes=int(options['memory_reserve_gib']*2**30))

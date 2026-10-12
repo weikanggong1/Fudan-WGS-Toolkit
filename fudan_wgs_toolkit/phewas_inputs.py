@@ -329,7 +329,8 @@ def apply_phenotype_missing_policy(values, *, family, rm_nan=True, covariate_val
 def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profiles=None,
                          phenotype_dictionary=None, phenotype_manifest=None,
                          covariate_manifest=None, chunk_rows=8192, emit=None,
-                         phenotype_families="auto", phenotype_covariates=None, rm_nan=True):
+                         phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
+                         input_contract="mixed"):
     """Create immutable raw float64 arrays in cache sample order.
 
     ``output`` must not exist.  No intercept, RINT, residualization, ancestry
@@ -348,6 +349,11 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
     """
     if type(rm_nan) is not bool:
         raise ValueError("rm_nan must be a boolean")
+    if input_contract not in ("mixed", "continuous"):
+        raise ValueError("unknown phenotype input contract")
+    if input_contract == "continuous" and (profiles is not None or phenotype_families != "auto"
+                                            or phenotype_covariates is not None):
+        raise ValueError("continuous analysis requires inferred families and shared all covariates")
     if not isinstance(chunk_rows, int) or chunk_rows <= 0:
         raise ValueError("chunk_rows must be a positive integer")
     started = time.perf_counter()
@@ -415,6 +421,7 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
             policy = apply_phenotype_missing_policy(values, family=trait["family"],
                 rm_nan=rm_nan, covariate_valid=eligible)
             analyzed = policy["values"]
+            eligible_finite = values[eligible & finite]
             quality = {"index": trait["index"], "family": trait["family"],
                        "phenotype_nonmissing": int(finite.sum()),
                        "phenotype_missing": int((~finite).sum()),
@@ -425,6 +432,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                        "recoded_nonbinary_n": policy["recoded_nonbinary_n"],
                        "minimum": float(values[finite].min()) if finite.any() else None,
                        "maximum": float(values[finite].max()) if finite.any() else None,
+                       "eligible_minimum": float(eligible_finite.min()) if eligible_finite.size else None,
+                       "eligible_maximum": float(eligible_finite.max()) if eligible_finite.size else None,
                        "analysis_cases": int((analyzed == 1).sum()) if trait["family"] == "binomial" else None,
                        "analysis_controls": int((analyzed == 0).sum()) if trait["family"] == "binomial" else None}
             trait_counts.append(quality)
@@ -445,6 +454,9 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                     "family_assignment": ("declared_by_profile" if profiles is not None else
                         "auto_with_explicit_overrides" if isinstance(phenotype_families, Mapping) and phenotype_families else
                         "inferred_exact_01_from_all_source_rows")}
+        if input_contract == "continuous":
+            from .continuous_run import validate_continuous_metadata
+            validate_continuous_metadata(metadata)
         _json(output / "traits.private.json", metadata)
         artifacts = {}
         for path in sorted(output.glob("*.npy")):
@@ -489,6 +501,8 @@ def prepare_phewas_inputs(*, phenotypes, covariates, sample_ids, output, profile
                 "rm_nan": rm_nan,
                 "phenotype_families": dict(phenotype_families) if isinstance(phenotype_families, Mapping) else "auto",
                 "phenotype_covariates": {name: list(columns) for name, columns in (phenotype_covariates or {}).items()}}
+            if input_contract != "mixed":
+                manifest['trait_options']['input_contract'] = input_contract
         _json(output / "manifest.private.json", manifest)
         _json(output / "summary.anonymous.json", anonymous)
         _json(output / "status.anonymous.json", {"status": "complete",

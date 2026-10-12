@@ -435,7 +435,7 @@ def _jobs(entry, analyses, output, *, single_mac_cutoff, single_group_variants, 
     return jobs
 
 
-def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+def _run_wgs_association_unlocked(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
                 chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
                 memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
                 phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
@@ -445,7 +445,8 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
                 individual_effective_block_size=1024, device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
                 gpu_ids=None, trait_batch_size=16, continuous_transform=None,
-                grm="sparse", grm_file=None):
+                grm="sparse", grm_file=None, input_contract="mixed",
+                association_partition_strategy="cohort_tiles"):
     """Associate every numeric phenotype independently with existing WGS caches.
 
     chromosomes='all' consumes all declared autosomes; a list selects a subset.
@@ -473,6 +474,12 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
     approximations; long_mask_threshold is not the default spectrum switch.
     Genetic preparation is never invoked by this association entry point.
     """
+    if input_contract not in ("mixed", "continuous"):
+        raise ValueError("unknown phenotype input contract")
+    if association_partition_strategy not in ("cohort_tiles", "chromosomes"):
+        raise ValueError("unknown association partition strategy")
+    if input_contract == "continuous" and (phenotype_families != "auto" or phenotype_covariates is not None):
+        raise ValueError("continuous analysis requires shared covariates and automatic continuous input validation")
     chromosomes = _normalise_chromosomes(chromosomes)
     if type(rm_nan) is not bool:
         raise ValueError("rm_nan must be a boolean")
@@ -531,7 +538,8 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
         individual_effective_block_size=individual_effective_block_size,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, resume=resume, grm=grm, grm_file=grm_file,
-        trait_batch_size=trait_batch_size)
+        trait_batch_size=trait_batch_size, input_contract=input_contract,
+        association_partition_strategy=association_partition_strategy)
     started = time.perf_counter()
     output = Path(output_directory).resolve()
     attempt_id = uuid.uuid4().hex
@@ -569,6 +577,7 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
             if dictionary_sha != expected:
                 raise ValueError("completed phenotype dictionary differs from the bound input order")
         report = dict(completed=True, schema_version=3, workflow="shared_cache_phewas",
+            input_contract=input_contract, association_partition_strategy=association_partition_strategy,
             attempt_id=attempt_id,
             trait_index_sha256=dictionary_sha,
             eligible_association_tests=sum(rows.values()), association_rows=rows, workers=workers,
@@ -595,6 +604,32 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
             _json_write(output/"status.private.json", dict(status="failed", attempt_id=attempt_id,
                 error_type=type(error).__name__))
         raise
+
+
+def _run_wgs_association(*args, **kwargs):
+    """Own this output attempt before changing any plan or resume receipt."""
+    from .phewas_trait_csv import association_output_lease
+    with association_output_lease(kwargs['output_directory']):
+        return _run_wgs_association_unlocked(*args, **kwargs)
+
+
+def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
+                chromosomes="all", analyses=_KINDS, device=("cuda:0",), cpu_threads=8,
+                memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
+                phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
+                transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
+                covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512, seed=1729,
+                single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
+                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
+                gpu_ids=None, trait_batch_size=16, continuous_transform=None,
+                grm="sparse", grm_file=None):
+    """Run independent continuous and binary traits on an existing WGS cache.
+
+    This compatibility entry retains the mixed-trait options and dispatch.
+    See ``run_WGS_continuous`` for the continuous-only chromosome workflow.
+    """
+    return _run_wgs_association(**locals())
 
 
 def main(argv=None):

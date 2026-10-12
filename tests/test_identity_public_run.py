@@ -98,6 +98,7 @@ def test_public_run_shares_schedule_and_retains_independent_samples(tmp_path, mo
     root, phenotype, covariate, pairs = prepared_inputs(tmp_path)
     monkeypatch.setattr(module.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(module.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", lambda *args: (8*2**30, 8*2**30))
     monkeypatch.setattr(portable, "PortableMetadataReader", PositionMetadata)
     fits, seen = [], []
     def fit(*args, **kwargs):

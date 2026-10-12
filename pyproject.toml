@@ -19,6 +19,7 @@ annotations = ["rdata==0.11.2"]
 fudan-wgs = "fudan_wgs_toolkit.run:main"
 prepare-WGS-data = "fudan_wgs_toolkit.prepare:main"
 run-WGS-all = "fudan_wgs_toolkit.run:main"
+run-WGS-continuous = "fudan_wgs_toolkit.continuous_run:main"
 
 [tool.setuptools.packages.find]
 include = ["fudan_wgs_toolkit*"]

@@ -6,6 +6,8 @@
 
 `prepare_WGS_data` 从原始 PLINK BED/BIM/FAM 和独立下载的功能注释构建可校验的遗传数据。`run_WGS_all` 消费表型 CSV、协变量 CSV 和已完成遗传目录，完成单变异、coding、noncoding 和 ncRNA 关联分析。传入多个表型列时，它们共享遗传数据读取、CPU 缓存、注释索引和 CPU–GPU 传输；各表型仍按所选缺失处理和协变量独立确定样本、拟合零模型、计算频率和检验结果。
 
+`run_WGS_continuous` 是多个连续表型的独立入口：只接收至少两个连续数值列，所有列使用同一份完整协变量。默认均值填补表型，可显式选择 available 样本；多 GPU 按完整染色体并行，每张卡分析自己染色体的全部连续表型。它复用成熟的准备、零模型、TF32/FP32 关联与 CSV 检查点实现，不重新准备遗传缓存。`run_WGS_all` 继续支持单表型、混合模型族和逐表型协变量选择，两者的统计字段含义保持一致。
+
 正常流程为 `prepare_WGS_data → run_WGS_all`。准备只执行一次；目录已有完成清单时，直接运行关联步骤，不重复准备遗传数据、注释或样本轴。两种目录使用同一个三输入接口：`dataset.json` 保留完整 FID/IID，`cache_dataset.json` 保留原数字身份轴。模型由 `grm` 选择：默认 `sparse` 读取显式文件或清单侧文件中的稀疏 GRM，`none` 使用不含 GRM 的普通零模型。设备、模型族、协变量与恢复参数的调用方式一致。
 
 遗传缓存复用与关联恢复分别处理。`resume=False` 默认在新输出目录执行本次全量关联；`resume=True` 先核对同一运行的输入、模型、参数和源码绑定，再验证各分析类型的结果块与 CSV 校验和，只补算未完成块。中途写入的 partial 输出不作为完成块。跨运行的已拟合模型复用须有拟合源码兼容证明，或仅授权读取既有拟合状态的消费范围收据；两者均要求完整模型导入清单及原拟合成功收据，不能仅凭模型目录存在跳过拟合。消费范围收据不授权重新拟合，也不证明新旧拟合器等价。输入意义见第 3 节，结果分块与恢复规则见第 6 节。
@@ -229,6 +231,8 @@ family_b,person_003,47,1,-0.01,0.02
 
 两种路线都按每个表型的分析样本处理基因型频率和遗传缺失填补；表型缺失由 `rm_nan` 控制，协变量缺失始终排除。
 
+连续专用入口要求表型 CSV 在身份双列后至少有两个数值列，全部列都参与分析。有限值严格属于 `{0,1}` 的列按二分类拒绝；非数值、全缺失、有效样本中常量或回归后退化的列明确报错。不能通过模型族映射强制接受这些列。协变量 CSV 的全部数值列由所有表型共同使用，身份规则与对应遗传清单一致；空协变量文件可只保留身份双列。连续专用入口不接收 `phenotype_families`、`phenotype_covariates` 或其他模型族输入，需混合表型或逐列协变量时使用 `run_WGS_all`。
+
 
 ### 3.4 稀疏 GRM 与无 GRM 模式
 
@@ -336,6 +340,103 @@ if __name__ == "__main__":
 
 `completed_genetic_job_groups` 表示全局唯一遗传作业数；`completed_worker_genetic_job_visits` 表示各卡实际扫描这些作业的次数。各卡各自扫描遗传计划时，后者可能为前者的活跃 worker 数倍数。私有调度收据绑定源计划、全部模型、样本行序摘要、固定 tile 边界及每卡的全局表型编号。内部批运行仍可显式选择按遗传作业或完整样本集合分配；统一入口使用固定 tile，保证恢复时科学块的稳定性。
 
+### 连续多表型专用入口 run_WGS_continuous
+
+表型 CSV 的身份双列之后只放连续数值表型，例如 `trait_a`、`trait_b`，所有列均运行。协变量 CSV 的身份双列之后只放共同使用的数值协变量，例如 age、sex 和主成分。sex 等 0/1 协变量允许使用；0/1 表型列拒绝。遗传目录与三输入绑定规则沿用第 3 节，已有完整缓存不再执行 prepare。
+
+```python
+from pathlib import Path
+from fudan_wgs_toolkit import run_WGS_continuous
+
+phenotype_csv = Path("/data/continuous_phenotypes.csv")
+covariate_csv = Path("/data/shared_covariates.csv")
+prepared_genetic_directory = Path("/data/completed_cache")
+association_output_directory = Path("/data/continuous_results")
+
+if __name__ == "__main__":
+    continuous_association_report = run_WGS_continuous(
+        phenotype_csv=phenotype_csv,
+        covariate_csv=covariate_csv,
+        prepared_directory=prepared_genetic_directory,
+        output_directory=association_output_directory,
+        chromosomes="all",                       # 或 [1, 2, 21]
+        analyses=("individual", "coding", "noncoding", "ncrna"),
+        device=["cuda:0", "cuda:1"],              # 按完整染色体分配给两张卡
+        cpu_threads=8,                            # 每 worker 上限，受节点共享配额约束
+        memory_limit_gib=None,                    # 自动显存准入
+        memory_reserve_gib=1.0,
+        host_memory_limit_gib=None,               # 全节点任务共用的主存预算
+        rm_nan=True,                              # 默认逐列均值填补；False 为 available
+        trait_batch_size=32,                      # 每个遗传块的有界表型 tile
+        continuous_transform="none",              # 连续专用入口默认使用原始表型值
+        gene_variant_type="SNV",
+        grm="sparse",                             # 无 GRM 时明确设为 "none"
+        grm_file=None,                             # 或传入身份绑定的稀疏 GRM NPZ
+        long_mask_method="full",                  # 各实际权重独立完整 FP32 谱
+        resume=False,                            # 新目录；True 只补算已验证运行的缺块
+    )
+    print(continuous_association_report["completed"])
+```
+
+`rm_nan=True` 先按遗传身份、表型 CSV、协变量 CSV 和可选 cohort 范围匹配母样本，再排除任何共同协变量缺失的样本。每个表型仅以该母样本中的有限值计算自己的均值并填补，随后执行连续变换。没有表型 CSV 行的缓存参与者不会加入分析；不会填补协变量。此时各表型可以共享有序样本轴和设计矩阵 X，回归系数、残差、方差参数和检验矩阵 P 各自独立。
+
+`rm_nan=False` 再排除各表型自己的缺失值，保留各自 available 样本及原顺序。样本行序完全相同的表型才组成共同计算组；不同 NaN 模式不会被取交集或强制填补。共同协变量使用同样的列，但各样本组按自身样本计算中心、尺度、GRM 子集和设计几何。遗传频率、MAC、方向、遗传缺失填补及筛选也按各自分析样本确定。改变缺失模式须使用新输出目录和相应零模型；恢复不能跨模式复用。
+
+两种模式均按染色体并行，而非把不同表型分给不同 GPU。每个 worker 保留该染色体的 reader、注释局部性和有界模型 LRU，按 `trait_batch_size` 使用已实现的遗传块共享、同样本组 Score 批算及共同设计缓存。一个染色体只归一个 worker；染色体少于 GPU 时多余 worker 明确空闲，染色体大小不同也可能产生尾部等待。缓存、表型 tile 与工作区受实时显存及节点共享主存准入约束，不将全部表型基因型同时驻留设备，不共享不同模型的 P 或 V。
+
+```mermaid
+flowchart TD
+    CACHE["已有完成遗传缓存：原身份轴、注释和绑定"] --> INPUT
+    PH["至少两列连续表型 CSV"] --> INPUT["核对数值列与身份；拒绝二分类和退化列"]
+    CV["共同协变量 CSV：全部数值列"] --> INPUT
+    INPUT --> AX["匹配母样本；排除协变量缺失"]
+    AX --> NAN{"rm_nan"}
+    NAN -- True --> FILL["逐表型有限值均值填补；共同样本轴"]
+    NAN -- False --> AVAILABLE["逐表型 available 样本；按精确行序分组"]
+    FILL --> FIT["共享 X / GRM 几何；每表型独立零模型"]
+    AVAILABLE --> FIT
+    FIT --> SHARD["多 GPU：完整染色体各分配一次"]
+    SHARD --> READ["染色体局部共享读取、解码、注释与有界缓存"]
+    READ --> TILE["各有序样本组内有界表型 tile；共享 G 和 Score 批算"]
+    TILE --> SINGLE["Single：独立资格、方差对角线与稳定 log P"]
+    TILE --> GENE["coding / noncoding / ncRNA：各模型独立 u、V、完整 FP32 谱"]
+    SINGLE --> COMMIT["每表型原 CSV 结构；染色体写锁、原子提交"]
+    GENE --> COMMIT
+    COMMIT --> VERIFY["全部 worker 成功；CSV 完整回读、块覆盖和校验和"]
+```
+
+| 连续专用参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| phenotype_csv | 必填 | 对应遗传清单身份双列加至少两个连续数值表型；全部列独立分析，二分类列拒绝 |
+| covariate_csv | 必填 | 对应身份双列加共同数值协变量；所有表型使用全部协变量，缺失协变量样本排除 |
+| prepared_directory | 必填 | 已完成的 `dataset.json` 或 `cache_dataset.json` 遗传根目录，不再次转换 |
+| output_directory | 必填 | 每表型独立 CSV、模型、计划、检查点与报告的运行目录；新运行须新目录 |
+| chromosomes | `"all"` | 全部已准备常染色体，或不重复的编号列表；多 GPU 分配完整染色体 |
+| analyses | 四类全部 | individual、coding、noncoding、ncrna 的非空组合，保留合法 mask |
+| device | `("cuda:0",)` | 设备列表指定单／多卡；正整数 n 选择前 n 张可见卡；多卡均按染色体并行 |
+| rm_nan | True | 逐列母样本均值填补；False 保留各自 available 样本。协变量均不填补 |
+| cpu_threads | 8 | 每 worker 读取、解码和 CPU 操作预算；实际算力由亲和性及节点共享 cgroup 配额约束 |
+| memory_limit_gib / memory_reserve_gib | None / 1.0 | GPU 物理与实时可用余量准入；显式上限及安全预留约束所有选中 GPU 的工作区 |
+| host_memory_limit_gib | None | 全部 worker 共用的节点主存准入预算，自动取物理容量与有限 cgroup 祖先限制；不按卡数相乘 |
+| trait_batch_size | 32 | 每个遗传块的有界表型 tile 大小，不是总表型数量；available 模式在精确样本组内分 tile |
+| continuous_transform | `"none"` | 默认直接使用原始表型数值；可显式 none、paper 或 rint，均在缺失处理后执行。paper 为共同协变量 OLS 残差、RINT 和原始标准差恢复 |
+| null_fit_mode | `"fp64"` | 使用成熟 FP64 零模型拟合；tf32 拟合选项明确报错，关联矩阵仍为 TF32/FP32 |
+| gene_variant_type | `"SNV"` | gene-based 类型 SNV、Indel 或 variant；Single 保留原全部变异资格规则 |
+| grm / grm_file | `"sparse"` / None | 使用绑定身份的稀疏 GRM；none 为无 GRM 连续零模型，不能同时传 grm_file |
+| covariance_block_size | 4096 | 协方差变异 panel 大小，降低可缩小中间工作区 |
+| long_mask_method | `"full"` | 各实际权重独立完整 FP32 谱；显式 fastskat 或 liu 才选择原近似分支 |
+| long_mask_threshold / long_mask_rank / seed | 5000 / 512 / 1729 | 显式近似分支的切换、秩与种子；默认 full 不以阈值切换谱或跳过 mask |
+| single_mac_cutoff | 20 | Single 独立样本组的最小 MAC |
+| single_group_variants / single_region_size | 5000 / 10000000 | Single 组装大小和结果位置分区宽度；不构成区域关联检验 |
+| individual_effective_block_size | 1024 | Single 内部有效变异批大小 |
+| device_cache_bytes / compact_cache_bytes / metadata_cache_bytes | 536870912 / 67108864 / 268435456 | 设备共享状态、CPU 紧凑状态与注释缓存的有界字节容量；前两项 0 禁用留存 |
+| resume | False | True 验证本次运行的输入、模型、样本、设置、源码和 CSV 已提交范围后只补缺块 |
+| gpu_ids | None | 旧设备编号列表的兼容参数；推荐使用 device，不同时给出冲突设备选择 |
+
+返回格式与 `run_WGS_all` 相同，包含 `completed`、各类结果行数、worker 报告、输出目录和端到端墙时。CSV 的字段含义与排序保持第 6 节的约定；每个表型均保存 Single 结果。检查点绑定科学任务，不把启动索引或 partial CSV 算作完成。
+
+连续专用入口默认 `continuous_transform="none"`；通用入口的 `None` 仍按遗传缓存来源选择默认处理。比较两入口的相同输入结果时，应显式给出相同的 `continuous_transform`、`rm_nan`、GRM 和统计设置，不用不同默认变换的输出检验实现一致性。
+
 ### prepare_WGS_data 的每个参数
 
 | 参数 | 默认值 | 含义 |
@@ -414,6 +515,19 @@ if __name__ == "__main__":
 
 ## 5. 命令行调用
 
+只分析多个连续表型、共同协变量和完整染色体并行时使用独立入口：
+
+```bash
+run-WGS-continuous /data/continuous_phenotypes.csv /data/shared_covariates.csv /data/completed_cache \
+  --output-directory /data/continuous_results \
+  --chromosomes all --device cuda:0 cuda:1 --cpu-threads 8 \
+  --trait-batch-size 32 --grm sparse --long-mask-method full
+```
+
+`python -m fudan_wgs_toolkit.continuous_run` 与 `run-WGS-continuous` 等价。默认逐列均值填补；在新的结果目录加 `--no-rm-nan` 使用 available 样本。所有表型使用全部共同协变量，该 CLI 不提供模型族或逐表型协变量映射。其他共享参数采用短横线，例如 `--host-memory-limit-gib`、`--memory-reserve-gib`、`--continuous-transform` 和 `--resume`，含义与连续专用参数表一致。两种模式均使用原有遗传缓存并按染色体分卡。
+
+以下是通用单／多表型入口，允许混合模型族和逐表型协变量：
+
 ```bash
 prepare-WGS-data \
   --source-directory /data/original_plink \
@@ -471,7 +585,7 @@ results/
 
 两种遗传清单均写入每个表型独立的 CSV 目录。连续的科学块以完整 gzip member 追加到同一表型、分析类型、染色体与字段对应的文件；不会为每个 mask 新建文件，也不再复制整套结果做后续拆分。实际路径以 worker 报告的 `output["receipts"]` 中的 `csv_file` 为准，相对 `output_directory/csv`。`.csv.gz` 是压缩文本 CSV，可直接用 `pandas.read_csv` 读取。每行 `trait_index` 对应私有表型索引，另保留位点或 gene/mask、概率和数值诊断。连续 gene-based 汇总使用 STAAR-O，二分类使用 STAAR-Burden；稀疏 GRM 二分类模式保留显著结果的 FP64 SPA。
 
-科学块的提交同时绑定所有涉及表型的压缩范围、SHA、行数、字段与 Single 有效变异序号。所有范围写入并 fsync 后才提交 SQLite 事务；同一表型由一个 worker 持有写锁。恢复逐范围检查 SHA、gzip CRC、字段和计数，只补算缺少提交记录的块，并先保留及移除未提交尾部。已提交前缀遭截断或损坏时明确报错并保留原文件，不能当作有效完成块。结束前逐文件完整回读，给出文件 SHA、行数与块清单摘要；未提交 partial 或历史收据不参与本次汇总。
+科学块的提交同时绑定所有涉及表型的压缩范围、SHA、行数、字段与 Single 有效变异序号。所有范围写入并 fsync 后才提交 SQLite 事务；通用表型分卡持有表型写锁，连续专用染色体分卡持有染色体写锁，不允许两个 worker 写同一结果流。恢复逐范围检查 SHA、gzip CRC、字段和计数，只补算缺少提交记录的块，并先保留及移除未提交尾部。已提交前缀遭截断或损坏时明确报错并保留原文件，不能当作有效完成块。结束前逐文件完整回读，给出文件 SHA、行数与块清单摘要；未提交 partial 或历史收据不参与本次汇总。
 
 输出为结果 CSV、Python 模型状态和 JSON，通过私有 `trait_index` 映射表型。标量格式沿用关联写出约定，可回读原浮点值，不人为截断有效位数。零行块也有提交记录。返回字典包含 `completed`、各分析类型的行数、worker 报告和 `end_to_end_seconds`。
 
@@ -518,7 +632,7 @@ for worker_report in association_report["workers"]:
 
 ### 6.2 同一运行恢复与模型来源
 
-遗传目录复用不会重新运行 `prepare_WGS_data`。结果恢复则在原输出目录调用 `run_WGS_all(..., resume=True)`，保留相同的输入文件、染色体、分析类型、样本和协变量选择、模型族、`rm_nan`、GRM、连续变换、统计设置及源码。完成块还须通过压缩范围 SHA、gzip CRC、字段、行数、表型分配和块绑定检查。缺少提交记录的块重新计算；未提交尾部先私有保存，已提交范围损坏则阻止恢复并保留证据。
+遗传目录复用不会重新运行 `prepare_WGS_data`。结果恢复则在原输出目录调用原入口的 `resume=True`，即 `run_WGS_all` 或 `run_WGS_continuous`；保留相同的输入文件、染色体、分析类型、样本和协变量选择、模型族、`rm_nan`、GRM、连续变换、统计设置及源码。完成块还须通过压缩范围 SHA、gzip CRC、字段、行数、表型分配和块绑定检查。缺少提交记录的块重新计算；未提交尾部先私有保存，已提交范围损坏则阻止恢复并保留证据。
 
 恢复还核对每个染色体的三个压缩基因型数据流：设备与文件身份、大小、修改时间和状态变更时间必须与首次绑定一致，替换文件或改变链接目标也会被检测。该检查与清单及逐帧校验和共同约束遗传数据来源，不在每次恢复时重新读取整条染色体做全文件哈希。
 
@@ -826,10 +940,19 @@ writer 专项直接读取一份已完成且认证的四模型输出：两个连�
 
 新的 Top-K／残余矩候选在真实长 mask 上未通过新鲜残差验收，回退后也未提供独立净收益，未进入公开实现。本轮收益来自实测的原生 FP32 完整特征分解，不宣称免特征分解。现有诊断中的比例谱复用常量属于显式旧分支；本轮完整谱按每个实际权重独立计算，以实际完整谱与后端调用计数核验。源码回归分别执行 281 项与 282 项（含 7／17 项 CUDA 检查），各自失败、错误、跳过均为零；两组不是去重测试总数。检查点恢复及 CSV 生命周期覆盖另列，不把组件测试算作真实精度覆盖。
 
+### 7.4 连续专用入口、染色体调度与恢复检查
+
+最终去重 CPU 回归共 264 项通过，实际退出 0，失败、错误及跳过均为 0。其中包括以下六项集成控制，以及既有入口兼容性、确定性染色体排程、多进程 CSV 写出、中断恢复和父进程异常退出后的所有权检查；六项集成控制不另加到总数。
+
+新增入口的六项 CPU 集成检查使用六个匿名样本的 PLINK BED 测试夹具，实际执行缓存解码、Gaussian 零模型拟合、原 PheWASPipeline 的 Single 过滤、方差、尾概率以及 CSV 提交和回读。均值填补和 available 两条路径分别与同配置的 run_WGS_all 比较，输出字段、数值和顺序完全一致；resume 复用已提交块，没有重复关联计算或新增行。二分类、有效样本内常量及全缺失列在零模型拟合前被拒绝。
+
+这组集成检查显式使用串行 CPU FP64 执行器，只验证入口、样本选择、结果与恢复契约。整染色体分配、多进程写出和中断恢复另由 CPU 回归检查覆盖；这些结果不构成真实数据精度、GPU 吞吐、多卡端到端加速或长期内存平台验收。新入口复用既有计算内核，7.3 的真实局部 benchmark 保留其原有范围。
+
 ## 8. 最近版本
 
 | 版本 | 更新 |
 | --- | --- |
+| 0.9.0 连续多表型独立入口 | 增加 run_WGS_continuous 与独立 CLI；至少两个连续数值表型、共同全部协变量、默认均值填补／可选 available；多 GPU 按完整染色体分配，保留各表型独立模型和 CSV／检查点语义。该调度的收益另行实测，不沿用 7.3 的局部加速作为新入口速度证明 |
 | 0.9.0 原生 FP32 完整谱 | 默认全 M 完整谱、逐实际权重顺序求解与全工作区准入；真实两个连续模型暖轮端到端墙时降低 25.65%，最大实现间 −log10P 差异 0.0000219467；26 注释权重的真实 SNV 谱／尾概率控制通过，范围见 7.3 |
 | 0.9.0 Single 输出与 SPA 迭代 | 同步原标量 CSV 写出、物理块标签复用、FP64 Newton 导数复用；1,056 条真实记录的 writer 重放与实际中断恢复通过；2,604 项 CUDA 回归及真实四模型、两组 16 模型精度检查通过；预热后 31.43 分钟内存平台与关闭检查通过，范围见 7.2 |
 | 0.9.0 关联 panel 与谱求解 | 单模型／mask 内有界 panel 整理、旋转和投影复用；worker 生命周期两路固定 CUDA stream 执行原 LOBPCG；TF32 int64 地址偏移；2,530 项 CUDA 回归与两组 16 模型四类局部对照通过；同卡四模型暖轮含 CSV 回读墙时降低 11.00% |

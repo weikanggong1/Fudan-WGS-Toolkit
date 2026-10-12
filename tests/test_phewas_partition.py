@@ -206,3 +206,73 @@ def test_auto_whole_cohorts_preserved_when_each_cohort_fits_cache(tmp_path,sched
     dispatch=partition.build_trait_dispatch(entries,4,schedule,source_binding={},
         strategy='auto',model_cache_capacity_bytes=max_cohort+1)
     assert dispatch['strategy']=='ordered_cohorts' and dispatch['cohort_tiles']==[]
+
+
+def chromosome_schedule():
+    return dict(chromosomes=[dict(name=str(index+1), jobs=[dict(kind='coding' if job else 'individual')
+        for job in range(count)]) for index,count in enumerate((8,2,5,1,4))])
+
+
+@pytest.mark.parametrize('workers',[1,2,4,8])
+def test_chromosome_workers_cover_all_traits_and_never_split_chromosomes(tmp_path,workers):
+    entries=[model(tmp_path,index,axis='1'*64 if index%2 else '2'*64) for index in range(5)]
+    configuration=chromosome_schedule()
+    dispatch=partition.build_trait_dispatch(entries,workers,configuration,source_binding={},
+        strategy='chromosomes',trait_batch_size=2,model_cache_capacity_bytes=1)
+    assert dispatch['strategy']=='chromosomes'
+    assert all(worker['trait_indices']==list(range(5)) for worker in dispatch['workers'])
+    assert dispatch['worker_genetic_job_visits']==dispatch['global_unique_genetic_job_groups']==20
+    found=[]; outputs=reports(dispatch)
+    for worker,report in zip(dispatch['workers'],outputs):
+        local=partition.dispatch_configuration(configuration,dispatch,worker['worker_id'])
+        report['assigned_chromosomes']=[reference['name'] for reference in local['chromosomes']]
+        assert report['assigned_chromosomes']==worker['chromosomes']
+        found.extend(report['assigned_chromosomes'])
+        for reference in local['chromosomes']:
+            original=next(value for value in configuration['chromosomes'] if value['name']==reference['name'])
+            assert len(reference['jobs'])==len(original['jobs'])
+            assert [job['checkpoint_job_index'] for job in reference['jobs']]==list(range(len(original['jobs'])))
+        assert '_association_trait_tiles' not in local
+    assert sorted(found)==['1','2','3','4','5']
+    assert partition.verify_dispatch_reports(dispatch,outputs)['completed_genetic_job_groups']==20
+    assert dispatch==partition.build_trait_dispatch(entries,workers,configuration,source_binding={},
+        strategy='chromosomes',trait_batch_size=2,model_cache_capacity_bytes=1)
+
+
+def test_chromosome_assignment_balances_job_count_proxy_and_preserves_resume_ids(tmp_path):
+    entries=[model(tmp_path,index) for index in range(2)]; configuration=chromosome_schedule()
+    schedules=[]
+    for count in (2,4):
+        dispatch=partition.build_trait_dispatch(entries,count,configuration,source_binding={},strategy='chromosomes')
+        schedules.append(sorted(tuple(job) for worker in dispatch['workers']
+            for job in partition.genetic_schedule(partition.dispatch_configuration(configuration,dispatch,worker['worker_id']))))
+        if count==2:
+            assert [worker['genetic_job_visits'] for worker in dispatch['workers']]==[10,10]
+    assert schedules[0]==schedules[1]==sorted(tuple(job) for job in partition.genetic_schedule(configuration))
+
+
+@pytest.mark.parametrize('damage',['owner','chromosome_list','job_count','report','schedule'])
+def test_chromosome_binding_rejects_wrong_owner_even_with_resigned_dispatch(tmp_path,damage):
+    entries=[model(tmp_path,index) for index in range(2)]; configuration=chromosome_schedule()
+    dispatch=partition.build_trait_dispatch(entries,2,configuration,source_binding={},strategy='chromosomes')
+    if damage=='report':
+        values=reports(dispatch)
+        for worker,report in zip(dispatch['workers'],values):report['assigned_chromosomes']=worker['chromosomes']
+        values[0]['assigned_chromosomes']=[]
+        with pytest.raises(RuntimeError,match='chromosome'):partition.verify_dispatch_reports(dispatch,values)
+        return
+    if damage=='owner':dispatch['chromosome_assignments'][0]['worker_id']=1
+    elif damage=='chromosome_list':dispatch['workers'][0]['chromosomes'].append('2')
+    elif damage=='job_count':dispatch['chromosome_assignments'][0]['genetic_job_groups']-=1
+    else:configuration['chromosomes'][0]['jobs'].pop()
+    dispatch['dispatch_binding_sha256']=partition._hash({k:v for k,v in dispatch.items() if k!='dispatch_binding_sha256'})
+    with pytest.raises(ValueError,match='chromosome'):
+        partition.dispatch_configuration(configuration,dispatch,0)
+
+
+def test_duplicate_chromosome_names_cannot_be_dispatched(tmp_path):
+    configuration=dict(chromosomes=[dict(name='21',jobs=[dict(kind='coding')]),
+        dict(name='21',jobs=[dict(kind='individual')])])
+    entries=[model(tmp_path,0)]
+    with pytest.raises(ValueError,match='distinct chromosome'):
+        partition.build_trait_dispatch(entries,2,configuration,source_binding={},strategy='chromosomes')
