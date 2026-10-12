@@ -43,7 +43,8 @@ _STATISTICS_METADATA = {
     "native_relation_transfer_scope": "one complete Boolean relation table per CUDA test; excludes validation and probability transfers",
     "native_tail_batch": "original Saddle/moment/CCT branches, FP64 probability arithmetic",
     "tail_method": "saddlepoint_gamma_or_fastskat_hybrid",
-    "exact_spectrum_threshold": 5000,
+    "exact_spectrum_threshold": None,
+    "spectrum_policy": "full",
     "davies_calls": 0,
     "davies_faults": 0,
     "davies_retry_calls": 0,
@@ -571,7 +572,7 @@ def _liu_failure(*, index, m, rank, probes, seed, reason, **extra):
 
 
 def _saddlepoint_skat_pvalues(q_values, spectra):
-    """Use the established complete-spectrum Saddle/moment tail for M<=10k."""
+    """Use the established complete-spectrum Saddle/moment tail for all legal M."""
     from ._fused_saddle import quadratic_form_sf_batch
     values = quadratic_form_sf_batch(q_values, spectra).to(dtype=torch.float64)
     if not bool(torch.isfinite(values).all()) or bool(((values < 0) | (values > 1)).any()):
@@ -1100,7 +1101,7 @@ def association_test(
     _skat_pvalues: torch.Tensor | None = None,
     matmul_mode: str = "fp64",
     long_mask_threshold: int = 5000,
-    long_mask_method: str = "fastskat",
+    long_mask_method: str = "full",
     long_mask_rank: int = 512,
     long_mask_seed: int = 1729,
     tail_optimization: bool = False,
@@ -1110,13 +1111,12 @@ def association_test(
 ) -> dict[str, float | int]:
     """Return WGS columns from already oriented, imputed score inputs.
 
-    Native tf32 uses FP32 scores, covariance and weights.  M<=long_mask_threshold (default 5000) uses the
-    established complete-spectrum saddlepoint/fourth-moment Gamma path;
-    larger masks default to a recorded FastSKAT-style top-k LOBPCG spectrum
-    plus an exact-dense residual Satterthwaite chi-square in the saddlepoint
-    cgf.  ``long_mask_method='liu'`` retains the earlier rank-512/32-probe
-    Liu implementation for comparison.  Probability arithmetic uses FP64 for
-    underflow stability.
+    Native tf32 uses FP32 scores, covariance and weights. The default full
+    policy computes independent complete H32 spectra for every legal mask,
+    with the established Saddle/fourth-moment Gamma tails. GPU admission uses
+    the live process budget. Explicit fastskat/liu retain their earlier
+    approximate path above long_mask_threshold; that threshold does not
+    dispatch the default full spectrum. Probability arithmetic stays FP64.
     Explicit fp64 controls preserve the earlier scalar implementation.
     weight_batch_optimization groups score products and chi-square tails,
     retains individual one-dimensional reductions for explicit FP64 controls.
@@ -1136,9 +1136,10 @@ def association_test(
     validate_mode(matmul_mode)
     if type(long_mask_threshold) is not int or long_mask_threshold < 1:
         raise ValueError("long_mask_threshold must be a positive integer")
-    _STATISTICS_METADATA["exact_spectrum_threshold"] = long_mask_threshold
-    if long_mask_method not in ("fastskat", "liu"):
-        raise ValueError("long_mask_method must be fastskat or liu")
+    _STATISTICS_METADATA["exact_spectrum_threshold"] = None if long_mask_method == "full" else long_mask_threshold
+    _STATISTICS_METADATA["spectrum_policy"] = long_mask_method
+    if long_mask_method not in ("full", "fastskat", "liu"):
+        raise ValueError("long_mask_method must be full, fastskat or liu")
     if int(long_mask_rank) < 1:
         raise ValueError("long_mask_rank must be positive")
     if int(long_mask_seed) < 0:
@@ -1240,7 +1241,10 @@ def association_test(
             raise ValueError("precomputed SKAT values do not match the annotation weights")
     small_spectra = None
     approximate_spectrum = None
-    if native and _skat_pvalues is None and count <= long_mask_threshold:
+    if native and _skat_pvalues is None and long_mask_method == "full":
+        from ._weighted_spectra import sequential_complete_spectra
+        small_spectra = sequential_complete_spectra(v, skat_weights)
+    elif native and _skat_pvalues is None and count <= long_mask_threshold:
         small_spectra = _native_weighted_spectra(v, skat_weights)
     elif native and _skat_pvalues is None:
         approximate_spectrum = True

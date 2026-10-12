@@ -177,13 +177,13 @@ def _dataset(cache_directory, chromosomes=None):
     return root, manifest_path, manifest, selected, samples
 
 
-def _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_threshold, long_mask_rank, seed):
-    # Preserve the source-11 PheWAS policy; callers retain its mature per-mask
-    # exact/approximation selection rather than silently inheriting new defaults.
+def _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_threshold, long_mask_rank, seed, *, long_mask_method="full"):
+    # Complete native FP32 spectra are the public default. Explicit legacy
+    # approximations keep their threshold/rank settings in the bound plan.
     return dict(memory_limit_gib=memory_limit_gib, genotype_block_size=128,
         annotation_block_size=250_000, variant_tile_size=512,
         covariance_backend="cached", cached_variant_tile_size=covariance_block_size,
-        long_mask_threshold=long_mask_threshold, long_mask_method="fastskat",
+        long_mask_threshold=long_mask_threshold, long_mask_method=long_mask_method,
         long_mask_rank=long_mask_rank, long_mask_seed=seed, wrapper_semantics="base", variant_type="variant")
 
 

@@ -134,7 +134,8 @@ def _configuration(manifest, entries, population_ids, output, options, source):
             annotation_index=dict(promoter_intervals_file=entry.get('promoter_intervals')), jobs=jobs))
     from .phewas_cache import _analysis_defaults
     analysis_options = _analysis_defaults(None, options['covariance_block_size'],
-        options['long_mask_threshold'], options['long_mask_rank'], options['seed'])
+        options['long_mask_threshold'], options['long_mask_rank'], options['seed'],
+        long_mask_method=options.get('long_mask_method', 'full'))
     analysis_options.update(variant_type=options['gene_variant_type'])
     return dict(chromosomes=schedules, **settings, matmul_mode='tf32', analysis_options=analysis_options,
         resident_genotypes=True, local_mask_reuse=True, statistics_tail_optimization=True,

@@ -620,12 +620,14 @@ def _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_b
 def build_configuration(cache_directory, *, chromosomes=None, maximum_single_variants=None,
                         analyses=('individual', 'coding', 'noncoding', 'ncrna'),
                         gene_variant_type='SNV', memory_limit_gib=None,
-                        covariance_block_size=4096, long_mask_threshold=5000,
+                        covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                         long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                         single_group_variants=5000, single_region_size=10_000_000,
                         individual_effective_block_size=1024):
     """Build one chromosome/genetic schedule, independent of phenotype count."""
     analyses = _selected_analyses(analyses)
+    if long_mask_method not in ('full', 'fastskat', 'liu'):
+        raise ValueError('long_mask_method must be full, fastskat or liu')
     if gene_variant_type not in ('SNV', 'Indel', 'variant'):
         raise ValueError('gene_variant_type must be SNV, Indel or variant')
     for key, value in dict(covariance_block_size=covariance_block_size,
@@ -686,7 +688,8 @@ def build_configuration(cache_directory, *, chromosomes=None, maximum_single_var
             container_directory=entry['container_directory'], metadata_directory=entry['metadata_directory'],
             annotation_index=dict(promoter_intervals_file=entry.get('promoter_intervals')),
             jobs=jobs))
-    options = _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_threshold, long_mask_rank, seed)
+    options = _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_threshold, long_mask_rank, seed,
+                                long_mask_method=long_mask_method)
     options.update(memory_limit_gib=memory_limit_gib, variant_type=gene_variant_type)
     return dict(chromosomes=schedules, qc_path=manifest.get('qc_path', 'annotation/info/QC_label'),
         annotation_catalog=catalog,
@@ -1334,7 +1337,7 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
                        phenotype_families='auto', phenotype_covariates=None, rm_nan=True,
                        gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1., host_memory_limit_gib=None,
                        cpu_threads=8, grm='sparse', grm_file=None, resume=False,
-                       covariance_block_size=4096, long_mask_threshold=5000,
+                       covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                        long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                        single_group_variants=5000, single_region_size=10_000_000,
                        individual_effective_block_size=1024,
@@ -1389,7 +1392,7 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
     config = build_configuration(cache_directory, chromosomes=chromosomes, analyses=analyses,
         gene_variant_type=gene_variant_type, memory_limit_gib=memory_limit_gib,
         covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
-        long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
+        long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size)
     output = Path(output_directory).resolve()
@@ -1463,7 +1466,7 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
                phenotype_families='auto', phenotype_covariates=None, rm_nan=True,
                gene_variant_type='SNV', memory_limit_gib=None, memory_reserve_gib=1., host_memory_limit_gib=None,
                cpu_threads=8, grm='sparse', grm_file=None, resume=False,
-               covariance_block_size=4096, long_mask_threshold=5000,
+               covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                single_group_variants=5000, single_region_size=10_000_000,
                individual_effective_block_size=1024,
@@ -1490,7 +1493,7 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
         memory_reserve_gib=memory_reserve_gib, host_memory_limit_gib=host_memory_limit_gib,
         cpu_threads=cpu_threads, grm=grm,
         grm_file=grm_file, resume=resume, covariance_block_size=covariance_block_size,
-        long_mask_threshold=long_mask_threshold, long_mask_rank=long_mask_rank, seed=seed,
+        long_mask_threshold=long_mask_threshold, long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed,
         single_mac_cutoff=single_mac_cutoff, single_group_variants=single_group_variants,
         single_region_size=single_region_size, individual_effective_block_size=individual_effective_block_size,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
@@ -1612,6 +1615,8 @@ def main(argv=None):
                         help='shared host task budget in GiB; default detects all finite limits')
     parser.add_argument('--rm-nan', action=argparse.BooleanOptionalAction, default=None,
                         help='fill phenotypes by default; --no-rm-nan selects available cases')
+    parser.add_argument('--long-mask-method', choices=['full','fastskat','liu'], default=None,
+                        help='full native FP32 spectra by default; existing plans keep their bound policy')
     parser.add_argument('--continuous-transform', choices=['paper','none','rint'], default='paper')
     args = parser.parse_args(argv)
     if args.plan is None:
@@ -1622,9 +1627,13 @@ def main(argv=None):
         return run_phewas(args.phenotype_csv, args.covariate_csv, args.cache_directory,
                           output_directory=args.output_directory, gpu_ids=args.gpu_ids,
                           continuous_transform=args.continuous_transform,
+                          long_mask_method='full' if args.long_mask_method is None else args.long_mask_method,
                           rm_nan=True if args.rm_nan is None else args.rm_nan,
                           host_memory_limit_gib=args.host_memory_limit_gib)
     plan = json.loads(Path(args.plan).read_text())
+    if (args.long_mask_method is not None and args.long_mask_method !=
+            plan['configuration']['analysis_options'].get('long_mask_method', 'full')):
+        parser.error('long_mask_method cannot change an existing prepared plan; use a new output directory')
     if args.rm_nan is not None and args.rm_nan != plan.get('rm_nan', False):
         parser.error('rm_nan cannot change an existing prepared plan; use a new output directory')
     if args.host_memory_limit_gib is not None:

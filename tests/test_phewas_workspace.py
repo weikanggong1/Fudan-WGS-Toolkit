@@ -315,7 +315,9 @@ def test_broker_restores_owner_hook_and_active_slab_survives_cache_retirement(tm
 
 
 def test_tail_plan_includes_staar_mask_copies_and_excludes_input_covariance():
-    options = AnalysisOptions()
+    # This allowance is the retained explicit fastSKAT route; full is now the
+    # public default and has its own complete-spectrum budget regression.
+    options = AnalysisOptions(long_mask_method="fastskat")
     n, m = 339013, 40000
     tail = runtime._gene_tail_new_bytes(n, m, options)
     assert tail == 16*m*m+64*m*512+4*n

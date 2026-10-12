@@ -440,7 +440,7 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
                 memory_limit_gib=None, memory_reserve_gib=1.0, host_memory_limit_gib=None,
                 phenotype_families="auto", phenotype_covariates=None, rm_nan=True,
                 transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
-                covariance_block_size=4096, long_mask_threshold=5000, long_mask_rank=512, seed=1729,
+                covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
                 individual_effective_block_size=1024, device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
@@ -468,6 +468,9 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
     phenotype tiles divide that cohort. Smaller banks partition genetic jobs.
     Unique jobs and worker scan visits are
     reported separately, with global trait IDs and model bindings preserved.
+    long_mask_method="full" computes complete native FP32 gene spectra with
+    live GPU admission. fastskat/liu explicitly retain threshold-based
+    approximations; long_mask_threshold is not the default spectrum switch.
     Genetic preparation is never invoked by this association entry point.
     """
     chromosomes = _normalise_chromosomes(chromosomes)
@@ -495,6 +498,8 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
                 single_group_variants, single_region_size, individual_effective_block_size, trait_batch_size)
     if any(type(v) is not int or v < 1 for v in positive):
         raise ValueError("block sizes, trait tiles and MAC cutoff must be positive integers")
+    if long_mask_method not in ("full", "fastskat", "liu"):
+        raise ValueError("long_mask_method must be full, fastskat or liu")
     if type(seed) is not int or seed < 0:
         raise ValueError("seed must be a nonnegative integer")
     if any(type(v) is not int or v < 0 for v in (device_cache_bytes, compact_cache_bytes)) or type(metadata_cache_bytes) is not int or metadata_cache_bytes < 1:
@@ -521,7 +526,7 @@ def run_WGS_all(phenotype_csv, covariate_csv, prepared_directory, *, output_dire
         memory_reserve_gib=float(memory_reserve_gib), host_memory_limit_gib=host_memory_limit_gib, phenotype_families=phenotype_families,
         phenotype_covariates=phenotype_covariates, rm_nan=rm_nan, gene_variant_type=gene_variant_type,
         covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
-        long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
+        long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
@@ -626,6 +631,8 @@ def main(argv=None):
         ("individual-effective-block-size",1024),("device-cache-bytes",512*2**20),
         ("compact-cache-bytes",64*2**20),("metadata-cache-bytes",256*2**20)):
         parser.add_argument("--"+name,type=int,default=default)
+    parser.add_argument("--long-mask-method", choices=("full", "fastskat", "liu"), default="full",
+                        help="full native FP32 spectra (default), or explicit legacy approximation")
     parser.add_argument("--rm-nan", action=argparse.BooleanOptionalAction, default=True,
         help="fill missing phenotypes (default); --no-rm-nan selects available complete cases")
     parser.add_argument("--resume",action="store_true")

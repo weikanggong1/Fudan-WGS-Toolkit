@@ -21,6 +21,7 @@ _BATCH_SAMPLE_LIMIT=64
 _METRICS=dict(calls=0,batch_sizes=[],batch_size_counts={},eigen_api_calls=0,complete_representative_spectra=0,
               exact_relation_reused_spectra=0,live_workspace_queries=0,workspace_rejections=0,
               max_estimated_batch_workspace_bytes=0,max_weighted_tensor_bytes=0,
+              full_sequential_calls=0,full_sequential_spectra=0,max_full_new_workspace_bytes=0,
               workspace_query_host_seconds=0.,actual_backend_calls={},actual_backend_matrices={})
 
 def _record_batch_size(size):
@@ -155,6 +156,84 @@ def scale_exact_spectra(solved,mapping,exact,pivots):
     full_fp32=torch.stack([solved[i] for i in mapping])
     return full_fp32.double()*scales.square()[:,None]
 
+def full_workspace_unit_bytes(number_variants):
+    """Estimated NEW sequential H32/eigensolver buffers, not a GPU cap.
+
+    Four FP32 matrix units conservatively cover left-weighting, its final H,
+    the solver input copy and library workspace. Spectrum output/conversion
+    adds one FP32 and one FP64 vector. C and the final all-weight spectrum
+    output are already resident when this per-weight allowance is admitted.
+    Library scratch is estimated; real allocation/OOM remains a hard failure.
+    """
+    m = int(number_variants)
+    if m < 1:
+        raise ValueError('complete spectrum requires a positive variant count')
+    return 16*m*m + 12*m
+
+
+def sequential_complete_spectra(covariance, weights):
+    """Independent complete H32 spectra, admitted against the whole GPU.
+
+    Each actual D column uses (C*d[:,None])*d[None,:], then the established
+    Torch eigvalsh UPLO=U. No proportional scaling, truncation, full H64 or
+    alternative eigensolver is used. The old 512 MiB weighted batch preference
+    is not a cap on one legal full matrix. All J-by-M spectrum storage is
+    counted before allocation, then live admission is repeated per weight.
+    """
+    result = weight = weighted = spectrum = converted = None
+    try:
+        if (not isinstance(covariance, torch.Tensor) or not isinstance(weights, torch.Tensor)
+                or covariance.dtype != torch.float32 or weights.dtype != torch.float32
+                or covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]
+                or covariance.shape[0] < 1 or weights.ndim != 2
+                or weights.shape[0] != covariance.shape[0] or weights.shape[1] < 1
+                or covariance.device != weights.device):
+            raise ValueError('complete spectra require aligned square FP32 C and actual D columns')
+        if not _SOLVER_LOCK.acquire(blocking=False):
+            raise RuntimeError('weighted spectra belong to another active pipeline thread')
+        _SOLVER_LOCK.release()
+        from ._fit_structure_cache import guard_cuda_workspace
+        m, j = weights.shape
+        unit = full_workspace_unit_bytes(m)
+        output_bytes = 8*j*m
+        if covariance.is_cuda:
+            guard_cuda_workspace(output_bytes+unit, covariance.device, context='complete STAAR output/workspace')
+        _METRICS['max_full_new_workspace_bytes'] = max(
+            _METRICS['max_full_new_workspace_bytes'], output_bytes+unit)
+        _METRICS['full_sequential_calls'] += 1
+        original = _pinned_statistics()
+        with torch.no_grad():
+            result = torch.empty((j, m), dtype=torch.float64, device=covariance.device)
+            for index in range(j):
+                if covariance.is_cuda:
+                    guard_cuda_workspace(unit, covariance.device, context='complete STAAR weight workspace')
+                weight = weights[:, index]
+                with _profile('weighted_matrix_build'):
+                    weighted = (covariance*weight[:, None])*weight[None, :]
+                with _profile('eigvalsh'):
+                    spectrum = torch.linalg.eigvalsh(weighted, UPLO='U')
+                original.record_gpu_eigen_route(weighted)
+                converted = spectrum.to(dtype=torch.float64)
+                result[index].copy_(converted)
+                _record_batch_size(1)
+                _METRICS['eigen_api_calls'] += 1
+                _METRICS['complete_representative_spectra'] += 1
+                _METRICS['full_sequential_spectra'] += 1
+                route = 'torch.linalg.eigvalsh'
+                _METRICS['actual_backend_calls'][route] = _METRICS['actual_backend_calls'].get(route, 0)+1
+                _METRICS['actual_backend_matrices'][route] = _METRICS['actual_backend_matrices'].get(route, 0)+1
+                original._STATISTICS_METADATA['native_complete_spectra'] += 1
+                weight = weighted = spectrum = converted = None
+        return result
+    except BaseException as error:
+        # A retained Torch/context traceback must not pin complete H tensors.
+        from ._lobpcg_stream_pool import clear_exception_frames
+        clear_exception_frames(error)
+        raise
+    finally:
+        covariance = weights = result = weight = weighted = spectrum = converted = None
+
+
 def native_weighted_spectra(covariance, weights):
     """Complete FP32 spectra; reuse only exact proportional input weights.
 
@@ -222,6 +301,8 @@ def execution_metadata(*,reset=False):
     report=dict(copy.deepcopy(_METRICS),
         batch_sizes_scope=f'last {_BATCH_SAMPLE_LIMIT} weighted-matrix batches; exact lifetime counts in batch_size_counts',
         batch_limit_bytes=WEIGHTED_BATCH_LIMIT_BYTES,
+        batch_limit_scope='legacy proportional weighted batching preference; full sequential uses live/process GPU cap',
+        full_sequential_policy='independent complete native H32/eigvalsh; no spectrum scaling or M threshold',
         weighted_matrix_dtype='float32',eigensolver='explicit complete FP32 eigvalsh APIs, UPLO=U',
         eigensolver_context=copy.deepcopy(_LAST_SOLVER_CONTEXT),
         spectrum_scalar_scale_dtype='float64',exact_proportional_relations=True,

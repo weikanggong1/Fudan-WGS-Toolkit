@@ -89,7 +89,7 @@ class AnalysisOptions:
     spa_max_iter: int = 1000
     wrapper_semantics: str = "phewas"
     long_mask_threshold: int = 5000
-    long_mask_method: str = "fastskat"
+    long_mask_method: str = "full"
     long_mask_rank: int = 512
     long_mask_seed: int = 1729
 
@@ -118,8 +118,8 @@ class AnalysisOptions:
             raise ValueError("covariance_backend must be cached or legacy")
         if type(self.cached_variant_tile_size) is not int or self.cached_variant_tile_size < 1 or self.cached_variant_tile_size % 512:
             raise ValueError("cached_variant_tile_size must be a positive multiple of 512")
-        if self.long_mask_method not in ("fastskat", "liu"):
-            raise ValueError("long_mask_method must be fastskat or liu")
+        if self.long_mask_method not in ("full", "fastskat", "liu"):
+            raise ValueError("long_mask_method must be full, fastskat or liu")
         if type(self.long_mask_rank) is not int or self.long_mask_rank < 1:
             raise ValueError("long_mask_rank must be a positive integer")
         if type(self.long_mask_seed) is not int or self.long_mask_seed < 0:
@@ -472,7 +472,8 @@ class PheWASPipeline:
                     free_bytes=free)
                 # Genotype panels are freed before the statistical stage.
                 # Include dense masking/weighting and bounded rank workspaces.
-                spectrum = 4 * (4 * m * m + 16 * m * min(options.long_mask_rank, m) + n)
+                spectrum = (32*m*m + 4*n + 256*2**20 if options.long_mask_method == "full"
+                            else 4 * (4 * m * m + 16 * m * min(options.long_mask_rank, m) + n))
                 return max(plan["conservative_new_workspace_bytes"], spectrum)
             b = min(int(options.variant_tile_size or 512), m)
             return bytes_per_element * (4 * n * b + 2 * (t * m) ** 2 + n * t * t)

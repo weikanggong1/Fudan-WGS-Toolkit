@@ -818,7 +818,7 @@ def _gene_tail_new_bytes(n, m, options):
     ACAT-V covariance copies. Reuse the existing pipeline spectrum allowance,
     rather than reserve only its later 8*M*M weighted-matrix estimate.
     """
-    if m > options.long_mask_threshold:
+    if getattr(options, "long_mask_method", "full") != "full" and m > options.long_mask_threshold:
         return 16*m*m + 64*m*min(options.long_mask_rank, m) + 4*n
     return 32*m*m + 4*n + 256*2**20
 
