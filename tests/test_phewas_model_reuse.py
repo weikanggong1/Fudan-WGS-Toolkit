@@ -392,3 +392,180 @@ def test_fixed_existing_input_scope_cannot_authorize_new_model_fits(reuse):
     plan['reuse_models_only'] = False
     with pytest.raises(ValueError, match='reuse-only'):
         run.fit_models(plan, device='cpu')
+
+
+def refresh_consumption_proof(plan, inventory, proof):
+    joined = hashlib.sha256()
+    for name, record in sorted(proof['components'].items()):
+        joined.update(name.encode()); joined.update(bytes.fromhex(record['old_fingerprint']))
+    proof['old_model_consumption_component_fingerprint'] = joined.hexdigest()
+    proof['new_model_consumption_component_fingerprint'] = joined.hexdigest()
+    proof['immutable_inventory_fingerprint'] = run._model_inventory_fingerprint(inventory)
+    plan['null_fit_compatibility_sha256'] = write(Path(plan['null_fit_compatibility_receipt']), proof)
+    inventory['null_fit_compatibility_sha256'] = plan['null_fit_compatibility_sha256']
+    refresh_inventory(plan, inventory)
+
+
+@pytest.fixture
+def consumption_reuse(reuse):
+    """Anonymous full serialized schemas; no fitter or preparation is invoked."""
+    plan, inventory, _ = reuse
+    serialized = []
+    for record in inventory['models']:
+        root = Path(record['target']); family = record['family']
+        metadata = json.loads((root/'model.private.json').read_text())
+        states = {}
+        for label in ('normal', 'spa') if family == 'binomial' else ('normal',):
+            dtype = np.float64 if label == 'spa' else np.float32
+            values = dict(sample_ids=np.asarray(['301', '303', '307', '309']),
+                x=np.ones((4, 1), dtype=dtype), scaled_residuals=np.zeros(4, dtype=dtype),
+                coefficients=np.zeros(1, dtype=dtype), fixed_effect_covariance=np.ones((1, 1), dtype=dtype),
+                precision_x=np.ones((4, 1), dtype=dtype))
+            if family == 'gaussian':
+                values.update(theta=np.ones(2, dtype=dtype), precision_theta=np.ones(2, dtype=dtype),
+                              inverse_variance=np.ones(4, dtype=dtype), eigenvalues=np.ones(4, dtype=dtype))
+            else:
+                values.update(fitted_probability=np.full(4, .1, dtype=dtype), precision=np.ones(4, dtype=dtype))
+                if label == 'spa':
+                    values.update(xw=np.ones((1, 4), dtype=dtype), projection_left=np.ones((4, 1), dtype=dtype),
+                                  phenotype=np.zeros(4, dtype=dtype), working_phenotype=np.zeros(4, dtype=dtype))
+            arrays = {}
+            for name, value in values.items():
+                path = root/label/(name+'.npy'); np.save(path, value, allow_pickle=False)
+                arrays[name] = dict(file=path.name, shape=list(value.shape), dtype=value.dtype.str,
+                                    sha256=digest_file(path))
+            state = dict(family=family, converged=True, has_kinship=True, iterations=3,
+                matmul_mode='fp64' if label == 'spa' else 'tf32', use_spa=label == 'spa',
+                fit_method='anonymous_stored_model', null_fit_source_sha256='f'*64, arrays=arrays, blocks=[])
+            metadata['state_sha256' if label == 'normal' else 'spa_state_sha256'] = write(
+                root/label/'state.private.json', state)
+            states[label] = state
+        record['metadata_sha256'] = write(root/'model.private.json', metadata)
+        record['files'] = [dict(path=str(path), sha256=digest_file(path), stat=run._file_stat(path))
+                           for path in sorted(root.rglob('*')) if path.is_file()]
+        serialized.append(dict(trait_index=record['trait_index'], metadata_sha256=record['metadata_sha256'],
+            sample_rows=dict(shape=[4], dtype='<i8', sha256=metadata['sample_rows_sha256']), states=states))
+    complete_path = Path(inventory['from_run_directory'])/'outputs/fit_worker_0.complete.private.json'
+    complete = json.loads(complete_path.read_text())
+    for entry, record in zip(complete['models'], inventory['models']):
+        entry['sha256'] = record['metadata_sha256']
+    inventory['fit_complete_receipt_sha256']['0'] = write(complete_path, complete)
+    actual = run._consumption_component_fingerprints()
+    proof = dict(schema_version=2, kind='immutable_fitted_model_consumption', complete=True,
+        source_unchanged_during_review=True, compatible_null_fit_math=False,
+        fitting_implementation_equivalence_verified=False, scientific_model_input_changes=False,
+        model_fitting_disabled=True, input_preparation_disabled=True,
+        kinship_spectrum_from_sparse_disabled=True, models_refitted=0,
+        model_fit_source_implementation_sha256=OLD, consumer_source_implementation_sha256=NEW,
+        prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+        cohort_sha256=plan['cohort_sha256'], kinship_sha256=plan['kinship_sha256'],
+        continuous_transform=plan['continuous_transform'], model_count=2,
+        components={name: dict(old_fingerprint=value, new_fingerprint=value, identical=True)
+                    for name, value in actual.items()},
+        serialized_model_contract=dict(schema_version=1, complete=True, geometry_verified=True,
+                                       model_count=2, models=serialized),
+        existing_models_reuse={key: True for key in ('scientifically_compatible',
+            'original_model_metadata_and_array_hashes_must_be_preserved',
+            'consumer_and_fit_source_binding_must_be_separate', 'missing_reuse_target_must_hard_fail',
+            'no_new_fits_may_be_labelled_as_old_source')})
+    refresh_consumption_proof(plan, inventory, proof)
+    return plan, inventory, proof
+
+
+def test_stored_model_consumption_reuses_complete_states_without_fit_equivalence(consumption_reuse, monkeypatch):
+    plan, inventory, _ = consumption_reuse
+    monkeypatch.setattr(run, 'prepare_phewas_inputs', lambda **kwargs: pytest.fail('consumption prepared inputs'))
+    before = {Path(item['path']): digest_file(item['path'])
+              for record in inventory['models'] for item in record['files']}
+    result = run.fit_models(plan, device='cpu')
+    assert result['mode'] == 'verified_reuse' and result['errors'] == []
+    assert result['reuse_receipt_kind'] == 'immutable_fitted_model_consumption'
+    assert result['compatible_null_fit_math'] is False
+    assert result['fitting_implementation_equivalence_verified'] is False
+    assert result['model_fitting_disabled'] is result['input_preparation_disabled'] is True
+    assert type(result['models_refitted']) is int and result['models_refitted'] == 0
+    assert result['fit_structure_cache'] is None
+    assert len(run._all_models(plan, 1)) == 2
+    assert {path: digest_file(path) for path in before} == before
+
+
+@pytest.mark.parametrize('key,value', [
+    ('kind', 'compatible_new_fitting'), ('compatible_null_fit_math', True),
+    ('fitting_implementation_equivalence_verified', True), ('model_fitting_disabled', False),
+    ('input_preparation_disabled', False), ('kinship_spectrum_from_sparse_disabled', False),
+    ('models_refitted', False), ('models_refitted', 1), ('scientific_model_input_changes', True),
+    ('consumer_source_implementation_sha256', OLD), ('model_fit_source_implementation_sha256', NEW),
+    ('prepared_inputs_manifest_sha256', 'd'*64), ('kinship_sha256', 'd'*64),
+    ('cohort_sha256', None), ('continuous_transform', 'none'),
+    ('old_null_fit_component_fingerprint', 'c'*64), ('fitted_math_or_parameter_changes', False),
+])
+def test_consumption_receipt_rejects_fitting_claims_or_shifted_inputs(consumption_reuse, key, value):
+    plan, inventory, proof = consumption_reuse
+    proof[key] = value; refresh_consumption_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='consumption compatibility'):
+        run.fit_models(plan, device='cpu')
+
+
+@pytest.mark.parametrize('problem', ['missing', 'wrong_actual', 'old_changed', 'aggregate', 'extra_fitter'])
+def test_consumption_requires_exact_actual_source_component_fingerprints(consumption_reuse, problem):
+    plan, inventory, proof = consumption_reuse
+    name = 'phewas_storage.py:load_model_store'
+    if problem == 'missing': proof['components'].pop(name)
+    elif problem == 'wrong_actual':
+        proof['components'][name].update(old_fingerprint='c'*64, new_fingerprint='c'*64)
+    elif problem == 'old_changed': proof['components'][name]['old_fingerprint'] = 'c'*64
+    elif problem == 'extra_fitter': proof['components']['null_model.py:fit_gaussian_null'] = dict(
+        old_fingerprint='c'*64, new_fingerprint='c'*64, identical=True)
+    refresh_consumption_proof(plan, inventory, proof)
+    if problem == 'aggregate':
+        proof['old_model_consumption_component_fingerprint'] = 'c'*64
+        plan['null_fit_compatibility_sha256'] = write(Path(plan['null_fit_compatibility_receipt']), proof)
+        inventory['null_fit_compatibility_sha256'] = plan['null_fit_compatibility_sha256']; refresh_inventory(plan, inventory)
+    with pytest.raises(ValueError, match='consumer component|fingerprint'):
+        run._fit_binding(plan)
+
+
+@pytest.mark.parametrize('problem', ['missing_model', 'omitted_state', 'changed_state', 'wrong_geometry', 'inventory'])
+def test_consumption_complete_serialized_contract_and_inventory_cannot_be_relabelled(consumption_reuse, problem):
+    plan, inventory, proof = consumption_reuse
+    contract = proof['serialized_model_contract']
+    if problem == 'missing_model': contract['models'].pop()
+    elif problem == 'omitted_state': contract['models'][1]['states'].pop('spa')
+    elif problem == 'changed_state': contract['models'][1]['states']['spa']['use_spa'] = False
+    elif problem == 'wrong_geometry': contract['models'][0]['sample_rows']['shape'] = [5]
+    refresh_consumption_proof(plan, inventory, proof)
+    if problem == 'inventory':
+        inventory['inherited_original_write_provenance_sha256'] = 'c'*64; refresh_inventory(plan, inventory)
+    with pytest.raises(ValueError, match='serialized|inventory fingerprint'):
+        run.fit_models(plan, device='cpu')
+
+
+@pytest.mark.parametrize('problem', ['source_link', 'array_omitted', 'changed_array', 'original_fit_exit', 'original_plan'])
+def test_consumption_keeps_all_original_link_array_plan_and_exit_gates(consumption_reuse, problem):
+    plan, inventory, proof = consumption_reuse
+    record = inventory['models'][0]
+    if problem == 'source_link': Path(record['symlink']).unlink()
+    elif problem == 'array_omitted': record['files'].pop()
+    elif problem == 'changed_array':
+        path = next(Path(item['path']) for item in record['files'] if item['path'].endswith('/x.npy'))
+        path.write_bytes(path.read_bytes()+b'changed')
+    elif problem == 'original_fit_exit':
+        path = Path(inventory['from_run_directory'])/'outputs/worker_0.fit.supervisor_exit.anonymous.json'
+        value = json.loads(path.read_text()); value['exit_code'] = 1
+        inventory['fit_supervisor_exit_sha256']['0'] = write(path, value)
+    else:
+        path = Path(inventory['from_run_directory'])/'outputs/plan.private.json'
+        value = json.loads(path.read_text()); value['continuous_transform'] = 'none'
+        inventory['from_plan_sha256'] = write(path, value)
+    refresh_consumption_proof(plan, inventory, proof)
+    with pytest.raises(ValueError, match='link binding|every fitted-state array|file identity|successfully exit|original fit plan'):
+        run.fit_models(plan, device='cpu')
+
+
+def test_consumption_barrier_cannot_claim_equivalent_new_fit(consumption_reuse):
+    plan, _, _ = consumption_reuse
+    run.fit_models(plan, device='cpu')
+    path = Path(plan['output_directory'])/'fit_worker_0.complete.private.json'
+    receipt = json.loads(path.read_text()); receipt['compatible_null_fit_math'] = True; write(path, receipt)
+    with pytest.raises(ValueError, match='claims fitting equivalence'):
+        run._all_models(plan, 1)

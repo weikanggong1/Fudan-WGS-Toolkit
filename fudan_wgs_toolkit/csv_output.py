@@ -11,6 +11,7 @@ import csv
 import hashlib
 import math
 import os
+from operator import itemgetter
 from pathlib import Path
 import tempfile
 
@@ -22,6 +23,40 @@ GENE_COLUMNS = ("Gene name", "Chr", "Category", "#SNV", "cMAC") + tuple(
     field for method, combined in (("SKAT", "WGS-S"), ("Burden", "WGS-B"), ("ACAT-V", "WGS-A"))
     for beta in ("1,25", "1,1") for field in (f"{method}({beta})", f"{combined}({beta})")) + ("ACAT-O", "WGS-O")
 _KINDS = frozenset(("individual", "singlevariant", "coding", "noncoding", "ncrna"))
+
+
+def _write_bound_trait_rows(writer, rows, trait_index, source_columns):
+    """Synchronously write one checked Single schema without copied mappings.
+
+    The checkpoint caller checks every source row's ordered schema and rejects
+    a source ``trait_index`` before yielding it. Values go straight to the
+    standard CSV writer: its established scalar/None formatting is unchanged.
+    ``writerows`` consumes one tuple at a time and retains no output queue,
+    formatted strings or batch-sized temporary container. Only the current
+    record and its scalar-reference tuples are held by this helper.
+    """
+    columns = tuple(source_columns)
+    if not columns:
+        raise ValueError("bound trait CSV requires nonempty source columns")
+    lookup = itemgetter(*columns)
+    singleton = len(columns) == 1
+    count = selected = failed = 0
+
+    def values():
+        nonlocal count, selected, failed
+        for source in rows:
+            # Production records are plain dictionaries. Keep historical
+            # keyword-expansion behavior for subclasses that override item
+            # lookup/get; DictWriter previously received this exact plain copy.
+            record = source if type(source) is dict else dict(trait_index=trait_index, **source)
+            cells = lookup(record)
+            yield (trait_index, cells) if singleton else (trait_index, *cells)
+            count += 1
+            selected += int(bool(record.get('spa_selected', False)))
+            failed += int(bool(record.get('spa_failed', False)))
+
+    writer.writerows(values())
+    return count, selected, failed
 
 
 def cell_text(value):

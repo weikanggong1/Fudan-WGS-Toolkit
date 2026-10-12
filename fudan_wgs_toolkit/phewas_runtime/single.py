@@ -350,10 +350,18 @@ def process_single_shared_genotype(pipelines, block, ordinal_offset, chromosome,
     _METRICS['result_transfer_values'] += host.size
     _METRICS['pointwise_tail_batches'] += 1
     _METRICS['maximum_batch_variants'] = max(_METRICS['maximum_batch_variants'], scores.numel())
+    from .._single_record_metadata import SingleRecordMetadata
+    if '_single_record_metadata' not in prepared:
+        prepared['_single_record_metadata'] = SingleRecordMetadata.prepare(
+            first.genotype, prepared['selected'])
     result = []
     for index, (pipeline, model) in enumerate(zip(pipelines, models)):
         record_state = dict(prepared, model=model)
         record_state.pop('genotype')
+        if pipeline.genotype is not first.genotype:
+            # Independent callers may use separate readers on equal sample
+            # axes. Keep their own labels; only one exact reader shares IO.
+            record_state.pop('_single_record_metadata', None)
         rows = pipeline._individual_records_from_values(record_state, core_host[index],
             subset_variants_num=subset_variants_num)
         if index in corrected:

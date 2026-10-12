@@ -65,19 +65,37 @@ def _second_finite(x, mu, g):
     return value
 
 
+def _newton_derivatives(x, mu, g, q):
+    """Share the FP64 exponential without changing either reduction formula."""
+    e = torch.exp(-g * x[None, :])
+    first = (-mu * g + mu * g / (mu + (1 - mu) * e)).sum(0) - q
+    second = (mu * (1 - mu) * g.square() * e / (mu + (1 - mu) * e).square()).sum(0)
+    return first, second
+
+
 def _newton(mu, g, q, tol, max_iter):
     current = torch.zeros_like(q)
-    first = _first(current, mu, g, q)
-    update = torch.where(first.abs() > tol, current - first / _second(current, mu, g), current)
+    first, second = _newton_derivatives(current, mu, g, q)
+    update = torch.where(first.abs() > tol, current - first / second, current)
     counts = torch.zeros_like(q, dtype=torch.int64)
     while True:
+        first, second = _newton_derivatives(update, mu, g, q)
         active = (torch.isfinite(update) & ((update-current).abs() > tol)
-                  & (_first(update, mu, g, q).abs() > tol) & (counts < max_iter))
+                  & (first.abs() > tol) & (counts < max_iter))
         if not bool(active.any()):
             break
         counts = counts + active.to(torch.int64)
         current = torch.where(active, update, current)
-        candidate = current - _first_finite(current, mu, g, q) / _second_finite(current, mu, g)
+        # Active current columns equal the update used above. Reuse their
+        # first derivative and curvature, preserving the original alternate
+        # formulas independently for each nonfinite derivative. Values on
+        # inactive columns are discarded by the same update mask below.
+        first_bad = active & ~torch.isfinite(first)
+        second_bad = active & ~torch.isfinite(second)
+        if bool((first_bad | second_bad).any()):
+            first = torch.where(first_bad, _first(current, mu, g, q, alternate=True), first)
+            second = torch.where(second_bad, _second(current, mu, g, alternate=True), second)
+        candidate = current - first / second
         update = torch.where(active, candidate, update)
     # The original max-iteration guard evaluates its w at xhat=0, yielding
     # an undefined normal statistic; it leaves the last iterate unchanged.

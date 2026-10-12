@@ -6,6 +6,8 @@ Deployment plans and participant/trait identifiers stay in the private output.
 """
 from __future__ import annotations
 import argparse
+import ast
+import copy
 from collections.abc import Mapping
 from contextlib import contextmanager
 import gc
@@ -96,12 +98,209 @@ def _existing_prepared_input_components(plan, proof):
             'phewas_inputs.py:_discard', 'phewas_inputs.py:consumer_imports'}
 
 
+def _consumption_component_fingerprints():
+    """Fingerprint actual stored-state consumers; fitting factories are excluded."""
+    selections = {
+        'phewas_storage.py': ('load_model_store', 'load_spa_source', 'verify_file', 'digest_file', 'consumer_imports'),
+        'phewas_inputs.py': ('PhewasInputs', 'sha256', '_discard', 'consumer_imports'),
+        'null_model.py': ('GaussianNullModel.dataclass_fields', 'GaussianNullModel.set_matmul_mode',
+                          'KinshipSpectrum:consumption_except_from_sparse', 'consumer_imports'),
+        'binary_null.py': ('BinaryNullModel.dataclass_fields', 'BinaryNullModel.set_matmul_mode',
+            'consumer_imports', 'ImmutableFittedBinarySource', '_compact_fitted_arrays',
+            'binary_prefitted_state', 'compact_binary_normal_from_fitted_arrays',
+            'compact_spa_state_from_fitted_arrays'),
+        'tensor_validation.py': ('complete_module',),
+    }
+    values = {}
+    for filename, names in selections.items():
+        tree = ast.parse((Path(__file__).parent/filename).read_text())
+        for name in names:
+            if name == 'complete_module':
+                node = tree
+            elif name == 'consumer_imports':
+                node = ast.Module(body=[item for item in tree.body
+                    if isinstance(item, (ast.Import, ast.ImportFrom))], type_ignores=[])
+            else:
+                definition = name.split(':', 1)[0].split('.', 1)[0]
+                node = next(item for item in tree.body if getattr(item, 'name', None) == definition)
+                if name.endswith(':consumption_except_from_sparse'):
+                    node = copy.deepcopy(node)
+                    node.body = [item for item in node.body
+                        if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) or item.name != 'from_sparse']
+                elif name.endswith('.dataclass_fields'):
+                    node = ast.Module(body=node.decorator_list+[item for item in node.body
+                        if isinstance(item, ast.AnnAssign)], type_ignores=[])
+                elif '.' in name:
+                    node = next(item for item in node.body if getattr(item, 'name', None) == name.split('.', 1)[1])
+            values[filename+':'+name] = hashlib.sha256(
+                ast.dump(node, include_attributes=False).encode()).hexdigest()
+    return values
+
+
+def _stored_model_consumption_proof(plan, proof, fit_source, consumer):
+    """Authorize fixed stored models without asserting unchanged fitting math."""
+    bindings = dict(model_fit_source_implementation_sha256=fit_source,
+        consumer_source_implementation_sha256=consumer,
+        prepared_inputs_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
+        cohort_sha256=plan.get('cohort_sha256'), kinship_sha256=plan['kinship_sha256'],
+        continuous_transform=plan.get('continuous_transform', 'paper'), model_count=plan['trait_count'])
+    if (type(proof.get('schema_version')) is not int or proof['schema_version'] != 2
+            or proof.get('kind') != 'immutable_fitted_model_consumption'
+            or proof.get('complete') is not True
+            or proof.get('source_unchanged_during_review') is not True
+            or proof.get('compatible_null_fit_math') is not False
+            or proof.get('fitting_implementation_equivalence_verified') is not False
+            or proof.get('scientific_model_input_changes') is not False
+            or any(proof.get(key) is not True for key in ('model_fitting_disabled',
+                'input_preparation_disabled', 'kinship_spectrum_from_sparse_disabled'))
+            or type(proof.get('models_refitted')) is not int or proof['models_refitted'] != 0
+            or not set(bindings) <= proof.keys()
+            or any(proof.get(key) != value for key, value in bindings.items())
+            or any(key in proof for key in ('old_null_fit_component_fingerprint',
+                'new_null_fit_component_fingerprint', 'fitted_math_or_parameter_changes'))):
+        raise ValueError('stored-model consumption compatibility receipt does not authorize this reuse')
+    actual = _consumption_component_fingerprints()
+    components = proof.get('components')
+    if not isinstance(components, dict) or set(components) != set(actual):
+        raise ValueError('stored-model consumption compatibility requires every actual consumer component')
+    joined = hashlib.sha256()
+    for name, current in sorted(actual.items()):
+        record = components[name]
+        if (not isinstance(record, dict) or record.get('identical') is not True
+                or record.get('old_fingerprint') != current or record.get('new_fingerprint') != current):
+            raise ValueError('stored-model consumption component fingerprints differ from actual source')
+        joined.update(name.encode()); joined.update(bytes.fromhex(current))
+    if (proof.get('old_model_consumption_component_fingerprint') != joined.hexdigest()
+            or proof.get('new_model_consumption_component_fingerprint') != joined.hexdigest()):
+        raise ValueError('stored-model consumption aggregate fingerprint differs')
+    qualification = proof.get('existing_models_reuse', {})
+    if not isinstance(qualification, dict) or any(qualification.get(key) is not True for key in (
+            'scientifically_compatible', 'original_model_metadata_and_array_hashes_must_be_preserved',
+            'consumer_and_fit_source_binding_must_be_separate', 'missing_reuse_target_must_hard_fail',
+            'no_new_fits_may_be_labelled_as_old_source')):
+        raise ValueError('stored-model consumption compatibility lacks strict reuse qualification')
+
+
+def _model_inventory_fingerprint(inventory):
+    # The compatibility checksum is the sole exclusion: including it would
+    # create a hash cycle between proof and inventory. All model files, stats,
+    # original fit receipts and any inherited write provenance remain bound.
+    payload = {key: value for key, value in inventory.items()
+               if key != 'null_fit_compatibility_sha256'}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                    allow_nan=False).encode()).hexdigest()
+
+
+def _stored_model_consumption_schema(plan, proof, context):
+    """Check complete serialized field geometry without fitting or array copies."""
+    if proof.get('immutable_inventory_fingerprint') != _model_inventory_fingerprint(context['inventory']):
+        raise ValueError('stored-model consumption immutable inventory fingerprint differs')
+    contract = proof.get('serialized_model_contract')
+    if (not isinstance(contract, dict) or type(contract.get('schema_version')) is not int
+            or contract['schema_version'] != 1 or contract.get('complete') is not True
+            or contract.get('geometry_verified') is not True
+            or type(contract.get('model_count')) is not int or contract['model_count'] != plan['trait_count']
+            or not isinstance(contract.get('models'), list)
+            or any(not isinstance(item, dict) for item in contract['models'])
+            or [item.get('trait_index') for item in contract['models']] != list(range(plan['trait_count']))):
+        raise ValueError('stored-model consumption serialized model schema coverage differs')
+    for item in contract['models']:
+        index = item['trait_index']
+        _verify_reused_model(plan, context, index)
+        record = context['models'][index]; root = Path(record['target']); n = record['n']
+        metadata = _bound_json(root/'model.private.json', record['metadata_sha256'])
+        expected_rows = dict(shape=[n], dtype='<i8', sha256=metadata['sample_rows_sha256'])
+        labels = ('normal', 'spa') if record['family'] == 'binomial' else ('normal',)
+        if (type(index) is not int or item.get('metadata_sha256') != record['metadata_sha256']
+                or item.get('sample_rows') != expected_rows
+                or not isinstance(item.get('states'), dict) or set(item['states']) != set(labels)):
+            raise ValueError('stored-model consumption serialized model schema binding differs')
+        _stored_array_header(root/'sample_rows.npy', expected_rows)
+        for label in labels:
+            state = _bound_json(root/label/'state.private.json', metadata[
+                'state_sha256' if label == 'normal' else 'spa_state_sha256'])
+            if item['states'][label] != state:
+                raise ValueError('stored-model consumption complete serialized state differs')
+            _stored_state_geometry(root/label, state, n, record['family'], label)
+
+
+def _stored_array_header(path, spec):
+    before = _file_stat(path)
+    value = np.load(path, mmap_mode='r', allow_pickle=False)
+    try:
+        if (list(value.shape) != spec['shape'] or value.dtype.str != spec['dtype']
+                or value.dtype.hasobject or _file_stat(path) != before):
+            raise ValueError('stored-model consumption array header geometry differs')
+    finally:
+        mapping = getattr(value, '_mmap', None)
+        if mapping is not None:
+            mapping.close()
+
+
+def _stored_state_geometry(root, state, n, family, label):
+    arrays = state.get('arrays')
+    if (not isinstance(arrays, dict) or not arrays
+            or any(not isinstance(spec, dict) for spec in arrays.values())
+            or type(state.get('iterations')) is not int or state['iterations'] < 0
+            or state.get('use_spa') is not (label == 'spa')
+            or not isinstance(state.get('fit_method'), str) or not state['fit_method']):
+        raise ValueError('stored-model consumption serialized state lacks fitted fields')
+    width = arrays.get('x', {}).get('shape')
+    if (not isinstance(width, list) or len(width) != 2 or width[0] != n
+            or type(width[1]) is not int or width[1] < 1):
+        raise ValueError('stored-model consumption serialized design geometry differs')
+    k = width[1]
+    shapes = dict(sample_ids=[n], x=[n, k], scaled_residuals=[n], coefficients=[k],
+                  fixed_effect_covariance=[k, k], precision_x=[n, k])
+    if family == 'gaussian':
+        shapes.update(theta=[2], precision_theta=[2], inverse_variance=[n], eigenvalues=[n])
+        blocks = state.get('blocks')
+        if (not isinstance(blocks, list) or any(type(i) is not int or i < 0 for i in blocks)
+                or blocks != list(range(len(blocks)))):
+            raise ValueError('stored-model consumption kinship block schema differs')
+        for i in blocks:
+            rows = arrays.get(f'block_{i}_rows', {}).get('shape')
+            if (not isinstance(rows, list) or len(rows) != 1
+                    or type(rows[0]) is not int or not 0 < rows[0] <= n):
+                raise ValueError('stored-model consumption kinship block geometry differs')
+            shapes[f'block_{i}_rows'] = rows
+            shapes[f'block_{i}_rotation'] = [rows[0], rows[0]]
+    else:
+        shapes['fitted_probability'] = [n]
+        if 'precision' in arrays:
+            shapes['precision'] = [n]
+        else:
+            values = arrays.get('precision_values', {}).get('shape')
+            if (not isinstance(values, list) or len(values) != 1
+                    or type(values[0]) is not int or values[0] < 1
+                    or state.get('precision_shape') != [n, n]):
+                raise ValueError('stored-model consumption sparse precision geometry differs')
+            shapes.update(precision_values=values, precision_indices=[2, values[0]])
+        if label == 'spa':
+            shapes.update(xw=[k, n], projection_left=[n, k], phenotype=[n], working_phenotype=[n])
+    if set(arrays) != set(shapes):
+        raise ValueError('stored-model consumption serialized state fields differ')
+    dtype = '<f8' if label == 'spa' else '<f4'
+    for name, shape in shapes.items():
+        spec = arrays[name]
+        expected_dtype = '<i8' if name.endswith('_rows') or name == 'precision_indices' else dtype
+        try:
+            valid_dtype = np.dtype(spec.get('dtype')).kind in 'US' if name == 'sample_ids' else spec.get('dtype') == expected_dtype
+        except (TypeError, ValueError):
+            valid_dtype = False
+        if (not isinstance(spec, dict) or spec.get('shape') != shape or not valid_dtype
+                or not _hash(spec.get('sha256')) or not isinstance(spec.get('file'), str)
+                or spec['file'] != name+'.npy'):
+            raise ValueError('stored-model consumption serialized field geometry or dtype differs')
+        _stored_array_header(root/spec['file'], spec)
+
+
 def _reuse_context(plan):
     """Validate separate original-fit and current-consumer provenance.
 
-    Mathematical compatibility is an independent source-code receipt. The
-    import inventory additionally binds actual inputs, all original files and
-    successful original fit processes. Neither receipt changes model metadata.
+    A versioned source receipt binds fitting equivalence or fixed stored-state
+    consumption. The inventory binds actual inputs, all original files and
+    successful original fit processes. The receipts preserve model metadata.
     """
     reuse = plan.get('reuse_models_only', False)
     if type(reuse) is not bool:
@@ -119,57 +318,60 @@ def _reuse_context(plan):
     if type(plan.get('trait_count')) is not int or plan['trait_count'] < 1:
         raise ValueError('reuse requires a positive complete phenotype count')
     proof = _bound_json(plan['null_fit_compatibility_receipt'], plan['null_fit_compatibility_sha256'])
-    if (proof.get('schema_version') != 1 or proof.get('complete') is not True
-            or proof.get('compatible_null_fit_math') is not True
-            or proof.get('source_unchanged_during_review') is not True
-            or proof.get('scientific_model_input_changes') is not False
-            or proof.get('fitted_math_or_parameter_changes') is not False
-            or proof.get('model_fit_source_implementation_sha256') != fit_source
-            or proof.get('consumer_source_implementation_sha256') != consumer):
-        raise ValueError('null-fit compatibility receipt does not authorize this reuse')
-    components = proof.get('components', {})
-    required = {'binary_null.py:complete_module', 'phewas_models.py:complete_module',
-        'rint.py:complete_module', 'numerics.py:complete_module',
-        'tensor_validation.py:complete_module',
-        'null_model.py:fit_gaussian_null', 'null_model.py:KinshipSpectrum',
-        'null_model.py:rank_inverse_normal', 'null_model.py:_r_sum',
-        'null_model.py:GaussianNullModel.dataclass_fields',
-        'null_model.py:GaussianNullModel.set_matmul_mode_except_new_cache_clear', 'phewas_run.py:_design'}
-    required.update(_existing_prepared_input_components(plan, proof))
-    if not isinstance(components, dict) or not required <= components.keys():
-        raise ValueError('null-fit compatibility receipt lacks required scientific components')
-    if 'tf32.py:complete_module' not in components:
-        policy = proof.get('tf32_resource_policy_compatibility', {})
-        if ('tf32.py:numerical_component' not in components
-                or not isinstance(policy, dict)
-                or policy.get('kind') != 'configure_tf32_reserve_only'
-                or policy.get('resource_policy_only') is not True
-                or policy.get('numerical_component_ast_identical') is not True
-                or policy.get('configure_tf32_resource_additions_verified') is not True
-                or policy.get('complete_tf32_module_identical') is not False
-                or policy.get('changed_tf32_definitions') != ['configure_tf32']
-                or not _hash(policy.get('baseline_null_fit_compatibility_sha256'))
-                or not _hash(policy.get('baseline_consumer_source_implementation_sha256'))
-                or policy.get('model_fit_source_implementation_sha256') != fit_source
-                or policy.get('consumer_source_implementation_sha256') != consumer):
-            raise ValueError('null-fit compatibility receipt lacks strict TF32 numerical/resource-policy proof')
-    joined = hashlib.sha256()
-    for name, record in sorted(components.items()):
-        if (not isinstance(record, dict) or record.get('identical') is not True
-                or not _hash(record.get('old_fingerprint'))
-                or record.get('new_fingerprint') != record['old_fingerprint']):
-            raise ValueError('null-fit scientific component fingerprints differ')
-        joined.update(name.encode())
-        joined.update(bytes.fromhex(record['old_fingerprint']))
-    if (proof.get('old_null_fit_component_fingerprint') != joined.hexdigest()
-            or proof.get('new_null_fit_component_fingerprint') != joined.hexdigest()):
-        raise ValueError('null-fit aggregate fingerprint differs')
-    qualification = proof.get('existing_models_reuse', {})
-    for flag in ('scientifically_compatible', 'original_model_metadata_and_array_hashes_must_be_preserved',
-                 'consumer_and_fit_source_binding_must_be_separate', 'missing_reuse_target_must_hard_fail',
-                 'no_new_fits_may_be_labelled_as_old_source'):
-        if qualification.get(flag) is not True:
-            raise ValueError('null-fit compatibility receipt lacks strict reuse qualification')
+    if proof.get('schema_version') == 2:
+        _stored_model_consumption_proof(plan, proof, fit_source, consumer)
+    else:
+        if (proof.get('schema_version') != 1 or proof.get('complete') is not True
+                or proof.get('compatible_null_fit_math') is not True
+                or proof.get('source_unchanged_during_review') is not True
+                or proof.get('scientific_model_input_changes') is not False
+                or proof.get('fitted_math_or_parameter_changes') is not False
+                or proof.get('model_fit_source_implementation_sha256') != fit_source
+                or proof.get('consumer_source_implementation_sha256') != consumer):
+            raise ValueError('null-fit compatibility receipt does not authorize this reuse')
+        components = proof.get('components', {})
+        required = {'binary_null.py:complete_module', 'phewas_models.py:complete_module',
+            'rint.py:complete_module', 'numerics.py:complete_module',
+            'tensor_validation.py:complete_module',
+            'null_model.py:fit_gaussian_null', 'null_model.py:KinshipSpectrum',
+            'null_model.py:rank_inverse_normal', 'null_model.py:_r_sum',
+            'null_model.py:GaussianNullModel.dataclass_fields',
+            'null_model.py:GaussianNullModel.set_matmul_mode_except_new_cache_clear', 'phewas_run.py:_design'}
+        required.update(_existing_prepared_input_components(plan, proof))
+        if not isinstance(components, dict) or not required <= components.keys():
+            raise ValueError('null-fit compatibility receipt lacks required scientific components')
+        if 'tf32.py:complete_module' not in components:
+            policy = proof.get('tf32_resource_policy_compatibility', {})
+            if ('tf32.py:numerical_component' not in components
+                    or not isinstance(policy, dict)
+                    or policy.get('kind') != 'configure_tf32_reserve_only'
+                    or policy.get('resource_policy_only') is not True
+                    or policy.get('numerical_component_ast_identical') is not True
+                    or policy.get('configure_tf32_resource_additions_verified') is not True
+                    or policy.get('complete_tf32_module_identical') is not False
+                    or policy.get('changed_tf32_definitions') != ['configure_tf32']
+                    or not _hash(policy.get('baseline_null_fit_compatibility_sha256'))
+                    or not _hash(policy.get('baseline_consumer_source_implementation_sha256'))
+                    or policy.get('model_fit_source_implementation_sha256') != fit_source
+                    or policy.get('consumer_source_implementation_sha256') != consumer):
+                raise ValueError('null-fit compatibility receipt lacks strict TF32 numerical/resource-policy proof')
+        joined = hashlib.sha256()
+        for name, record in sorted(components.items()):
+            if (not isinstance(record, dict) or record.get('identical') is not True
+                    or not _hash(record.get('old_fingerprint'))
+                    or record.get('new_fingerprint') != record['old_fingerprint']):
+                raise ValueError('null-fit scientific component fingerprints differ')
+            joined.update(name.encode())
+            joined.update(bytes.fromhex(record['old_fingerprint']))
+        if (proof.get('old_null_fit_component_fingerprint') != joined.hexdigest()
+                or proof.get('new_null_fit_component_fingerprint') != joined.hexdigest()):
+            raise ValueError('null-fit aggregate fingerprint differs')
+        qualification = proof.get('existing_models_reuse', {})
+        for flag in ('scientifically_compatible', 'original_model_metadata_and_array_hashes_must_be_preserved',
+                     'consumer_and_fit_source_binding_must_be_separate', 'missing_reuse_target_must_hard_fail',
+                     'no_new_fits_may_be_labelled_as_old_source'):
+            if qualification.get(flag) is not True:
+                raise ValueError('null-fit compatibility receipt lacks strict reuse qualification')
     inventory = _bound_json(plan['model_import_receipt'], plan['model_import_sha256'])
     bindings = dict(model_fit_source_implementation_sha256=fit_source,
         consumer_source_implementation_sha256=consumer,
@@ -236,7 +438,11 @@ def _reuse_context(plan):
             if (Path(entry['path']) != Path(record['target']) or entry.get('sha256') != record['metadata_sha256']
                     or entry.get('family') != record['family'] or entry.get('n') != record['n']):
                 raise ValueError('original fitted-model receipts differ from the import inventory')
-    return dict(fit_source=fit_source, inventory=inventory, models=by_index)
+    context = dict(fit_source=fit_source, inventory=inventory, models=by_index)
+    if proof.get('schema_version') == 2:
+        _stored_model_consumption_schema(plan, proof, context)
+        context['reuse_receipt_kind'] = 'immutable_fitted_model_consumption'
+    return context
 
 
 def _verify_reused_model(plan, context, index):
@@ -672,6 +878,10 @@ def fit_models(plan, *, worker_id=0, worker_count=1, device='cuda:0', trait_indi
                       null_fit_compatibility_sha256=plan.get('null_fit_compatibility_sha256'),
                       model_import_sha256=plan.get('model_import_sha256'),
                       fit_structure_cache=None if structures is None else structures.stats())
+        if context is not None and context.get('reuse_receipt_kind') == 'immutable_fitted_model_consumption':
+            result.update(reuse_receipt_kind=context['reuse_receipt_kind'], compatible_null_fit_math=False,
+                fitting_implementation_equivalence_verified=False, model_fitting_disabled=True,
+                input_preparation_disabled=True, models_refitted=0)
         atomic_json(output/f'fit_worker_{worker_id}.complete.private.json', result)
         return result
     finally:
@@ -827,6 +1037,14 @@ def _all_models(plan, worker_count, *, association_only=False):
                     or [entry.get('trait_index') for entry in result.get('models', [])]
                         != list(range(i, plan['trait_count'], worker_count))):
                 raise ValueError('current reuse verification receipt worker/provenance coverage differs')
+            if context.get('reuse_receipt_kind') == 'immutable_fitted_model_consumption' and (
+                    result.get('reuse_receipt_kind') != context['reuse_receipt_kind']
+                    or result.get('compatible_null_fit_math') is not False
+                    or result.get('fitting_implementation_equivalence_verified') is not False
+                    or result.get('model_fitting_disabled') is not True
+                    or result.get('input_preparation_disabled') is not True
+                    or type(result.get('models_refitted')) is not int or result['models_refitted'] != 0):
+                raise ValueError('current stored-model consumption receipt claims fitting equivalence or preparation')
     if any(result['errors'] for result in results):
         raise RuntimeError('one or more null fits failed; full association cannot silently omit phenotypes')
     models = sorted((entry for result in results for entry in result['models']), key=lambda entry: entry['trait_index'])

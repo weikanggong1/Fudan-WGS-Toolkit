@@ -25,6 +25,7 @@ import time
 import uuid
 
 from .phewas_storage import _rows, atomic_json
+from .csv_output import _write_bound_trait_rows
 
 _KINDS = ('individual', 'coding', 'noncoding', 'ncrna')
 
@@ -389,19 +390,26 @@ class PerTraitCheckpointCSVWriter:
         self.streams.move_to_end(file_id)
         return raw
 
-    def _append_member(self, info, start, rows):
+    def _append_member(self, info, start, rows, *, trait_index=None):
         raw = self._stream(info,start)
         hashing = _AppendHash(raw)
         count = selected = failed = 0
         with gzip.GzipFile(filename='',fileobj=hashing,mode='wb',compresslevel=1,mtime=0) as compressed:
             with io.TextIOWrapper(compressed,encoding='utf-8',newline='') as text:
-                output = csv.DictWriter(text,fieldnames=info['columns'],extrasaction='raise')
-                if start == 0:
-                    output.writeheader()
-                for row in rows:
-                    output.writerow(row); count += 1
-                    selected += int(bool(row.get('spa_selected',False)))
-                    failed += int(bool(row.get('spa_failed',False)))
+                if trait_index is None:
+                    output = csv.DictWriter(text,fieldnames=info['columns'],extrasaction='raise')
+                    if start == 0:
+                        output.writeheader()
+                    for row in rows:
+                        output.writerow(row); count += 1
+                        selected += int(bool(row.get('spa_selected',False)))
+                        failed += int(bool(row.get('spa_failed',False)))
+                else:
+                    output = csv.writer(text,lineterminator='\r\n')
+                    if start == 0:
+                        output.writerow(info['columns'])
+                    count,selected,failed = _write_bound_trait_rows(
+                        output,rows,trait_index,info['columns'][1:])
         raw.flush(); os.fsync(raw.fileno())
         return dict(file_id=info['id'],start=start,end=start+hashing.size,rows=count,
                     header=int(start==0),sha256=hashing.digest.hexdigest()), selected, failed
@@ -567,6 +575,7 @@ class PerTraitCheckpointCSVWriter:
                     if 'trait_index' in pending:
                         raise ValueError('association row cannot override its bound trait index')
                     schema = ['trait_index',*pending]
+                    source_schema = tuple(pending)
                     if any(not isinstance(c,str) or not c for c in schema):
                         raise ValueError('association row requires nonempty string column names')
                     info = self._ensure_file(trait,kind,key['chromosome'],schema)
@@ -577,12 +586,13 @@ class PerTraitCheckpointCSVWriter:
                         while pending is not None:
                             if 'trait_index' in pending:
                                 raise ValueError('association row cannot override its bound trait index')
-                            if ['trait_index',*pending] != schema:
+                            if tuple(pending) != source_schema:
                                 return
                             source = pending
                             pending = next(iterator,None)
-                            yield dict(trait_index=trait,**source)
-                    item,chosen,errors = self._append_member(info,start,consecutive_rows())
+                            yield source if kind=='individual' else dict(trait_index=trait,**source)
+                    item,chosen,errors = self._append_member(info,start,consecutive_rows(),
+                        trait_index=trait if kind=='individual' else None)
                     ranges.append(item); ends[info['id']] = item['end']
                     counts[str(trait)] += item['rows']; selected += chosen; failed += errors
                     for column in schema:

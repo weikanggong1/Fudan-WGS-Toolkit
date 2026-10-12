@@ -1523,8 +1523,20 @@ class PheWASPipeline:
         base_mode, maf = prepared["base_mode"], prepared["maf"]
         missing, is_alt = prepared["missing"], prepared["is_alt"]
         trait_ordinals = prepared["trait_ordinals"]
-        chrom = self.genotype.read_field("chromosome", selected)
-        ref, alt = self.genotype.read_ref_alt(selected)
+        labels = prepared.get('_single_record_metadata')
+        if labels is None:
+            chrom = self.genotype.read_field("chromosome", selected)
+            ref, alt = self.genotype.read_ref_alt(selected)
+        else:
+            from ._single_record_metadata import SingleRecordMetadata
+            if not isinstance(labels, SingleRecordMetadata):
+                raise TypeError('Single record metadata requires a bound block owner')
+            if labels.reader is self.genotype:
+                chrom, ref, alt = labels.values(self.genotype, selected)
+            else:
+                # Equal sample axes do not certify different readers' labels.
+                chrom = self.genotype.read_field("chromosome", selected)
+                ref, alt = self.genotype.read_ref_alt(selected)
         trait_records = []
         for j, column in enumerate(np.arange(len(selected))):
             if model.n_pheno > 1:
