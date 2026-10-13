@@ -489,7 +489,7 @@ def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, devic
     prefix = output/f'worker_{worker_id}.attempt_{resources["attempt_id"]}'
     started, exit_code = time.perf_counter(), 1
     previous_threads = torch.get_num_threads()
-    repository, writer = None, None
+    repository, writer, gate = None, None, None
     try:
         if run._implementation_sha256() != plan['source_implementation_sha256']:
             raise ValueError('prepared association implementation changed after planning')
@@ -559,6 +559,9 @@ def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, devic
             assigned_trait_indices=assigned_traits,assigned_trait_tiles=dispatch['workers'][worker_id]['trait_tiles'],association_partition_strategy=dispatch['strategy'],
             association_dispatch_sha256=dispatch['dispatch_binding_sha256'],
             assigned_genetic_schedule_sha256=dispatch['workers'][worker_id]['genetic_schedule_sha256'])
+        gate_metadata = getattr(gate,'metadata',None)
+        if callable(gate_metadata):
+            report['host_memory_admission'] = gate_metadata()
         if dispatch['strategy']=='whole_chromosomes':
             report.update(schedule_audit.finish())
         atomic_json(prefix.with_name(prefix.name+'.report.private.json'), report)
@@ -575,7 +578,7 @@ def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, devic
         original_error = sys.exc_info()[0] is not None
         cleanup_error = None
         try:
-            _close_association_resources(writer, repository, failed=exit_code != 0)
+            _close_association_resources(writer, repository, failed=exit_code != 0, gate=gate)
         except BaseException as error:
             cleanup_error, exit_code = error, 1
         try:

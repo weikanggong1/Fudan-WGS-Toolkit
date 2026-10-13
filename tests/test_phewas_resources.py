@@ -22,6 +22,8 @@ def host(monkeypatch,tmp_path):
     monkeypatch.setattr(resources,"host_scope",lambda:("f"*64,dict(node="anonymous",boot_id="b",cgroups=[])))
     monkeypatch.setattr(resources,"process_identity",lambda pid:identities.get(pid))
     monkeypatch.setattr(resources,"process_tree_rss",lambda identity:rss[identity["pid"]])
+    monkeypatch.setattr(resources,"_process_memory_counters",lambda pid,**kwargs:
+        dict(pss_bytes=2*G,rss_bytes=rss[pid]))
     monkeypatch.setattr(resources,"read_host_memory",lambda:dict(memory))
     gate = resources.HostMemoryGate(tmp_path,host_limit_gib=200,reserve_gib=20)
     return gate,memory,identities,rss
@@ -107,10 +109,8 @@ def test_stale_owner_pid_boot_or_exit_does_not_keep_a_future_budget(host,reuse):
 def test_private_ledger_scopes_and_limit_policy_are_bound(host,tmp_path,monkeypatch):
     gate,*_=host
     with gate.lease(1*G):
-        other=resources.HostMemoryGate(tmp_path,host_limit_gib=250,reserve_gib=20)
         with pytest.raises(ValueError,match="same limit/reserve"):
-            with other.lease():
-                pass
+            resources.HostMemoryGate(tmp_path,host_limit_gib=250,reserve_gib=20)
         monkeypatch.setattr(resources,"host_scope",lambda:("e"*64,dict(node="other-node",boot_id="other",cgroups=[])))
         other=resources.HostMemoryGate(tmp_path,host_limit_gib=250,reserve_gib=20)
         with other.lease(1*G):
@@ -193,6 +193,8 @@ def test_materialized_arrays_are_not_reserved_twice_and_zero_restores_capacity(h
         assert not lease.last_admission["pressure_check_performed"]
         assert lease.last_admission["pressure_constraints"]==[]
         assert lease.last_admission["live_effective_bytes"] is None
+        assert lease.last_admission["shrinking_or_zero"]
+        assert lease.last_admission["task_memory"] is None
         memory.update(current_bytes=179*G,effective_current_bytes=179*G)
         # Releasing a cohort reservation cannot be deferred by unrelated
         # pressure, and the next mask does not inherit the old 140 GiB peak.

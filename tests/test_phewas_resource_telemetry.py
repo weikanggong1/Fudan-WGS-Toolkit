@@ -15,6 +15,7 @@ def setup_host(monkeypatch,constraints):
     identity=dict(pid=os.getpid(),start_ticks=1,boot_id='test')
     monkeypatch.setattr(r,'host_scope',lambda:('e'*64,dict(node='test')))
     monkeypatch.setattr(r,'process_identity',lambda pid:identity if pid==identity['pid'] else None)
+    monkeypatch.setattr(r,'_process_memory_counters',lambda pid,**kwargs:dict(pss_bytes=0,rss_bytes=0))
     monkeypatch.setattr(r,'read_host_memory',lambda:dict(constraints[0],constraints=constraints))
 
 
@@ -140,12 +141,16 @@ def test_automatic_reserve_uses_actual_capacity_even_if_explicit_budget_is_wider
     with gate.lease(1*G) as lease:assert lease.last_admission['capacity_bytes']==18*G
 
 
-def test_resume_may_change_resource_policy_only_after_all_live_owners_release(monkeypatch,tmp_path):
+def test_resume_may_change_resource_policy_only_after_task_gate_closes(monkeypatch,tmp_path):
     setup_host(monkeypatch,[constraint(80*G)])
     first=r.HostMemoryGate(tmp_path,host_limit_gib=12)
-    second=r.HostMemoryGate(tmp_path,host_limit_gib=8)
     with first.lease(1*G):
         with pytest.raises(ValueError,match='same limit/reserve'):
-            with second.lease():pass
+            r.HostMemoryGate(tmp_path,host_limit_gib=8)
+    # Cached model phases still belong to the registered task without leases.
+    with pytest.raises(ValueError,match='same limit/reserve'):
+        r.HostMemoryGate(tmp_path,host_limit_gib=8)
+    first.close()
+    second=r.HostMemoryGate(tmp_path,host_limit_gib=8)
     with second.lease(1*G):
         assert json.loads(second.path.read_text())['policy']['limit_bytes']==8*G

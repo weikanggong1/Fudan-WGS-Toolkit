@@ -178,7 +178,8 @@ def test_existing_plan_cli_cannot_change_bound_spectrum_policy(tmp_path, monkeyp
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='CUDA allocation/live guard contract')
 def test_cuda_full_rechecks_new_workspace_for_every_weight(monkeypatch):
     from fudan_wgs_toolkit import _fit_structure_cache
-    c, d = torch.eye(4, device='cuda'), torch.ones(4, 3, device='cuda')
+    c = torch.eye(4, device='cuda')
+    d = torch.arange(1., 4., device='cuda')[None, :].expand(4, -1).clone()
     calls = []
     def guard(new_bytes, device, **kwargs):
         calls.append((new_bytes, kwargs['context']))
@@ -189,7 +190,7 @@ def test_cuda_full_rechecks_new_workspace_for_every_weight(monkeypatch):
     assert calls == [(8*3*4+unit, 'complete STAAR output/workspace')] + \
                     [(unit, 'complete STAAR weight workspace')]*3
     assert result.device == c.device and result.dtype == torch.float64
-    assert torch.equal(result, torch.ones(3, 4, dtype=torch.float64, device=c.device))
+    assert torch.equal(result, d.T.double().square())
     assert torch.backends.cuda.matmul.allow_tf32 == before_tf32
 
 
