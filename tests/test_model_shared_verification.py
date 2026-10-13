@@ -89,6 +89,9 @@ def test_foreign_or_public_cache_falls_back_to_content_check(tmp_path, monkeypat
     path, expected = _source(tmp_path)
     folder = tmp_path / '.model_file_verification'
     folder.mkdir(mode=0o755)
+    # mkdir is filtered by the caller's umask; make this fixture public even
+    # when the validation runner uses a private 0o077 umask.
+    folder.chmod(0o755)
     original, calls = storage.digest_file, []
     monkeypatch.setattr(storage, 'digest_file', lambda p: (calls.append(p), original(p))[1])
     storage.verify_file(path, expected)

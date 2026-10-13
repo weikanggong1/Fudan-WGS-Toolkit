@@ -1,848 +1,1417 @@
 {
-  "all_required_actual_exits_zero": true,
-  "baseline_implementation_sha256": "bf743b71f59de5dafff3c903d06cdc29ca87d8262cd4f141475bfe9c6c37d5ab",
-  "baseline_scientific_kernels_frozen": true,
-  "both_roles_use_same_fixed_resource_admission": true,
-  "candidate_implementation_sha256": "b58cca1c1263bcef59dddb070292d7b3a267be38947d99050f639e95bcb43e75",
-  "completed_rounds": {
-    "baseline": 2,
-    "candidate": 2,
-    "diagnostic": 1,
-    "fault_injection": 1,
-    "independent": 1
+  "accounting": {
+    "RSS_sum_used_as_task_budget": false,
+    "allocated_and_reserved_reported_separately": true,
+    "diagnostic_allocator_fraction_separate_from_public_budget": true,
+    "gpu_budget": "live_allocated_plus_estimated_future_peak_and_runtime_reserve_admission",
+    "host_task_usage": "identity_bound_PSS_plus_new_future_peak",
+    "nested_phase_times_additive": false,
+    "physical_and_finite_cgroup_ancestor_usage_checked_separately": true,
+    "public_gpu_budget_is_allocator_hard_fraction": false
   },
-  "families": {
-    "gaussian": 2
-  },
-  "fault_injection": {
-    "actual_matrix_size": 8,
-    "counters": {
-      "full_exact_duplicate_reused_spectra": 0,
-      "full_fp32_convergence_failures": 1,
-      "full_fp32_solver_calls": 36,
-      "full_nonfinite_rejections": 0,
-      "full_requested_weights": 36,
-      "full_retry_allocation_failures": 0,
-      "full_retry_attempts": 1,
-      "full_retry_failures": 0,
-      "full_retry_solver_calls": 1,
-      "full_retry_successes": 1,
-      "full_retry_workspace_rejections": 0,
-      "full_sequential_calls": 18,
-      "full_sequential_spectra": 36
+  "contains_individual_or_site_identifiers": false,
+  "historical_real_source_b58": {
+    "memory": {
+      "actual_child_wait0": 5,
+      "actual_child_waits": 5,
+      "diagnostic_allocator_ceiling_gib": 20,
+      "long_term_stability_claimed": false,
+      "native_low_cap": {
+        "actual_native_cuda_allocator_OOM": true,
+        "allocated_after_one_post_OOM_cleanup_bytes": 0,
+        "diagnostic_allocator_cap_gib": 1,
+        "reserved_after_one_post_OOM_cleanup_bytes": 0
+      },
+      "observed_windows": {
+        "ordinary": {
+          "actual_fresh_case_rounds": 140,
+          "measured_observation_seconds": 3567.6669726921245,
+          "measured_worksets": 12,
+          "metrics": {
+            "cuda_allocated_bytes": {
+              "configured_growth_limit_bytes": 268435456,
+              "delta_bytes": 0.0,
+              "maximum_bytes": 82958336,
+              "minimum_bytes": 82958336,
+              "within_configured_limit": true
+            },
+            "cuda_reserved_bytes": {
+              "configured_growth_limit_bytes": 536870912,
+              "delta_bytes": 0.0,
+              "maximum_bytes": 17511219200,
+              "minimum_bytes": 17511219200,
+              "within_configured_limit": true
+            },
+            "task_pss_bytes": {
+              "configured_growth_limit_bytes": 1073741824,
+              "delta_bytes": 243657216.0,
+              "maximum_bytes": 8095401984,
+              "minimum_bytes": 7577455616,
+              "within_configured_limit": true
+            }
+          },
+          "observed_plateau_status": "passed_scoped_observation_window",
+          "warm_worksets": 2
+        },
+        "persistent": {
+          "actual_fresh_case_rounds": 140,
+          "measured_observation_seconds": 1806.0455370359123,
+          "measured_worksets": 12,
+          "metrics": {
+            "cuda_allocated_bytes": {
+              "configured_growth_limit_bytes": 268435456,
+              "delta_bytes": 0.0,
+              "maximum_bytes": 700783104,
+              "minimum_bytes": 700783104,
+              "within_configured_limit": true
+            },
+            "cuda_reserved_bytes": {
+              "configured_growth_limit_bytes": 536870912,
+              "delta_bytes": 0.0,
+              "maximum_bytes": 17865637888,
+              "minimum_bytes": 17865637888,
+              "within_configured_limit": true
+            },
+            "task_pss_bytes": {
+              "configured_growth_limit_bytes": 1073741824,
+              "delta_bytes": 5234176.0,
+              "maximum_bytes": 10662261760,
+              "minimum_bytes": 10308913152,
+              "within_configured_limit": true
+            }
+          },
+          "observed_plateau_status": "passed_scoped_observation_window",
+          "warm_worksets": 2
+        }
+      },
+      "ordinary_reader_lifecycle": "native_per_case_recreated",
+      "persistent_model_repository": "single_runtime_invocation",
+      "persistent_reader_chromosome_switch": "native_close_and_reopen",
+      "runtime_gpu_memory_limit_gib": null,
+      "same_output_resume_recovery": "accepted_scoped_fresh_FULL_CSV"
     },
-    "ordinary_products_and_spectra": "float32",
-    "original_natural_failure_matrix_replayed": false,
-    "regularization": false,
-    "retry_dtype": "float64",
-    "retry_input": "same represented H32 upper triangle",
-    "truncation": false
-  },
-  "full_csv_readback_passed": true,
-  "genetic_cache_reprepared": false,
-  "limits": {
-    "cuda_stream_intervals_include_idle_and_dispatch": true,
-    "long_run_multi_model_plateau": "not_assessed",
-    "one_warm_pair_no_statistical_confidence_interval": true,
-    "phase_clocks_nested_not_additive": true,
-    "shared_background_and_OS_cache_uncontrolled": true,
-    "two_round_allocator_observation": true,
-    "whole_genome_speedup": "not_assessed"
-  },
-  "memory": {
-    "baseline": {
-      "peak_allocated_bytes": 16478470656,
-      "pss_sampling_count": 264,
-      "pss_sampling_host_seconds": 17.047978699207306,
-      "pss_unverified_count": 0,
-      "repository_closed_allocated_bytes": 8519680,
-      "round_end_allocated_bytes": [
-        83508736,
-        83508736
+    "model_cache_pressure": {
+      "active_pins_workspaces_policies_and_fitted_depth": {
+        "active_memory_policies": 0,
+        "active_workspace_reservations": 0,
+        "fitted_context_depth": 0,
+        "normal_active_pins": 0,
+        "spa_active_pins": 0
+      },
+      "actual_budget_evictions": 132,
+      "actual_case_rounds": 30,
+      "actual_model_loads": 132,
+      "actual_worksets": 6,
+      "chromosome_count": 2,
+      "elapsed_seconds": 376.25192880630493,
+      "eligible_mask_range": [
+        8,
+        1473
       ],
-      "round_end_reserved_bytes": [
-        18264096768,
-        18264096768
-      ]
+      "forced_collection": false,
+      "full_CSV_bitexact_and_all_finite": true,
+      "future_lease_count": 0,
+      "model_cache_limit_bytes": 1,
+      "repository_owner_released": true,
+      "tracked_live_owners": 0
     },
-    "candidate": {
-      "peak_allocated_bytes": 16478470656,
-      "pss_sampling_count": 264,
-      "pss_sampling_host_seconds": 17.108465718105435,
-      "pss_unverified_count": 0,
-      "repository_closed_allocated_bytes": 8519680,
-      "round_end_allocated_bytes": [
-        83508736,
-        83508736
-      ],
-      "round_end_reserved_bytes": [
-        18264096768,
-        18264096768
-      ]
+    "public_main_commit": "00a655bca0b4e83300091404027e032f79f3eac3",
+    "source_implementation_sha256": "b58cca1c1263bcef59dddb070292d7b3a267be38947d99050f639e95bcb43e75",
+    "spectrum_accuracy": {
+      "additional_long_fast_pairs": 6,
+      "additional_native_process_wait0": 9,
+      "automatic_solver_policy_changed": false,
+      "fast_mask_rank_pairs": 25,
+      "full_controls": 13,
+      "gene_full_controls": 12,
+      "individual_full_controls": 1,
+      "original_fast_pairs": 19,
+      "original_native_process_wait0": 19,
+      "precision_accepted_fast_pairs": 24,
+      "precision_rejected_fast_pairs": 1,
+      "probability_floor_applied": false,
+      "significant_union_probability_threshold": 0.05,
+      "strict_logp_tolerance": 0.001,
+      "universal_equivalence_claimed": false
     }
   },
-  "models": 2,
-  "models_refitted": 0,
-  "official_R_rerun": false,
-  "performance": {
-    "baseline": [
-      {
-        "round": 0,
-        "stages": [
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 44.94319909763337,
-            "host_wall_seconds": 44.94263150449842,
-            "stage": "gene_read_decode_cohort_prepare"
-          },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 37.81536531066895,
-            "host_wall_seconds": 36.015671850182116,
-            "stage": "gene_covariance"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 15.481083871841436,
-            "host_wall_seconds": 32.70614475291222,
-            "stage": "gene_panel_h2d"
-          },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 7.707373805999756,
-            "host_wall_seconds": 7.7066129967570305,
-            "stage": "eigen_tail"
-          },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 1.3415752533078193,
-            "host_wall_seconds": 1.3404604960232973,
-            "stage": "gene_shared_score"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 0.8633267538547518,
-            "host_wall_seconds": 0.8542603077366948,
-            "stage": "gene_panel_rotation"
-          },
-          {
-            "calls": 420,
-            "cuda_stream_seconds": 19.93380956459047,
-            "host_wall_seconds": 0.8290693974122405,
-            "stage": "gene_panel_covariance_products"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0009448319971561432,
-            "host_wall_seconds": 0.09149626921862364,
-            "stage": "phewas_score_sensitivity"
-          },
-          {
-            "calls": 12,
-            "cuda_stream_seconds": 0.14808992099761964,
-            "host_wall_seconds": 0.05700401496142149,
-            "stage": "phewas_individual_variance"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.05730352020263672,
-            "host_wall_seconds": 0.05677126441150904,
-            "stage": "genotype_trait_prepare"
-          },
-          {
-            "calls": 40,
-            "cuda_stream_seconds": 0.40199542140960687,
-            "host_wall_seconds": 0.0298940846696496,
-            "stage": "gene_panel_projection"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.008827680110931397,
-            "host_wall_seconds": 0.00811394676566124,
-            "stage": "phewas_phenotype_score_fp32"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0037558079361915586,
-            "host_wall_seconds": 0.0035488884896039963,
-            "stage": "phewas_individual_tail"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0007566399946808815,
-            "host_wall_seconds": 0.0006421655416488647,
-            "stage": "phewas_result_d2h"
-          }
-        ],
-        "wall_seconds": 192.83982182573527
+  "latest_source827": {
+    "cuda_components": {
+      "actual_child_wait_zero": true,
+      "anonymous_receipt_sha256": "e7f01e2284d5147624a0209a7310ae1ba7203040aec4b08ce0ed4f81e0dbbac6",
+      "context_identity_verified": true,
+      "coordinator_exit_verified": true,
+      "errors": 0,
+      "failures": 0,
+      "gaussian_projection_is_subset_of_private_tests": true,
+      "gaussian_projection_test": 1,
+      "nvml_own_process_attribution": null,
+      "private_cuda_tests": 14,
+      "public_batched_cuda_tests": 10,
+      "skips": 0,
+      "tests": 740
+    },
+    "implementation_sha256": "827b8ea4fe6a6d6f793799e167acf95e836e5d5395905cfc9b5f3183937c18f1",
+    "long_window": "not_assessed_for_this_source",
+    "real_short_window": {
+      "acceptance_wrapper_sha256": "ecf98b4639a2971261a3cfced3e0347b329ede48f43844f787a349ca385ce357",
+      "actual_case_counts": {
+        "explicit_runtime20": 4,
+        "ordinary": 40,
+        "persistent": 40,
+        "recovery": 1
       },
-      {
-        "round": 1,
-        "stages": [
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 41.555993722915645,
-            "host_wall_seconds": 41.5555245289579,
-            "stage": "gene_read_decode_cohort_prepare"
-          },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 37.66620397186279,
-            "host_wall_seconds": 35.821145517751575,
-            "stage": "gene_covariance"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 15.585435581207271,
-            "host_wall_seconds": 32.84082922432572,
-            "stage": "gene_panel_h2d"
-          },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 7.1103772411346435,
-            "host_wall_seconds": 7.109626740217209,
-            "stage": "eigen_tail"
-          },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 1.2665333463549615,
-            "host_wall_seconds": 1.2654749667271972,
-            "stage": "gene_shared_score"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 0.8021616961956024,
-            "host_wall_seconds": 0.7931202026084065,
-            "stage": "gene_panel_rotation"
-          },
-          {
-            "calls": 420,
-            "cuda_stream_seconds": 19.909072089195252,
-            "host_wall_seconds": 0.640626429580152,
-            "stage": "gene_panel_covariance_products"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0009236479997634887,
-            "host_wall_seconds": 0.09390487801283598,
-            "stage": "phewas_score_sensitivity"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.05710358428955078,
-            "host_wall_seconds": 0.05657356884330511,
-            "stage": "genotype_trait_prepare"
-          },
-          {
-            "calls": 12,
-            "cuda_stream_seconds": 0.1381629753112793,
-            "host_wall_seconds": 0.04466675687581301,
-            "stage": "phewas_individual_variance"
-          },
-          {
-            "calls": 40,
-            "cuda_stream_seconds": 0.39984166622161865,
-            "host_wall_seconds": 0.02572775911539793,
-            "stage": "gene_panel_projection"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0122741117477417,
-            "host_wall_seconds": 0.011550054885447025,
-            "stage": "phewas_phenotype_score_fp32"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.003586303949356079,
-            "host_wall_seconds": 0.0033591100946068764,
-            "stage": "phewas_individual_tail"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.000754495993256569,
-            "host_wall_seconds": 0.0006328942254185677,
-            "stage": "phewas_result_d2h"
-          }
-        ],
-        "wall_seconds": 190.58595574647188
-      }
-    ],
-    "candidate": [
-      {
-        "round": 0,
-        "stages": [
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 38.61197195053101,
-            "host_wall_seconds": 36.804705085232854,
-            "stage": "gene_covariance"
-          },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 36.65494421386719,
-            "host_wall_seconds": 36.65432415995747,
-            "stage": "gene_read_decode_cohort_prepare"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 16.116124277114864,
-            "host_wall_seconds": 33.10428357310593,
-            "stage": "gene_panel_h2d"
-          },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 7.399818771362305,
-            "host_wall_seconds": 7.399045399390161,
-            "stage": "eigen_tail"
-          },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 1.311729051232338,
-            "host_wall_seconds": 1.3106463020667434,
-            "stage": "gene_shared_score"
-          },
-          {
-            "calls": 420,
-            "cuda_stream_seconds": 19.93909623241425,
-            "host_wall_seconds": 0.9177505103871226,
-            "stage": "gene_panel_covariance_products"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 0.8945390703678131,
-            "host_wall_seconds": 0.8851412534713745,
-            "stage": "gene_panel_rotation"
-          },
-          {
-            "calls": 12,
-            "cuda_stream_seconds": 0.16402131366729736,
-            "host_wall_seconds": 0.08315218333154917,
-            "stage": "phewas_individual_variance"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0009383680075407028,
-            "host_wall_seconds": 0.08128376584500074,
-            "stage": "phewas_score_sensitivity"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.05764505672454833,
-            "host_wall_seconds": 0.057116033509373665,
-            "stage": "genotype_trait_prepare"
-          },
-          {
-            "calls": 40,
-            "cuda_stream_seconds": 0.40320857620239264,
-            "host_wall_seconds": 0.029092807322740555,
-            "stage": "gene_panel_projection"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0059236159324646005,
-            "host_wall_seconds": 0.00521449651569128,
-            "stage": "phewas_phenotype_score_fp32"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0038299199938774107,
-            "host_wall_seconds": 0.003623916767537594,
-            "stage": "phewas_individual_tail"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0007426880076527595,
-            "host_wall_seconds": 0.0006307465955615044,
-            "stage": "phewas_result_d2h"
-          }
-        ],
-        "wall_seconds": 174.68990446068347
+      "actual_native_child_waits": 6,
+      "actual_runner_own_wait_zero": true,
+      "anonymous_resource_receipt_sha256": "de8c8474ada3a21bed88fd3fccb7265f8ffb951fa3098f8644dc4862fe9cd715",
+      "csv_rows": 2590,
+      "duplicate_or_missing_rows": 0,
+      "explicit_runtime20": {
+        "allocation_acceptance": {
+          "actual_peak_allocated_bytes": 9298503680,
+          "all_unsampled_instantaneous_workspace_owners": "not_assessed",
+          "allocator_ceiling_bytes": 21474836480,
+          "observed_peak_plus_reserve_within_runtime_limit": true,
+          "reserve_bytes": 1073741824,
+          "reserved_is_allocated": false,
+          "runtime_budget_bytes": 21474836480
+        }
       },
-      {
-        "round": 1,
-        "stages": [
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 40.22886722564697,
-            "host_wall_seconds": 38.36715610790998,
-            "stage": "gene_covariance"
+      "fresh_audited_case_count": 85,
+      "long_term_stability_claimed": false,
+      "low_cap_and_recovery": {
+        "allocator_cap_bytes": 1073741824,
+        "classification": "actual_native_cuda_allocator_oom",
+        "low_cap_memory_reserve_bytes": 67108864,
+        "native_cuda_allocator_oom_coverage": "observed_new_source",
+        "normal_memory_reserve_bytes": 1073741824,
+        "tracked_release": {
+          "actual_gate_state_sha256": "56492cccd16402e9e19053e62dd8833994fbb5511114f9b8ef755e05be2c62be",
+          "all_internal_kernel_owners": "not_assessed_not_exposed",
+          "live_tracked_labels": [],
+          "nonheld_active_lease_count": 0,
+          "own_cuda_at_unwind": {
+            "allocated_bytes": 0,
+            "peak_allocated_bytes": 1007635456,
+            "peak_reserved_bytes": 1056964608,
+            "reserved_bytes": 1031798784
           },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 33.82619754695892,
-            "host_wall_seconds": 33.825677547603846,
-            "stage": "gene_read_decode_cohort_prepare"
+          "tracked_objects": 2,
+          "unforced_weak_observation": true,
+          "untrackable_labels": []
+        }
+      },
+      "maximum_absolute_negative_log10_p_delta": 0.0,
+      "maximum_significant_union_delta": 0.0,
+      "measured_worksets": 2,
+      "ordinary": {
+        "actual_cuda_peak_allocated_bytes": 16099560960,
+        "actual_cuda_peak_reserved_bytes": 19845349376,
+        "actual_result_sha256": "0d09855c444f7e5eabd25bae5019de90f637103b68f35480399788fbbb5c5ac9",
+        "actual_wall_seconds": 819.4043602915481,
+        "end_cuda_allocated_bytes": 8519680,
+        "end_cuda_reserved_bytes": 17511219200,
+        "maximum_sampled_cuda_allocated_bytes": 6645904384,
+        "maximum_sampled_task_pss_bytes": 7255674880,
+        "plateau": {
+          "allocator_reserved_is_not_live_tensor_memory": true,
+          "coverage_complete": true,
+          "latest_source_long_window_stability": "not_assessed",
+          "long_term_stability_claimed": false,
+          "measured_complete_worksets": 2,
+          "measured_half_size": 1,
+          "measured_observation_seconds": 194.41065558418632,
+          "metrics": {
+            "cuda_allocated_bytes": {
+              "configured_growth_limit_bytes": 268435456,
+              "delta_bytes": 0,
+              "first_half_median": 82958336,
+              "last_half_median": 82958336,
+              "maximum_bytes": 82958336,
+              "minimum_bytes": 82958336,
+              "verified": true,
+              "within_configured_limit": true
+            },
+            "cuda_reserved_bytes": {
+              "configured_growth_limit_bytes": 536870912,
+              "delta_bytes": 0,
+              "first_half_median": 17511219200,
+              "last_half_median": 17511219200,
+              "maximum_bytes": 17511219200,
+              "minimum_bytes": 17511219200,
+              "verified": true,
+              "within_configured_limit": true
+            },
+            "task_pss_bytes": {
+              "configured_growth_limit_bytes": 1073741824,
+              "delta_bytes": 18347008,
+              "first_half_median": 7237327872,
+              "last_half_median": 7255674880,
+              "maximum_bytes": 7255674880,
+              "minimum_bytes": 7237327872,
+              "verified": true,
+              "within_configured_limit": true
+            }
           },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 15.869522117614743,
-            "host_wall_seconds": 33.189938174560666,
-            "stage": "gene_panel_h2d"
+          "status": "passed_scoped_observation_window",
+          "validation_scope": "latest_source_short_release_regression",
+          "warm_complete_worksets": 2
+        }
+      },
+      "persistent": {
+        "actual_cuda_peak_allocated_bytes": 16493489664,
+        "actual_cuda_peak_reserved_bytes": 20149436416,
+        "actual_result_sha256": "543a2eba785876625904464acad30e74a9f9d6ef643bddd3306ce6bad9c9be5d",
+        "actual_wall_seconds": 553.7104657450691,
+        "end_cuda_allocated_bytes": 8519680,
+        "end_cuda_reserved_bytes": 17865637888,
+        "maximum_sampled_cuda_allocated_bytes": 6937593856,
+        "maximum_sampled_task_pss_bytes": 8768232448,
+        "plateau": {
+          "allocator_reserved_is_not_live_tensor_memory": true,
+          "coverage_complete": true,
+          "latest_source_long_window_stability": "not_assessed",
+          "long_term_stability_claimed": false,
+          "measured_complete_worksets": 2,
+          "measured_half_size": 1,
+          "measured_observation_seconds": 127.08409123588353,
+          "metrics": {
+            "cuda_allocated_bytes": {
+              "configured_growth_limit_bytes": 268435456,
+              "delta_bytes": 0,
+              "first_half_median": 700783104,
+              "last_half_median": 700783104,
+              "maximum_bytes": 700783104,
+              "minimum_bytes": 700783104,
+              "verified": true,
+              "within_configured_limit": true
+            },
+            "cuda_reserved_bytes": {
+              "configured_growth_limit_bytes": 536870912,
+              "delta_bytes": 0,
+              "first_half_median": 17865637888,
+              "last_half_median": 17865637888,
+              "maximum_bytes": 17865637888,
+              "minimum_bytes": 17865637888,
+              "verified": true,
+              "within_configured_limit": true
+            },
+            "task_pss_bytes": {
+              "configured_growth_limit_bytes": 1073741824,
+              "delta_bytes": 2979840,
+              "first_half_median": 8765252608,
+              "last_half_median": 8768232448,
+              "maximum_bytes": 8768232448,
+              "minimum_bytes": 8765252608,
+              "verified": true,
+              "within_configured_limit": true
+            }
           },
-          {
-            "calls": 18,
-            "cuda_stream_seconds": 7.109023239135743,
-            "host_wall_seconds": 7.108289013616741,
-            "stage": "eigen_tail"
-          },
-          {
-            "calls": 9,
-            "cuda_stream_seconds": 1.305960343837738,
-            "host_wall_seconds": 1.3049575509503484,
-            "stage": "gene_shared_score"
-          },
-          {
-            "calls": 250,
-            "cuda_stream_seconds": 0.8246615362167362,
-            "host_wall_seconds": 0.8152643255889416,
-            "stage": "gene_panel_rotation"
-          },
-          {
-            "calls": 420,
-            "cuda_stream_seconds": 19.910989677429196,
-            "host_wall_seconds": 0.6515897698700428,
-            "stage": "gene_panel_covariance_products"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0009042240083217621,
-            "host_wall_seconds": 0.09505678340792656,
-            "stage": "phewas_score_sensitivity"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.057639904022216804,
-            "host_wall_seconds": 0.057118999771773815,
-            "stage": "genotype_trait_prepare"
-          },
-          {
-            "calls": 12,
-            "cuda_stream_seconds": 0.13785385608673098,
-            "host_wall_seconds": 0.043276156298816204,
-            "stage": "phewas_individual_variance"
-          },
-          {
-            "calls": 40,
-            "cuda_stream_seconds": 0.40094409275054943,
-            "host_wall_seconds": 0.02635372895747423,
-            "stage": "gene_panel_projection"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.005108991920948028,
-            "host_wall_seconds": 0.00438824575394392,
-            "stage": "phewas_phenotype_score_fp32"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.003538783967494964,
-            "host_wall_seconds": 0.003337225876748562,
-            "stage": "phewas_individual_tail"
-          },
-          {
-            "calls": 6,
-            "cuda_stream_seconds": 0.0009151999950408935,
-            "host_wall_seconds": 0.0007970603182911873,
-            "stage": "phewas_result_d2h"
-          }
-        ],
-        "wall_seconds": 165.06232589576393
-      }
-    ],
-    "observed_warm_speed_ratio": 1.1546302568571947,
-    "warm_wall_reduction_fraction": 0.133921881865529
+          "status": "passed_scoped_observation_window",
+          "validation_scope": "latest_source_short_release_regression",
+          "warm_complete_worksets": 2
+        }
+      },
+      "probability_field_pairs": 5052,
+      "recovery_is_fresh_worker": true,
+      "reference": "same-bound-models_inputs_masks_original_FULL",
+      "row_order_and_all_fields_verified": true,
+      "significant_union_probability_pairs": 216,
+      "significant_union_threshold": 0.05,
+      "status": "passed_scoped_actual85_fresh_readback_and_reference_comparison",
+      "strict_tolerance": 0.001,
+      "typed_numeric_fields_checked": 34782,
+      "warm_worksets": 2,
+      "zero_probability_values": 0
+    },
+    "tested_public_commit": "d98a3ac68f6ad6d56fd1f234f8db75e4f680c907"
   },
-  "performance_scope": "association, formal CSV write and complete readback; excludes genetic preparation and null fitting",
-  "precision": {
-    "comparisons": [
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "baseline",
-        "round": 1
+  "mask_rank_pairs": [
+    {
+      "eligible_variants": 131,
+      "maximum_absolute_negative_log10_p_delta": 4.003371068386774e-06,
+      "observed_warm_speed_ratio": 0.7612107129466807,
+      "precision_status": "passed",
+      "rank": 32
+    },
+    {
+      "eligible_variants": 781,
+      "maximum_absolute_negative_log10_p_delta": 2.0706058580455267e-05,
+      "observed_warm_speed_ratio": 0.8315367116317153,
+      "precision_status": "passed",
+      "rank": 32
+    },
+    {
+      "eligible_variants": 781,
+      "maximum_absolute_negative_log10_p_delta": 3.933809348655171e-06,
+      "observed_warm_speed_ratio": 0.6839305070060873,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 781,
+      "maximum_absolute_negative_log10_p_delta": 1.4084146805481979e-06,
+      "observed_warm_speed_ratio": 0.5016615846187207,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 781,
+      "maximum_absolute_negative_log10_p_delta": 1.5067683667435716e-06,
+      "observed_warm_speed_ratio": 0.3426732152676153,
+      "precision_status": "passed",
+      "rank": 256
+    },
+    {
+      "eligible_variants": 1473,
+      "maximum_absolute_negative_log10_p_delta": 1.1130519119301185e-05,
+      "observed_warm_speed_ratio": 0.8300715797136978,
+      "precision_status": "passed",
+      "rank": 32
+    },
+    {
+      "eligible_variants": 1473,
+      "maximum_absolute_negative_log10_p_delta": 3.1075564236315856e-06,
+      "observed_warm_speed_ratio": 0.7998447570000152,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 1473,
+      "maximum_absolute_negative_log10_p_delta": 2.9067327581566715e-06,
+      "observed_warm_speed_ratio": 0.5842540759035822,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 1473,
+      "maximum_absolute_negative_log10_p_delta": 2.8697767168184285e-06,
+      "observed_warm_speed_ratio": 0.43903691902376757,
+      "precision_status": "passed",
+      "rank": 256
+    },
+    {
+      "eligible_variants": 3356,
+      "maximum_absolute_negative_log10_p_delta": 0.0001512069041348374,
+      "observed_warm_speed_ratio": 0.8436988330696906,
+      "precision_status": "passed",
+      "rank": 32
+    },
+    {
+      "eligible_variants": 3356,
+      "maximum_absolute_negative_log10_p_delta": 1.7691437666500498e-05,
+      "observed_warm_speed_ratio": 0.8662282324774576,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 3356,
+      "maximum_absolute_negative_log10_p_delta": 8.786668215576832e-06,
+      "observed_warm_speed_ratio": 0.8862741178788817,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 3356,
+      "maximum_absolute_negative_log10_p_delta": 8.083649116030767e-06,
+      "observed_warm_speed_ratio": 0.8379993676384648,
+      "precision_status": "passed",
+      "rank": 256
+    },
+    {
+      "eligible_variants": 3356,
+      "maximum_absolute_negative_log10_p_delta": 7.897708279025473e-06,
+      "observed_warm_speed_ratio": 0.6038695847616223,
+      "precision_status": "passed",
+      "rank": 512
+    },
+    {
+      "eligible_variants": 9950,
+      "maximum_absolute_negative_log10_p_delta": 0.0037086424883014946,
+      "observed_warm_speed_ratio": 0.985921974938853,
+      "precision_status": "failed",
+      "rank": 32
+    },
+    {
+      "eligible_variants": 9950,
+      "maximum_absolute_negative_log10_p_delta": 0.0006104727209019778,
+      "observed_warm_speed_ratio": 1.0702004515882215,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 9950,
+      "maximum_absolute_negative_log10_p_delta": 3.143346039569117e-05,
+      "observed_warm_speed_ratio": 1.054575421218621,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 9950,
+      "maximum_absolute_negative_log10_p_delta": 1.9192453228011885e-05,
+      "observed_warm_speed_ratio": 1.020496105212864,
+      "precision_status": "passed",
+      "rank": 256
+    },
+    {
+      "eligible_variants": 9950,
+      "maximum_absolute_negative_log10_p_delta": 2.1946684259477323e-05,
+      "observed_warm_speed_ratio": 0.7788586964821178,
+      "precision_status": "passed",
+      "rank": 512
+    },
+    {
+      "eligible_variants": 13847,
+      "maximum_absolute_negative_log10_p_delta": 0.0002016131531958898,
+      "observed_warm_speed_ratio": 1.0324442924546051,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 13847,
+      "maximum_absolute_negative_log10_p_delta": 2.5834616063147298e-05,
+      "observed_warm_speed_ratio": 1.1040938870824697,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 10842,
+      "maximum_absolute_negative_log10_p_delta": 6.762022351403107e-05,
+      "observed_warm_speed_ratio": 0.991936656551062,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 10842,
+      "maximum_absolute_negative_log10_p_delta": 2.3587563487748042e-05,
+      "observed_warm_speed_ratio": 0.898413564714229,
+      "precision_status": "passed",
+      "rank": 128
+    },
+    {
+      "eligible_variants": 8660,
+      "maximum_absolute_negative_log10_p_delta": 0.00020314919998387637,
+      "observed_warm_speed_ratio": 0.9775277955565608,
+      "precision_status": "passed",
+      "rank": 64
+    },
+    {
+      "eligible_variants": 8660,
+      "maximum_absolute_negative_log10_p_delta": 1.5093433007540291e-05,
+      "observed_warm_speed_ratio": 0.8672628231614087,
+      "precision_status": "passed",
+      "rank": 128
+    }
+  ],
+  "official_reference": {
+    "R_rerun": false,
+    "Single_comparison": "not_assessed",
+    "whole_genome_same_input_accuracy": "not_assessed"
+  },
+  "optional_larger_panel": {
+    "adopted": false,
+    "status": "not_assessed"
+  },
+  "previous_scoped_resource_repair": {
+    "all_required_actual_exits_zero": true,
+    "baseline_implementation_sha256": "bf743b71f59de5dafff3c903d06cdc29ca87d8262cd4f141475bfe9c6c37d5ab",
+    "baseline_scientific_kernels_frozen": true,
+    "both_roles_use_same_fixed_resource_admission": true,
+    "candidate_implementation_sha256": "b58cca1c1263bcef59dddb070292d7b3a267be38947d99050f639e95bcb43e75",
+    "completed_rounds": {
+      "baseline": 2,
+      "candidate": 2,
+      "diagnostic": 1,
+      "fault_injection": 1,
+      "independent": 1
+    },
+    "families": {
+      "gaussian": 2
+    },
+    "fault_injection": {
+      "actual_matrix_size": 8,
+      "counters": {
+        "full_exact_duplicate_reused_spectra": 0,
+        "full_fp32_convergence_failures": 1,
+        "full_fp32_solver_calls": 36,
+        "full_nonfinite_rejections": 0,
+        "full_requested_weights": 36,
+        "full_retry_allocation_failures": 0,
+        "full_retry_attempts": 1,
+        "full_retry_failures": 0,
+        "full_retry_solver_calls": 1,
+        "full_retry_successes": 1,
+        "full_retry_workspace_rejections": 0,
+        "full_sequential_calls": 18,
+        "full_sequential_spectra": 36
       },
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "candidate",
-        "round": 0
+      "ordinary_products_and_spectra": "float32",
+      "original_natural_failure_matrix_replayed": false,
+      "regularization": false,
+      "retry_dtype": "float64",
+      "retry_input": "same represented H32 upper triangle",
+      "truncation": false
+    },
+    "full_csv_readback_passed": true,
+    "genetic_cache_reprepared": false,
+    "limits": {
+      "cuda_stream_intervals_include_idle_and_dispatch": true,
+      "long_run_multi_model_plateau": "not_assessed",
+      "one_warm_pair_no_statistical_confidence_interval": true,
+      "phase_clocks_nested_not_additive": true,
+      "shared_background_and_OS_cache_uncontrolled": true,
+      "two_round_allocator_observation": true,
+      "whole_genome_speedup": "not_assessed"
+    },
+    "memory": {
+      "baseline": {
+        "peak_allocated_bytes": 16478470656,
+        "pss_sampling_count": 264,
+        "pss_sampling_host_seconds": 17.047978699207306,
+        "pss_unverified_count": 0,
+        "repository_closed_allocated_bytes": 8519680,
+        "round_end_allocated_bytes": [
+          83508736,
+          83508736
+        ],
+        "round_end_reserved_bytes": [
+          18264096768,
+          18264096768
+        ]
       },
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "candidate",
-        "round": 1
-      },
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 7.134903247663082e-07,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 2.1162297070276281e-07,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 1.4210645762346985e-06,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 1.4210645762346985e-06,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 1.779470700791208e-06,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 9.281048096720923e-07,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 1.6646764189331975e-07,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "independent",
-        "round": 0
-      },
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "diagnostic",
-        "round": 0
-      },
-      {
-        "kinds": {
-          "coding": {
-            "finite_logp_pairs": 180,
-            "logp_maximum_delta": 9.41872508875008e-08,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 180,
-            "rows": 12,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 9.165015413259425e-10,
-            "significant_union_pairs": 20,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "individual": {
-            "finite_logp_pairs": 528,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 2112,
-            "probability_fields": 528,
-            "rows": 528,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 23,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "ncrna": {
-            "finite_logp_pairs": 56,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 56,
-            "rows": 4,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 4,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          },
-          "noncoding": {
-            "finite_logp_pairs": 28,
-            "logp_maximum_delta": 0.0,
-            "numeric_statistic_pairs": 0,
-            "probability_fields": 28,
-            "rows": 2,
-            "significant_union_failures": 0,
-            "significant_union_maximum_delta": 0.0,
-            "significant_union_pairs": 0,
-            "strict_logp_failures": 0,
-            "zero_probability_values": 0,
-            "zero_with_native_logp_values": 0,
-            "zero_without_native_logp_values": 0
-          }
-        },
-        "role": "fault_injection",
-        "round": 0
+      "candidate": {
+        "peak_allocated_bytes": 16478470656,
+        "pss_sampling_count": 264,
+        "pss_sampling_host_seconds": 17.108465718105435,
+        "pss_unverified_count": 0,
+        "repository_closed_allocated_bytes": 8519680,
+        "round_end_allocated_bytes": [
+          83508736,
+          83508736
+        ],
+        "round_end_reserved_bytes": [
+          18264096768,
+          18264096768
+        ]
       }
+    },
+    "models": 2,
+    "models_refitted": 0,
+    "official_R_rerun": false,
+    "performance": {
+      "baseline": [
+        {
+          "round": 0,
+          "stages": [
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 44.94319909763337,
+              "host_wall_seconds": 44.94263150449842,
+              "stage": "gene_read_decode_cohort_prepare"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 37.81536531066895,
+              "host_wall_seconds": 36.015671850182116,
+              "stage": "gene_covariance"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 15.481083871841436,
+              "host_wall_seconds": 32.70614475291222,
+              "stage": "gene_panel_h2d"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 7.707373805999756,
+              "host_wall_seconds": 7.7066129967570305,
+              "stage": "eigen_tail"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 1.3415752533078193,
+              "host_wall_seconds": 1.3404604960232973,
+              "stage": "gene_shared_score"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 0.8633267538547518,
+              "host_wall_seconds": 0.8542603077366948,
+              "stage": "gene_panel_rotation"
+            },
+            {
+              "calls": 420,
+              "cuda_stream_seconds": 19.93380956459047,
+              "host_wall_seconds": 0.8290693974122405,
+              "stage": "gene_panel_covariance_products"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0009448319971561432,
+              "host_wall_seconds": 0.09149626921862364,
+              "stage": "phewas_score_sensitivity"
+            },
+            {
+              "calls": 12,
+              "cuda_stream_seconds": 0.14808992099761964,
+              "host_wall_seconds": 0.05700401496142149,
+              "stage": "phewas_individual_variance"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.05730352020263672,
+              "host_wall_seconds": 0.05677126441150904,
+              "stage": "genotype_trait_prepare"
+            },
+            {
+              "calls": 40,
+              "cuda_stream_seconds": 0.40199542140960687,
+              "host_wall_seconds": 0.0298940846696496,
+              "stage": "gene_panel_projection"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.008827680110931397,
+              "host_wall_seconds": 0.00811394676566124,
+              "stage": "phewas_phenotype_score_fp32"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0037558079361915586,
+              "host_wall_seconds": 0.0035488884896039963,
+              "stage": "phewas_individual_tail"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0007566399946808815,
+              "host_wall_seconds": 0.0006421655416488647,
+              "stage": "phewas_result_d2h"
+            }
+          ],
+          "wall_seconds": 192.83982182573527
+        },
+        {
+          "round": 1,
+          "stages": [
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 41.555993722915645,
+              "host_wall_seconds": 41.5555245289579,
+              "stage": "gene_read_decode_cohort_prepare"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 37.66620397186279,
+              "host_wall_seconds": 35.821145517751575,
+              "stage": "gene_covariance"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 15.585435581207271,
+              "host_wall_seconds": 32.84082922432572,
+              "stage": "gene_panel_h2d"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 7.1103772411346435,
+              "host_wall_seconds": 7.109626740217209,
+              "stage": "eigen_tail"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 1.2665333463549615,
+              "host_wall_seconds": 1.2654749667271972,
+              "stage": "gene_shared_score"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 0.8021616961956024,
+              "host_wall_seconds": 0.7931202026084065,
+              "stage": "gene_panel_rotation"
+            },
+            {
+              "calls": 420,
+              "cuda_stream_seconds": 19.909072089195252,
+              "host_wall_seconds": 0.640626429580152,
+              "stage": "gene_panel_covariance_products"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0009236479997634887,
+              "host_wall_seconds": 0.09390487801283598,
+              "stage": "phewas_score_sensitivity"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.05710358428955078,
+              "host_wall_seconds": 0.05657356884330511,
+              "stage": "genotype_trait_prepare"
+            },
+            {
+              "calls": 12,
+              "cuda_stream_seconds": 0.1381629753112793,
+              "host_wall_seconds": 0.04466675687581301,
+              "stage": "phewas_individual_variance"
+            },
+            {
+              "calls": 40,
+              "cuda_stream_seconds": 0.39984166622161865,
+              "host_wall_seconds": 0.02572775911539793,
+              "stage": "gene_panel_projection"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0122741117477417,
+              "host_wall_seconds": 0.011550054885447025,
+              "stage": "phewas_phenotype_score_fp32"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.003586303949356079,
+              "host_wall_seconds": 0.0033591100946068764,
+              "stage": "phewas_individual_tail"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.000754495993256569,
+              "host_wall_seconds": 0.0006328942254185677,
+              "stage": "phewas_result_d2h"
+            }
+          ],
+          "wall_seconds": 190.58595574647188
+        }
+      ],
+      "candidate": [
+        {
+          "round": 0,
+          "stages": [
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 38.61197195053101,
+              "host_wall_seconds": 36.804705085232854,
+              "stage": "gene_covariance"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 36.65494421386719,
+              "host_wall_seconds": 36.65432415995747,
+              "stage": "gene_read_decode_cohort_prepare"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 16.116124277114864,
+              "host_wall_seconds": 33.10428357310593,
+              "stage": "gene_panel_h2d"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 7.399818771362305,
+              "host_wall_seconds": 7.399045399390161,
+              "stage": "eigen_tail"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 1.311729051232338,
+              "host_wall_seconds": 1.3106463020667434,
+              "stage": "gene_shared_score"
+            },
+            {
+              "calls": 420,
+              "cuda_stream_seconds": 19.93909623241425,
+              "host_wall_seconds": 0.9177505103871226,
+              "stage": "gene_panel_covariance_products"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 0.8945390703678131,
+              "host_wall_seconds": 0.8851412534713745,
+              "stage": "gene_panel_rotation"
+            },
+            {
+              "calls": 12,
+              "cuda_stream_seconds": 0.16402131366729736,
+              "host_wall_seconds": 0.08315218333154917,
+              "stage": "phewas_individual_variance"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0009383680075407028,
+              "host_wall_seconds": 0.08128376584500074,
+              "stage": "phewas_score_sensitivity"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.05764505672454833,
+              "host_wall_seconds": 0.057116033509373665,
+              "stage": "genotype_trait_prepare"
+            },
+            {
+              "calls": 40,
+              "cuda_stream_seconds": 0.40320857620239264,
+              "host_wall_seconds": 0.029092807322740555,
+              "stage": "gene_panel_projection"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0059236159324646005,
+              "host_wall_seconds": 0.00521449651569128,
+              "stage": "phewas_phenotype_score_fp32"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0038299199938774107,
+              "host_wall_seconds": 0.003623916767537594,
+              "stage": "phewas_individual_tail"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0007426880076527595,
+              "host_wall_seconds": 0.0006307465955615044,
+              "stage": "phewas_result_d2h"
+            }
+          ],
+          "wall_seconds": 174.68990446068347
+        },
+        {
+          "round": 1,
+          "stages": [
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 40.22886722564697,
+              "host_wall_seconds": 38.36715610790998,
+              "stage": "gene_covariance"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 33.82619754695892,
+              "host_wall_seconds": 33.825677547603846,
+              "stage": "gene_read_decode_cohort_prepare"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 15.869522117614743,
+              "host_wall_seconds": 33.189938174560666,
+              "stage": "gene_panel_h2d"
+            },
+            {
+              "calls": 18,
+              "cuda_stream_seconds": 7.109023239135743,
+              "host_wall_seconds": 7.108289013616741,
+              "stage": "eigen_tail"
+            },
+            {
+              "calls": 9,
+              "cuda_stream_seconds": 1.305960343837738,
+              "host_wall_seconds": 1.3049575509503484,
+              "stage": "gene_shared_score"
+            },
+            {
+              "calls": 250,
+              "cuda_stream_seconds": 0.8246615362167362,
+              "host_wall_seconds": 0.8152643255889416,
+              "stage": "gene_panel_rotation"
+            },
+            {
+              "calls": 420,
+              "cuda_stream_seconds": 19.910989677429196,
+              "host_wall_seconds": 0.6515897698700428,
+              "stage": "gene_panel_covariance_products"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0009042240083217621,
+              "host_wall_seconds": 0.09505678340792656,
+              "stage": "phewas_score_sensitivity"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.057639904022216804,
+              "host_wall_seconds": 0.057118999771773815,
+              "stage": "genotype_trait_prepare"
+            },
+            {
+              "calls": 12,
+              "cuda_stream_seconds": 0.13785385608673098,
+              "host_wall_seconds": 0.043276156298816204,
+              "stage": "phewas_individual_variance"
+            },
+            {
+              "calls": 40,
+              "cuda_stream_seconds": 0.40094409275054943,
+              "host_wall_seconds": 0.02635372895747423,
+              "stage": "gene_panel_projection"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.005108991920948028,
+              "host_wall_seconds": 0.00438824575394392,
+              "stage": "phewas_phenotype_score_fp32"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.003538783967494964,
+              "host_wall_seconds": 0.003337225876748562,
+              "stage": "phewas_individual_tail"
+            },
+            {
+              "calls": 6,
+              "cuda_stream_seconds": 0.0009151999950408935,
+              "host_wall_seconds": 0.0007970603182911873,
+              "stage": "phewas_result_d2h"
+            }
+          ],
+          "wall_seconds": 165.06232589576393
+        }
+      ],
+      "observed_warm_speed_ratio": 1.1546302568571947,
+      "warm_wall_reduction_fraction": 0.133921881865529
+    },
+    "performance_scope": "association, formal CSV write and complete readback; excludes genetic preparation and null fitting",
+    "precision": {
+      "comparisons": [
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "baseline",
+          "round": 1
+        },
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "candidate",
+          "round": 0
+        },
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "candidate",
+          "round": 1
+        },
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 7.134903247663082e-07,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 2.1162297070276281e-07,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 1.4210645762346985e-06,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 1.4210645762346985e-06,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 1.779470700791208e-06,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 9.281048096720923e-07,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 1.6646764189331975e-07,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "independent",
+          "round": 0
+        },
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "diagnostic",
+          "round": 0
+        },
+        {
+          "kinds": {
+            "coding": {
+              "finite_logp_pairs": 180,
+              "logp_maximum_delta": 9.41872508875008e-08,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 180,
+              "rows": 12,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 9.165015413259425e-10,
+              "significant_union_pairs": 20,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "individual": {
+              "finite_logp_pairs": 528,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 2112,
+              "probability_fields": 528,
+              "rows": 528,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 23,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "ncrna": {
+              "finite_logp_pairs": 56,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 56,
+              "rows": 4,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 4,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            },
+            "noncoding": {
+              "finite_logp_pairs": 28,
+              "logp_maximum_delta": 0.0,
+              "numeric_statistic_pairs": 0,
+              "probability_fields": 28,
+              "rows": 2,
+              "significant_union_failures": 0,
+              "significant_union_maximum_delta": 0.0,
+              "significant_union_pairs": 0,
+              "strict_logp_failures": 0,
+              "zero_probability_values": 0,
+              "zero_with_native_logp_values": 0,
+              "zero_without_native_logp_values": 0
+            }
+          },
+          "role": "fault_injection",
+          "round": 0
+        }
+      ],
+      "exact_schema_filter_AF_MAC_and_row_order_checked": true,
+      "finite_all_and_significant_union_checked": true,
+      "maximum_logp_delta": 1.779470700791208e-06,
+      "probability_floor_applied": false,
+      "significance_union_threshold": 0.05,
+      "stable_native_logp_checked": true,
+      "status": "passed",
+      "strict_logp_tolerance": 0.001
+    },
+    "rows_per_round": {
+      "coding": 12,
+      "individual": 528,
+      "ncrna": 4,
+      "noncoding": 2
+    },
+    "scientific_configuration_equal": true,
+    "status": "passed_scoped_real_data"
+  },
+  "real_data_scope": {
+    "all388_payloads_or_genomewide_performance": "not_assessed",
+    "available_multiple_sample_axes": "not_assessed",
+    "binary_or_SPA": "not_assessed",
+    "classes": [
+      "individual",
+      "coding",
+      "noncoding",
+      "ncrna"
     ],
-    "exact_schema_filter_AF_MAC_and_row_order_checked": true,
-    "finite_all_and_significant_union_checked": true,
-    "maximum_logp_delta": 1.779470700791208e-06,
-    "probability_floor_applied": false,
-    "significance_union_threshold": 0.05,
-    "stable_native_logp_checked": true,
-    "status": "passed",
-    "strict_logp_tolerance": 0.001
+    "continuous_transform": "paper",
+    "covariates": 15,
+    "effective_samples_per_model": 343034,
+    "independent_models": 2,
+    "missingness": "mean",
+    "model_family": "gaussian",
+    "real_data": true
   },
-  "rows_per_round": {
-    "coding": 12,
-    "individual": 528,
-    "ncrna": 4,
-    "noncoding": 2
+  "schema_version": 2,
+  "scope": "Anonymous real Gaussian mask-length, memory, cache, and OOM assessment; source versions recorded separately.",
+  "solver_decision": {
+    "automatic_M5000_switch": false,
+    "default": "full",
+    "explicit_fastskat_retained": true,
+    "performance_size_skips": false,
+    "reason": "25 real mask-rank pairs show heterogeneous speed and one failed strict precision gate; no universal automatic threshold established."
   },
-  "scientific_configuration_equal": true,
-  "status": "passed_scoped_real_data"
+  "synthetic_finite_check_diagnostic": {
+    "allocated_peak_bytes_range": [
+      8342528,
+      8369664
+    ],
+    "anonymous_receipt_sha256": "69802ef512a2b3b5b83a5f7d2e53ba0e09f028f396e7d71164b8dc0c1194ce85",
+    "case_count": 36,
+    "end_requested_and_allocated_growth_bytes": 0,
+    "forced_gc_or_empty_cache": false,
+    "independent_peak_counters_not_cotimed": true,
+    "logical_scratch_budget_bytes": 7350786,
+    "real_model_or_data_accessed": false,
+    "requested_peak_bytes_range": [
+      7343617,
+      7350785
+    ],
+    "source_implementation_sha256": "827b8ea4fe6a6d6f793799e167acf95e836e5d5395905cfc9b5f3183937c18f1",
+    "source_modified": false,
+    "status": "scoped_actual_uninstrumented_exact_finite_test_allocation_diagnostic"
+  },
+  "unverified": {
+    "all_selected_traits_materialized_validation": true,
+    "available_multiple_sample_axes_long_mask_real_benchmark": true,
+    "binary_and_SPA_in_this_benchmark": true,
+    "extreme_underflow_log_probability_precision_in_real_workset": true,
+    "whole_genome_speed_ratio": true
+  }
 }
