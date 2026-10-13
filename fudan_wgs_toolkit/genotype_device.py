@@ -133,6 +133,27 @@ class DeviceMinorBlock:
             result._store_counts(cached[1], cached[2][columns], cached[3][columns])
         return result
 
+    def to_host(self):
+        """Move exact uint8 dosage while retaining already verified counts.
+
+        A device transfer changes the tensor identity, so replacing ``dosage``
+        directly would invalidate its count stamp and repeat the reduction on
+        CPU. The transfer preserves every byte and only a current source stamp
+        can authorize the small summary handoff. CPU blocks already own the
+        requested storage and return themselves. Later in-place writes still
+        invalidate the returned block's summaries normally.
+        """
+        if self.dosage.device.type == 'cpu':
+            return self
+        cached = self._counts_cache
+        current = cached is not None and cached[0] == self._dosage_stamp()
+        result = DeviceMinorBlock(self.dosage.detach().cpu(), self.sample_indices,
+            self.variant_indices, self.union_ref_af, self.union_initial_mac,
+            self.union_missing_rate, self.union_ref_ac, self.union_called_alleles)
+        if current:
+            result._store_counts(cached[1], cached[2], cached[3])
+        return result
+
     def _trait_frequency(self, rows, mac, missing_count, imputation, frequency_mode):
         count = len(rows) - missing_count
         maf = np.divide(mac, 2 * count, out=np.full_like(mac, np.nan), where=count > 0)
@@ -261,14 +282,17 @@ class DeviceMinorBlock:
                     *output.stride(), IDENTITY_ROWS=identity_rows,
                     MEAN_IMPUTATION=imputation == 'mean', BLOCK=256)
         else:
-            selected = self.dosage if identity_rows else self.dosage.index_select(
-                0, torch.tensor(rows, device=self.dosage.device))
-            selected = selected.index_select(1, torch.tensor(columns, device=self.dosage.device))
-            dense = selected.to(dtype=dtype, copy=True)
-            if imputation == 'mean':
-                means = torch.tensor(2 * maf, dtype=dtype, device=self.dosage.device)
-                torch.where(selected == 3, means[None, :], dense, out=dense)
-            else:
-                dense.masked_fill_(selected == 3, 0)
-            output.index_copy_(1, torch.tensor(destinations, device=self.dosage.device), dense)
+            # A bounded host preparation already owns the final F-contiguous
+            # matrix. Cast directly into its column views rather than creating
+            # another selected uint8 block and a complete floating temporary.
+            # Nonidentity row axes need only one uint8 column at a time. The
+            # original FP64 means are cast once, exactly as in trait_dense.
+            source, target = self.dosage.detach().numpy(), output.detach().numpy()
+            means = (2 * maf).astype(target.dtype, copy=False)
+            for column, destination, mean in zip(columns, destinations, means):
+                selected = source[:, column] if identity_rows else source[rows, column]
+                destination_column = target[:, destination]
+                np.copyto(destination_column, selected)
+                np.copyto(destination_column, mean if imputation == 'mean' else 0,
+                          where=selected == 3)
         return output, maf, mac, absent, is_alt

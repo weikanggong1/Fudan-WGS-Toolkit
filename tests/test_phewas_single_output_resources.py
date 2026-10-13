@@ -14,6 +14,7 @@ def output_gate(monkeypatch,tmp_path):
                   effective_current_bytes=0,scope="cgroup_v2")
     monkeypatch.setattr(resources,"host_scope",lambda:("c"*64,dict(node="test",cgroups=[])))
     monkeypatch.setattr(resources,"process_identity",lambda pid:identity if pid==identity["pid"] else None)
+    monkeypatch.setattr(resources,"_process_memory_counters",lambda pid,**kwargs:dict(pss_bytes=0,rss_bytes=0))
     monkeypatch.setattr(resources,"read_host_memory",lambda:dict(memory))
     gate = resources.HostMemoryGate(tmp_path,host_limit_gib=1,reserve_gib=0)
     return gate,memory

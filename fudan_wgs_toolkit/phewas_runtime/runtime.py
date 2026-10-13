@@ -653,7 +653,7 @@ def _prepare_shared_gene(pipeline, indices, broker):
             compact = block.select_columns(columns)
             # This handoff contains exact six-state-derived minor dosage, not
             # phenotype/model data. CPU conversion/imputation retains FP32.
-            compact.dosage = compact.dosage.detach().cpu()
+            compact = compact.to_host()
             physical.extend((offset+columns).tolist())
             frequencies.extend(maf[columns])
             allele_missing = block.allele_missing_rate()
@@ -678,18 +678,18 @@ def _prepare_shared_gene(pipeline, indices, broker):
     inverse = np.empty(count, dtype=np.int64)
     inverse[order] = np.arange(count)
     begin = 0
+    host_tensor = torch.from_numpy(host)
     for part in parts:
         # The host lease includes one 128-column conversion, never a full
         # physical frame. Only filled host columns qualify as materialized.
         for local in range(0, part.shape[1], 128):
             stop = min(local+128, part.shape[1])
-            compact_part = part.select_columns(np.arange(local, stop, dtype=np.int64))
             end = begin+stop-local
-            dense = compact_part.trait_dense(pipeline.trait_rows[0], options.imputation,
-                                            frequency_mode='reference', dtype=torch.float32)[0]
-            host[:, inverse[begin:end]] = dense.numpy()
+            part.trait_dense_columns(pipeline.trait_rows[0],
+                np.arange(local, stop, dtype=np.int64), options.imputation,
+                frequency_mode='reference', dtype=torch.float32,
+                out=host_tensor, out_columns=inverse[begin:end])
             begin = end
-            del dense, compact_part
             _prepare_host_guard(pipeline, model, count, parts_bytes+4*model.n*begin)
     physical = np.asarray(physical, dtype=np.int64)[order]
     maf = np.asarray(frequencies, dtype=np.float64)[order]
@@ -1294,6 +1294,30 @@ def _phewas_result_fields(value):
     return result
 
 
+def _gene_preparation_geometry(repository, descriptor, broker, metadata, verified):
+    """Copy only verified dimensions; preparation never uses fitted values.
+
+    One cohort's masks share its ordered sample axis. Acquiring the same
+    anchor for every mask repeats model IO/admission after the tile bank has
+    evicted it. Keep only n/device/q for this evaluation, releasing the real
+    model before genotype preparation and mandatory workspace admission.
+    Every numerical trait still acquires and validates its own fitted model.
+    """
+    models = model = None
+    try:
+        with repository.acquire([descriptor['trait_index']], str(broker.device)) as models:
+            if len(models) != 1:
+                raise ValueError('repository acquire must retain requested model count')
+            model = models[0]
+            _check_model(model, descriptor, metadata, verified)
+            return SimpleNamespace(n=model.n, device=model.device, use_spa=False), int(model.x.shape[1])
+    except BaseException as error:
+        _clear_inactive_exception_frames(error)
+        raise
+    finally:
+        models = model = None
+
+
 def _batched_gene(groups, repository, broker, metadata, options, configuration, arguments,
                   writer, report, verified, chromosome, job_index, trait_batch_size, structural, kind):
     descriptors = [descriptor for group in groups for descriptor in group['descriptors']]
@@ -1308,24 +1332,24 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
         for group in groups:
             axis = broker.reader_view(group['rows'])
             try:
+                if not masks:
+                    continue
+                preparation_model, q = _gene_preparation_geometry(repository,
+                    group['descriptors'][0], broker, metadata, verified)
                 for mi, indices in enumerate(masks):
                     prepared, prototype, host, genotype, burdens = None, None, None, None, None
                     covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
                     try:
-                        anchor = group['descriptors'][0]
-                        with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
-                            _check_model(models[0], anchor, metadata, verified)
-                            prototype = _thin_pipeline(axis, models[0], axis._axis.samples, options, configuration, structural)
-                            # A binary anchor alone does not describe a mixed
-                            # cohort's future Gaussian variant covariance.
-                            prototype._binary_burden_only = all(
-                                d['family'] == 'binomial' for d in group['descriptors'])
-                            with prototype.profiler.measure('gene_read_decode_cohort_prepare', gpu=True):
-                                with _gene_workspace_scope(repository, broker, 0):
-                                    prepared = _prepare_shared_gene(prototype, indices, broker)
-                            q = models[0].x.shape[1]
+                        prototype = _thin_pipeline(axis, preparation_model, axis._axis.samples,
+                                                   options, configuration, structural)
+                        # Preparation retains geometry only. A mixed cohort
+                        # still needs each Gaussian variant covariance later.
+                        prototype._binary_burden_only = all(
+                            d['family'] == 'binomial' for d in group['descriptors'])
+                        with prototype.profiler.measure('gene_read_decode_cohort_prepare', gpu=True):
+                            with _gene_workspace_scope(repository, broker, 0):
+                                prepared = _prepare_shared_gene(prototype, indices, broker)
                         prototype.models = []
-                        del models
                         set_future = configuration.get('_host_memory_set_future')
                         if callable(set_future):
                             set_future(0, phase='gene_host_ready')

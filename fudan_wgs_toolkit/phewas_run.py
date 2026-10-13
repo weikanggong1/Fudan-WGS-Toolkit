@@ -717,7 +717,7 @@ def _host_memory_policy(plan):
     return dict(host_limit_gib=limit, reserve_gib=plan.get('host_reserve_gib'))
 
 
-def _close_association_resources(writer, repository, *, failed):
+def _close_association_resources(writer, repository, *, failed, gate=None):
     """Always close model mappings; abort only unfinished exceptional writers.
 
     An original worker error remains the raised error even if cleanup fails.
@@ -733,6 +733,12 @@ def _close_association_resources(writer, repository, *, failed):
         except BaseException as error:
             if first_error is None:
                 first_error = error
+    close_gate = getattr(gate,'close',None)
+    if first_error is None and callable(close_gate):
+        try:
+            close_gate()
+        except BaseException as error:
+            first_error = error
     if first_error is not None and not failed:
         raise first_error
 
@@ -1376,7 +1382,7 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
         entries = _all_models(plan, worker_count)
     from .phewas_runtime.runtime import run_batched_configuration
     from .phewas_resources import HostMemoryGate
-    repository, writer = None, None
+    repository, writer, gate = None, None, None
     association_failed = True
     try:
         dispatch = None
@@ -1477,6 +1483,9 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
                           assigned_chromosomes=[c['name'] for c in config['chromosomes']],
                           completed_jobs_sha256=digest_file(completed_jobs),
                           completed_jobs_file=completed_jobs.name)
+            gate_metadata = getattr(gate,'metadata',None)
+            if callable(gate_metadata):
+                report['host_memory_admission'] = gate_metadata()
             if dispatch is not None and dispatch['strategy']=='whole_chromosomes':
                 report.update(schedule_audit.finish())
             report['file_descriptors'] = report['output'].get('file_descriptors',file_admission)
@@ -1499,7 +1508,7 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
                 pass  # A diagnostic write cannot replace the calculation error.
             raise
     finally:
-        _close_association_resources(writer, repository, failed=association_failed)
+        _close_association_resources(writer, repository, failed=association_failed, gate=gate)
 
 
 def _execute_worker_bound(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_only=False,

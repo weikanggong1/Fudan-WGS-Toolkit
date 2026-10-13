@@ -158,14 +158,19 @@ def test_host_conversion_stays_within_estimated_tile_and_credits_only_filled_col
     n, m = 512, 259
     raw = np.zeros((m, n), dtype=np.uint8)
     raw[np.arange(m), np.arange(m)] = 1
-    dense_widths, admissions = [], []
+    dense_widths, output_owners, admissions = [], [], []
     # The object is imported by the mature pipeline and shared broker.
     from fudan_wgs_toolkit.pipeline import DeviceMinorBlock
-    original_dense = DeviceMinorBlock.trait_dense
-    def dense(self, *args, **kwargs):
-        dense_widths.append(self.shape[1])
-        return original_dense(self, *args, **kwargs)
-    monkeypatch.setattr(DeviceMinorBlock, 'trait_dense', dense)
+    original_dense = DeviceMinorBlock.trait_dense_columns
+    def dense(self, trait_rows, columns, *args, **kwargs):
+        dense_widths.append(len(columns))
+        output = kwargs['out']
+        assert output.shape == (n, m) and output.stride() == (1, n)
+        output_owners.append(output.untyped_storage().data_ptr())
+        return original_dense(self, trait_rows, columns, *args, **kwargs)
+    monkeypatch.setattr(DeviceMinorBlock, 'trait_dense_columns', dense)
+    monkeypatch.setattr(DeviceMinorBlock, 'trait_dense', lambda *args, **kwargs:
+        pytest.fail('host conversion must write into its admitted output'))
     with SharedStateBroker(MetadataReader(n, m), make_cache(tmp_path/'cache', raw), device='cpu') as broker:
         axis = broker.reader_view(np.arange(n)[::-1].copy())
         pipeline = runtime._thin_pipeline(axis, model_for(axis._axis.samples), axis._axis.samples,
@@ -175,6 +180,7 @@ def test_host_conversion_stays_within_estimated_tile_and_credits_only_filled_col
         pipeline.host_memory_set_future = lambda *args, **kwargs: None
         actual = runtime._prepare_shared_gene(pipeline, np.arange(m), broker)
         assert actual is not None and dense_widths == [128, 128, 3]
+        assert len(set(output_owners)) == 1
         expected = (raw[:, ::-1] == 1).T.astype(np.float32)
         np.testing.assert_array_equal(actual['_genotype_host'], expected)
         credits = [item['materialized_bytes'] for item in admissions]
@@ -446,6 +452,8 @@ def test_real_host_gate_recovery_drops_optional_lru_without_refilling_or_masking
         return dict(current_bytes=current, effective_current_bytes=current, limit_bytes=1024,
                     inactive_file_bytes=0, scope='cgroup_v2')
     monkeypatch.setattr(resources, 'read_host_memory', live_memory)
+    monkeypatch.setattr(resources, '_process_memory_counters', lambda pid,**kwargs:
+        dict(pss_bytes=live_memory()['effective_current_bytes'],rss_bytes=live_memory()['effective_current_bytes']))
     gate = resources.HostMemoryGate(tmp_path, host_limit_gib=1024/resources.GiB, reserve_gib=0)
     report = dict(association_rows={'coding': 0}, trait_rows={0: {'coding': 0}})
     attempts, waits, writes = [], [], []
@@ -502,6 +510,7 @@ def test_closed_host_lease_cleanup_is_idempotent_but_new_requests_remain_strict(
     owner = dict(pid=os.getpid(), start_ticks=1, boot_id='anonymous-fixture')
     monkeypatch.setattr(resources, 'host_scope', lambda: ('f'*64, {'fixture': True}))
     monkeypatch.setattr(resources, 'process_identity', lambda pid: owner if pid == owner['pid'] else None)
+    monkeypatch.setattr(resources, '_process_memory_counters', lambda pid,**kwargs:dict(pss_bytes=90,rss_bytes=90))
     monkeypatch.setattr(resources, 'read_host_memory', lambda: dict(current_bytes=90, limit_bytes=100,
         effective_current_bytes=90, inactive_file_bytes=0, scope='cgroup_v2'))
     gate = resources.HostMemoryGate(tmp_path, host_limit_gib=100/resources.GiB, reserve_gib=0)

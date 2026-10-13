@@ -80,6 +80,85 @@ def _process_rss(pid):
     return 0
 
 
+_SMAPS_HEADER = re.compile(r"^([0-9a-fA-F]+)-([0-9a-fA-F]+) [r-][w-][x-][ps] "
+    r"[0-9a-fA-F]+ [0-9a-fA-F]+:[0-9a-fA-F]+ [0-9]+(?:\s+.*)?$")
+_PSS_COUNTERS = frozenset(("Rss", "Pss", "SwapPss"))
+_PSS_REQUIRED = frozenset(("Rss", "Pss"))
+
+
+def _memory_kib(tail):
+    if re.fullmatch(r"\s*[0-9]+\s+kB\s*", tail) is None:
+        raise ValueError("memory counter must be nonnegative integer kB")
+    return int(tail.split()[0])*1024
+
+
+def _read_rollup_pss(path):
+    values = {}
+    fields = _PSS_COUNTERS | {"Pss_Anon", "Pss_File", "Pss_Shmem"}
+    with path.open(encoding="utf-8",errors="replace") as stream:
+        for line in stream:
+            if _SMAPS_HEADER.fullmatch(line.rstrip("\n")) is not None:
+                continue
+            key, separator, tail = line.partition(":")
+            if not separator or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*",key) is None:
+                raise ValueError("invalid rollup field format")
+            if separator and key in fields:
+                if key in values:
+                    raise ValueError("duplicate rollup memory counter")
+                values[key] = _memory_kib(tail)
+    if not _PSS_REQUIRED <= values.keys():
+        raise ValueError("incomplete rollup memory counters")
+    return values
+
+
+def _read_smaps_pss(path):
+    """Stream all VMAs; one invalid/incomplete block invalidates every total.
+
+    Older kernels expose PSS only here. Each complete mapping contributes
+    exactly once. VMA path/type cannot reliably split proportional anonymous,
+    file and shared memory, so this fallback reports only Rss/Pss/SwapPss.
+    """
+    totals = dict.fromkeys(_PSS_COUNTERS,0)
+    swap_complete = True
+    current, previous_end, count = None,0,0
+    with path.open(encoding="utf-8",errors="replace") as stream:
+        for line in stream:
+            header = _SMAPS_HEADER.fullmatch(line.rstrip("\n"))
+            if header is not None:
+                if current is not None:
+                    if not _PSS_REQUIRED <= current.keys():
+                        raise ValueError("incomplete smaps VMA memory counters")
+                    for key in totals:
+                        if key in current:
+                            totals[key] += current[key]
+                        else:
+                            swap_complete = False
+                start,end = (int(value,16) for value in header.groups())
+                if start<previous_end or start>=end:
+                    raise ValueError("invalid or overlapping smaps VMA addresses")
+                current,previous_end = {},end
+                count += 1
+                continue
+            key, separator, tail = line.partition(":")
+            if (current is None or not separator
+                    or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*",key) is None):
+                raise ValueError("invalid smaps VMA or field format")
+            if key in _PSS_COUNTERS:
+                if key in current:
+                    raise ValueError("duplicate smaps VMA memory counter")
+                current[key] = _memory_kib(tail)
+    if current is None or not _PSS_REQUIRED <= current.keys():
+        raise ValueError("empty or incomplete smaps memory counters")
+    for key in totals:
+        if key in current:
+            totals[key] += current[key]
+        else:
+            swap_complete = False
+    if not swap_complete:
+        totals["SwapPss"] = None
+    return totals,count
+
+
 def _process_memory_counters(pid, *, include_pss):
     """Read one endpoint; unavailable PSS remains unknown rather than zero."""
     status = {}
@@ -91,42 +170,123 @@ def _process_memory_counters(pid, *, include_pss):
     except (OSError, ValueError, IndexError):
         pass
     rollup = {}
+    pss_source,smaps_vma_count = None,None
     if include_pss:
         try:
-            for line in Path(f"/proc/{pid}/smaps_rollup").read_text().splitlines():
-                key, separator, tail = line.partition(":")
-                if separator and key in ("Rss", "Pss", "Pss_Anon", "Pss_File", "Pss_Shmem", "SwapPss"):
-                    rollup[key] = int(tail.split()[0])*1024
+            rollup = _read_rollup_pss(Path(f"/proc/{pid}/smaps_rollup"))
+            pss_source = "smaps_rollup"
         except (OSError, ValueError, IndexError):
-            pass
+            try:
+                rollup,smaps_vma_count = _read_smaps_pss(Path(f"/proc/{pid}/smaps"))
+                pss_source = "smaps"
+            except (OSError, ValueError, IndexError):
+                # Never keep counters accumulated before a partial read or
+                # malformed later VMA; RSS may still be diagnostic status data.
+                rollup = {}
     return dict(rss_bytes=rollup.get("Rss",status.get("VmRSS")),
         pss_bytes=rollup.get("Pss"), anonymous_rss_bytes=status.get("RssAnon"),
         mapped_file_rss_bytes=status.get("RssFile"), shared_rss_bytes=status.get("RssShmem"),
         anonymous_pss_bytes=rollup.get("Pss_Anon"), mapped_file_pss_bytes=rollup.get("Pss_File"),
         shared_pss_bytes=rollup.get("Pss_Shmem"), swap_bytes=status.get("VmSwap"),
-        swap_pss_bytes=rollup.get("SwapPss"))
+        swap_pss_bytes=rollup.get("SwapPss"),pss_source=pss_source,
+        pss_coverage_complete=pss_source is not None,smaps_vma_count=smaps_vma_count)
 
 
-def _verified_children(pid):
+def _verified_children(pid, *, strict=False):
     """Loader-spawned children are attached to their TID, not just the leader."""
     children = set()
     try:
         for task in Path(f"/proc/{pid}/task").iterdir():
             try:
                 children.update(int(value) for value in (task/"children").read_text().split())
-            except (OSError, ValueError):
+            except (FileNotFoundError, ProcessLookupError):
                 continue
-    except OSError:
+            except (OSError, ValueError):
+                if strict:
+                    raise RuntimeError("task descendant membership cannot be read safely")
+    except (FileNotFoundError, ProcessLookupError):
         pass
+    except OSError:
+        if strict:
+            raise RuntimeError("task thread membership cannot be read safely")
     result = []
     for child in children:
         try:
             fields = Path(f"/proc/{child}/stat").read_text().rsplit(")",1)[1].split()
             if int(fields[1]) == pid:
                 result.append(child)
-        except (OSError, ValueError, IndexError):
+        except (FileNotFoundError, ProcessLookupError):
             pass
+        except (OSError, ValueError, IndexError):
+            if strict:
+                raise RuntimeError("task child identity cannot be read safely")
     return result
+
+
+def _valid_identity(identity):
+    return (isinstance(identity,dict) and set(identity)=={"pid","start_ticks","boot_id"}
+        and type(identity["pid"]) is int and identity["pid"]>0
+        and type(identity["start_ticks"]) is int and identity["start_ticks"]>=0
+        and isinstance(identity["boot_id"],str) and bool(identity["boot_id"]))
+
+
+def _task_processes(owners):
+    """Refresh registered roots and their descendants, deduplicating identities.
+
+    Remember children already observed so an orphan cannot escape the task
+    budget merely because its registered parent exits or closes its gate.
+    """
+    identities = {}
+    for owner in owners.values():
+        root = owner["identity"]
+        roots = ([] if owner.get("closed",False) else [root])+owner["descendants"]
+        pending, descendants, seen = list(roots), [], set()
+        while pending:
+            identity = pending.pop()
+            key = (identity["pid"],identity["start_ticks"],identity["boot_id"])
+            if key in seen or process_identity(identity["pid"]) != identity:
+                continue
+            seen.add(key);identities[key] = identity
+            if identity != root:
+                descendants.append(identity)
+            for child in _verified_children(identity["pid"],strict=True):
+                current = process_identity(child)
+                if current is not None:
+                    pending.append(current)
+        owner["descendants"] = descendants
+    return list(identities.values())
+
+
+def _task_memory_snapshot(identities):
+    """Fresh proportional resident bytes; summed RSS is diagnostic only."""
+    started = time.perf_counter()
+    pss = rss = 0
+    sources = {}
+    rss_complete = True
+    for identity in identities:
+        if process_identity(identity["pid"]) != identity:
+            raise RuntimeError("task PSS process identity changed before sampling")
+        counters = _process_memory_counters(identity["pid"],include_pss=True)
+        if process_identity(identity["pid"]) != identity:
+            raise RuntimeError("task PSS process identity changed during sampling")
+        value = counters["pss_bytes"]
+        if type(value) is not int or value<0:
+            raise RuntimeError("task PSS coverage cannot be verified")
+        pss += value
+        source = counters.get("pss_source","unspecified")
+        sources[source] = sources.get(source,0)+1
+        value = counters["rss_bytes"]
+        if type(value) is int and value>=0:
+            rss += value
+        else:
+            rss_complete = False
+    if not identities:
+        raise RuntimeError("task PSS has no verified registered owners")
+    return dict(pss_bytes=pss,rss_bytes=rss if rss_complete else None,
+        pss_sources=sources,
+        observed_process_count=len(identities),pss_coverage_complete=True,
+        sample_host_seconds=time.perf_counter()-started,rss_sum_is_unique_memory=False,
+        scope="registered task roots and descendants; proportional resident endpoint, not an independent cgroup cap")
 
 
 def process_memory_snapshot(identity=None, *, include_children=True, include_pss=True):
@@ -472,8 +632,10 @@ def read_host_memory():
             effective = max(0,values["MemTotal"]-values["MemAvailable"])
             constraints.append(dict(current_bytes=effective,limit_bytes=values["MemTotal"],
                 inactive_file_bytes=0,effective_current_bytes=effective,scope="system_available_memory"))
-    except (OSError,ValueError):
-        pass
+    except (OSError,ValueError,IndexError) as error:
+        raise RuntimeError("physical available memory cannot be read safely") from error
+    if "MemTotal" not in values or "MemAvailable" not in values:
+        raise RuntimeError("physical available memory counters are incomplete")
     if not constraints:
         raise RuntimeError("live host memory constraints cannot be read safely")
     chosen = min(constraints,key=lambda c:c["limit_bytes"]-c["effective_current_bytes"])
@@ -638,10 +800,10 @@ def host_output_lease_scope(factory,rows,traits,*,chromosome_index,job_index,
 class HostMemoryGate:
     """Reserve only future host allocations under private host-local leases.
 
-    Cgroup usage already contains materialized arrays and counts shared pages
-    once. Summed process RSS therefore never supplies a second admission gate.
-    Callers explicitly replace the future budget as their owned buffers become
-    initialized or are released; an unknown RSS increase grants no credit.
+    Persistent, identity-bound registrations cover cached/model phases without
+    a lease. Task PSS plus future bytes obey the task limit independently of
+    every actual cgroup ancestor and physical available memory. Summed RSS is
+    diagnostic only. This proportional task budget is not an isolated cgroup.
     Only increasing future budgets sample pressure; zero or decreasing budgets
     retain identity-bound ledger publication without claiming live headroom.
     """
@@ -671,6 +833,21 @@ class HostMemoryGate:
         self.path = self.directory/(self.key+".private.json")
         self.lock_path = self.directory/(self.key+".lock")
         self._retired_tokens = {}
+        self.registration_token = uuid.uuid4().hex
+        self.identity = process_identity(os.getpid())
+        if self.identity is None:
+            raise RuntimeError("host memory task owner identity cannot be verified")
+        self.closed = False
+        self._pss_samples = self._pss_unverified = 0
+        self._pss_host_seconds = 0.
+        self._last_task_memory = None
+        with self._locked(0):
+            state = self._load()
+            self._live_leases(state)
+            self._live_owners(state)
+            state["owners"][self.registration_token] = dict(identity=self.identity,
+                descendants=[],closed=False)
+            self._write(state)
 
     @contextmanager
     def _locked(self,required_bytes):
@@ -693,7 +870,7 @@ class HostMemoryGate:
     def _load(self):
         if not self.path.exists():
             return dict(schema_version=2,scope_key=self.key,scope=self.scope,
-                policy=dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes),leases={})
+                policy=dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes),leases={},owners={})
         state = json.loads(self.path.read_text())
         if state.get("schema_version") != 2 or state.get("scope_key") != self.key or state.get("scope") != self.scope:
             raise ValueError("private host memory ledger scope binding differs")
@@ -716,15 +893,27 @@ class HostMemoryGate:
             if not isinstance(record.get("phase"),str) or not record["phase"]:
                 raise ValueError("private host memory ledger has an invalid phase")
             identity = record.get("identity")
-            if (not isinstance(identity,dict) or set(identity)!={"pid","start_ticks","boot_id"}
-                    or type(identity["pid"]) is not int or identity["pid"]<=0
-                    or type(identity["start_ticks"]) is not int or identity["start_ticks"]<0
-                    or not isinstance(identity["boot_id"],str) or not identity["boot_id"]):
+            if not _valid_identity(identity):
                 raise ValueError("private host memory ledger has invalid process identity")
+        if "owners" not in state:
+            # Upgrade future-only schema2 ledgers without discarding live
+            # leases; their materialized owners now receive task accounting.
+            state["owners"] = {"legacy:"+token:dict(identity=record["identity"],
+                descendants=[],closed=False) for token,record in state["leases"].items()}
+        if not isinstance(state["owners"],dict):
+            raise ValueError("private host memory ledger has invalid task owners")
+        for token,owner in state["owners"].items():
+            if (not isinstance(token,str) or not token or not isinstance(owner,dict)
+                    or not _valid_identity(owner.get("identity"))
+                    or type(owner.get("closed")) is not bool
+                    or not isinstance(owner.get("descendants"),list)
+                    or any(not _valid_identity(value) for value in owner["descendants"])):
+                raise ValueError("private host memory ledger has invalid task owner identity")
         expected_policy = dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes)
         if policy != expected_policy:
             self._live_leases(state)
-            if state["leases"]:
+            self._live_owners(state)
+            if state["leases"] or state["owners"]:
                 raise ValueError("host memory peers must use the same limit/reserve policy")
             # A later resume may choose another resource budget. Only a ledger
             # with no identity-verified live owners can change its byte policy;
@@ -752,8 +941,50 @@ class HostMemoryGate:
                 del state["leases"][token]
                 continue
 
+    def _live_owners(self,state):
+        for token,owner in list(state["owners"].items()):
+            owner["descendants"] = [identity for identity in owner["descendants"]
+                if process_identity(identity["pid"]) == identity]
+            root_live = (not owner["closed"] and
+                process_identity(owner["identity"]["pid"]) == owner["identity"])
+            if not root_live and not owner["descendants"]:
+                del state["owners"][token]
+
+    def close(self):
+        """Retire only this gate registration after its owned resources close."""
+        if self.closed:
+            return
+        with self._locked(0):
+            state = self._load()
+            for token,identity in self._retired_tokens.items():
+                if state["leases"].get(token,{}).get("identity") == identity:
+                    state["leases"].pop(token,None)
+            self._live_leases(state)
+            if any(record.get("registration_token") == self.registration_token
+                   for record in state["leases"].values()):
+                raise RuntimeError("cannot close a host gate with active leases")
+            self._live_owners(state)
+            _task_processes(state["owners"])
+            owner = state["owners"].get(self.registration_token)
+            if owner is not None:
+                owner["closed"] = True
+            self._live_owners(state)
+            self._write(state)
+        self.closed = True
+        self._retired_tokens.clear()
+
     def lease(self,initial_bytes=0,*,label=None):
+        if self.closed:
+            raise RuntimeError("host memory task gate is closed")
         return HostMemoryLease(self,_positive_bytes(initial_bytes,"initial_bytes"),label=label)
+
+    def metadata(self):
+        """Bounded local sampling costs and the last fresh admission endpoint."""
+        return dict(pss_sampling_count=self._pss_samples,pss_sampling_host_seconds=self._pss_host_seconds,
+            pss_unverified_count=self._pss_unverified,last_task_memory=copy.deepcopy(self._last_task_memory),
+            task_limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes,
+            pss_sampling_scope="NEW-byte growth only; zero/shrink/release do not sample",
+            task_budget_is_cgroup_hard_limit=False,closed=self.closed)
 
     def lease_factory(self,kind,chromosome_index,job_index):
         return self.lease(label=dict(kind=str(kind),chromosome_index=int(chromosome_index),job_index=int(job_index)))
@@ -768,8 +999,11 @@ class HostMemoryGate:
                 if state["leases"].get(token,{}).get("identity") == identity:
                     state["leases"].pop(token,None)
             self._live_leases(state)
+            self._live_owners(state)
             if process_identity(lease.identity["pid"]) != lease.identity:
                 raise RuntimeError("host memory lease owner identity changed")
+            if self.closed or self.registration_token not in state["owners"]:
+                raise RuntimeError("host memory task registration is not active")
             for token,record in state["leases"].items():
                 if token != lease.token and record["identity"] == lease.identity:
                     raise RuntimeError("one owner cannot hold nested host memory leases")
@@ -788,7 +1022,8 @@ class HostMemoryGate:
             if not required_bytes or shrinking:
                 state["leases"][lease.token] = dict(identity=lease.identity,
                     future_bytes=required_bytes,peak_future_bytes=max(required_bytes,
-                        previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label)
+                        previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label,
+                    registration_token=self.registration_token)
                 self._write(state)
                 self._retired_tokens.clear()
                 lease.required_bytes,lease.total_bytes = required_bytes,required_bytes
@@ -803,6 +1038,7 @@ class HostMemoryGate:
                     automatic_reserve=self.automatic_reserve,
                     materialized_credit_bytes=lease.materialized_credit_bytes,
                     future_new_allocations=True,shared_rss_admission=False,phase=phase,
+                    task_memory=None,task_pss_admission=False,task_budget_is_cgroup_hard_limit=False,
                     pressure_constraints=[],shrinking_or_zero=True,
                     pressure_check_performed=False,
                     pressure_check_skipped_reason="zero_or_nonincreasing_future_budget")
@@ -818,23 +1054,39 @@ class HostMemoryGate:
                 lease.closed = True
                 raise HostMemoryRequestTooLarge(required_bytes,capacity)
             pressures = []
-            project_scope_seen = False
             for constraint in constraints:
                 maximum = int(constraint["limit_bytes"])
-                # The first finite memory membership contains these workers.
-                # Wider ancestors/system RAM also contain unrelated cgroups;
-                # their current usage must be compared with their own limits,
-                # not the project's smaller 200/250 GiB budget.
-                if constraint["scope"].startswith("cgroup") and not project_scope_seen:
-                    maximum = min(self.limit_bytes,maximum)
-                    project_scope_seen = True
+                # Every shared ancestor is compared with its own actual max,
+                # never with this task's smaller proportional-memory budget.
                 pressures.append(dict(constraint,capacity_bytes=maximum-self.reserve_bytes,
                     projected_bytes=int(constraint["effective_current_bytes"])+future))
-            available = min(capacity-others_future,*[
+            available = min([capacity-others_future]+[
                 c["capacity_bytes"]-c["effective_current_bytes"]-others_future for c in pressures])
-            # All increases check freshly observed constraints and every other
-            # owner's future budget. No cached endpoint can admit new bytes.
-            if future > capacity or any(c["projected_bytes"]>c["capacity_bytes"] for c in pressures):
+            # All increases check freshly observed task PSS, every actual
+            # node constraint and every other owner's future budget. No
+            # cached endpoint can admit new bytes.
+            for token,record in state["leases"].items():
+                if not any(owner["identity"]==record["identity"] and not owner["closed"]
+                           for owner in state["owners"].values()):
+                    state["owners"]["legacy:"+token] = dict(identity=record["identity"],
+                        descendants=[],closed=False)
+            try:
+                pss_started = time.perf_counter()
+                self._pss_samples += 1
+                task = _task_memory_snapshot(_task_processes(state["owners"]))
+            except RuntimeError as error:
+                self._pss_unverified += 1
+                state["leases"].pop(lease.token,None)
+                self._write(state);lease.closed = True
+                raise HostMemoryDeferred(required_bytes,total_required_bytes=future,
+                    reason="task_pss_coverage_not_verified") from error
+            finally:
+                self._pss_host_seconds += time.perf_counter()-pss_started
+            self._last_task_memory = copy.deepcopy(task)
+            task_available = self.limit_bytes-self.reserve_bytes-task["pss_bytes"]-others_future
+            available = min(available,task_available)
+            if (task["pss_bytes"]+future>self.limit_bytes-self.reserve_bytes
+                    or any(c["projected_bytes"]>c["capacity_bytes"] for c in pressures)):
                 state["leases"].pop(lease.token,None)
                 self._write(state)
                 lease.closed = True
@@ -842,7 +1094,8 @@ class HostMemoryGate:
                     available_bytes=available,reason="live_usage_and_future_leases")
             state["leases"][lease.token] = dict(identity=lease.identity,
                 future_bytes=required_bytes,peak_future_bytes=max(required_bytes,
-                    previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label)
+                    previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label,
+                registration_token=self.registration_token)
             self._write(state)
             self._retired_tokens.clear()
             lease.required_bytes,lease.total_bytes = required_bytes,required_bytes
@@ -855,6 +1108,7 @@ class HostMemoryGate:
                 automatic_reserve=self.automatic_reserve,
                 materialized_credit_bytes=lease.materialized_credit_bytes,
                 future_new_allocations=True,shared_rss_admission=False,phase=phase,
+                task_memory=task,task_pss_admission=True,task_budget_is_cgroup_hard_limit=False,
                 pressure_constraints=pressures,shrinking_or_zero=False,
                 pressure_check_performed=True,pressure_check_skipped_reason=None)
 
