@@ -41,6 +41,32 @@ def test_binary_projects_burdens_only_and_matches_full_covariance(monkeypatch):
         "STAAR-B(1,25)","STAAR-B(1,1)","STAAR-B"}
 
 
+@pytest.mark.parametrize('layout', ['c', 'f'])
+def test_bounded_validation_preserves_complete_binary_probabilities_and_source(layout, monkeypatch):
+    """Run the actual burden/projection/selective SPA path with bounded checks."""
+    from fudan_wgs_toolkit import statistics, tensor_validation
+    prepared, g, f, a = fixture()
+    if layout == 'f':
+        g = g.T.contiguous().T
+    before = g.clone()
+    stamp = (g.stride(), g._version, g.untyped_storage().data_ptr())
+    expected, expected_diagnostics = staar_binary_phewas(prepared.model, g, f, a,
+        ['a', 'b'], spa_model=prepared.spa_model, p_filter_cutoff=1, return_diagnostics=True)
+    checked = []
+    def bounded(value):
+        checked.append(tuple(value.shape))
+        return tensor_validation._all_finite_blocked(value, 13)
+    monkeypatch.setattr(statistics, 'tensor_all_finite', bounded)
+    actual, diagnostic = staar_binary_phewas(prepared.model, g, f, a,
+        ['a', 'b'], spa_model=prepared.spa_model, p_filter_cutoff=1, return_diagnostics=True)
+    assert tuple(g.shape) in checked
+    assert actual == expected
+    for field in ('pvalues', 'nominal_pvalues', 'spa_selected'):
+        torch.testing.assert_close(diagnostic[field], expected_diagnostics[field], rtol=0, atol=0)
+    torch.testing.assert_close(g, before, rtol=0, atol=0)
+    assert (g.stride(), g._version, g.untyped_storage().data_ptr()) == stamp
+
+
 def test_selective_spa_matches_mature_binary_wrapper_when_all_selected():
     prepared,g,f,a=fixture();spa=prepared.spa_model
     expected=association_binary_spa(g,f,spa.scaled_residuals,spa.fitted_probability,

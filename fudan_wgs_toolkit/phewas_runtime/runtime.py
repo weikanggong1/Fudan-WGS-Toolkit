@@ -534,6 +534,36 @@ def _binary_gene_workspace_new_bytes(n, m, q, annotations, *, resident_genotype=
             + weights_and_selection + projections_and_covariance + 256*2**20)
 
 
+def _binary_single_spa_workspace_new_bytes(n, m, q, *, variant_tile_size=512):
+    """NEW statistical SPA storage, separate from fitted sidecar admission.
+
+    Only one selected variant tile is live. Its FP32 gather, original FP64
+    columns, projected/scaled columns, active-column gathers and Bernoulli
+    cumulant/root/tail temporaries are covered by 24 FP64 sample slabs. G,
+    ordinary score/variance vectors and the fitted SPA model are already owned
+    or admitted by their respective caller/repository. The original 512-column
+    algorithm is retained; no probability, precision or scientific filter changes.
+    """
+    width = min(m, variant_tile_size)
+    return (4*n*width + 24*8*n*width + 64*q*width
+            + 512*width + 256*2**20)
+
+
+@contextmanager
+def _binary_single_spa_acquire(repository, broker, trait_index, *, n, m, q):
+    """Evict cold owned state before loading and running selected Single SPA.
+
+    The binary kernel invokes this factory only for a nonempty selected set.
+    A workspace lease surrounds sidecar loading and the complete correction,
+    so fitted-source/projection admission cannot consume statistical headroom.
+    """
+    required = _binary_single_spa_workspace_new_bytes(n, m, q)
+    with _gene_workspace_scope(repository, broker, required) as workspace:
+        with repository.acquire_spa(trait_index, str(broker.device)) as sidecar:
+            workspace.ensure_free(phase='single_binary_spa')
+            yield sidecar
+
+
 def _prepare_shared_gene_device(pipeline, indices, broker, phred, names):
     """Keep one small cohort/mask on device, preserving the original F layout.
 
@@ -1109,7 +1139,9 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                                     def correction(index, model, genotype, score, variance):
                                         from ..binary import binary_single_phewas
                                         return binary_single_phewas(model, genotype,
-                                            spa_acquire=lambda: repository.acquire_spa(tile[index]['trait_index'], str(broker.device)),
+                                            spa_acquire=lambda: _binary_single_spa_acquire(
+                                                repository, broker, tile[index]['trait_index'],
+                                                n=model.n, m=genotype.shape[1], q=model.x.shape[1]),
                                             normal_score=score, normal_variance=variance,
                                             p_filter_cutoff=options.p_filter_cutoff,
                                             tol=options.spa_tol, max_iter=options.spa_max_iter)
@@ -1408,6 +1440,11 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                         if model.family == 'binomial':
                                             from ..binary import prepare_binary_burdens, staar_binary_phewas
                                             if burdens is None:
+                                                # Model-tile admission precedes binding/checking its
+                                                # fitted states. Recheck the remaining owner budget at
+                                                # the actual burden allocation boundary; G is already
+                                                # resident and never credited as free storage.
+                                                workspace.ensure_free(phase='gene_binary_burden_prepare')
                                                 with p.profiler.measure('gene_binary_shared_burdens', gpu=True):
                                                     burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
                                                         prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,

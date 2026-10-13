@@ -324,7 +324,7 @@ def test_adaptive_cache_caps_use_live_available_and_leave_reserve(tmp_path, monk
     with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
             device='cuda:0', memory_limit_gib=1000/2**30, memory_reserve_bytes=100,
             device_cache_bytes=1000, device_cache_live_fraction=.25) as broker:
-        # min(free + reusable - reserve, process cap - allocated) = 500.
+        # min(free + reusable, process cap - allocated) - reserve = 500.
         assert broker.metrics['gpu_csr_cache_limit_bytes'] == 125
         assert broker.metrics['gpu_csr_cache_configured_limit_bytes'] == 1000
         with broker.raw_state_cache(1000, live_fraction=.5):
@@ -333,6 +333,24 @@ def test_adaptive_cache_caps_use_live_available_and_leave_reserve(tmp_path, monk
         monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 200)
         with broker.raw_state_cache(1000):
             assert broker.metrics['raw_state_cache_limit_bytes'] == 0
+
+
+def test_smaller_process_cap_retains_reserve_for_raw_cache_and_new_genotypes(tmp_path, monkeypatch):
+    raw = fixture_states()
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (1800, 2000))
+    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 200)
+    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 200)
+    with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
+            device='cuda:0', memory_limit_gib=1000/2**30, memory_reserve_bytes=100,
+            device_cache_bytes=1000, device_cache_live_fraction=.25) as broker:
+        assert broker._live_available_bytes() == 700
+        assert broker.metrics['gpu_csr_cache_limit_bytes'] == 175
+        with broker.raw_state_cache(1000, live_fraction=.5):
+            assert broker.metrics['raw_state_cache_limit_bytes'] == 350
+        broker._guard(700)
+        with pytest.raises(MemoryError, match='live CUDA budget'):
+            broker._guard(701)
 
 
 def test_retiring_raw_cache_does_not_credit_active_external_storage(tmp_path, monkeypatch):

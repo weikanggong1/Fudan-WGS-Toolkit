@@ -9,6 +9,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import fudan_wgs_toolkit.tensor_validation as validation
 import fudan_wgs_toolkit.null_model as gaussian_module
 import fudan_wgs_toolkit.binary_null as binary_module
+import fudan_wgs_toolkit.statistics as statistics_module
 from fudan_wgs_toolkit.null_model import GaussianNullModel, KinshipSpectrum
 from fudan_wgs_toolkit.binary_null import BinaryNullModel
 
@@ -178,6 +179,29 @@ def test_cpu_public_entry_keeps_single_established_check(monkeypatch):
     value[-1, -1] = float("nan")
     assert validation.tensor_all_finite(value) is False
     assert len(calls) == 2 and calls[1] is value
+
+
+@pytest.mark.parametrize('layout', ['c', 'f', 'strided'])
+def test_statistics_validation_scans_every_block_and_rejects_last_nonfinite(layout, monkeypatch):
+    value = matrix_view(layout)
+    calls = []
+    original = torch.isfinite
+    def bounded(tensor):
+        return validation._all_finite_blocked(tensor, 13)
+    def observed(block):
+        assert block.numel() <= 13
+        assert block.untyped_storage().data_ptr() == value.untyped_storage().data_ptr()
+        calls.append(block.numel())
+        return original(block)
+    monkeypatch.setattr(statistics_module, 'tensor_all_finite', bounded)
+    monkeypatch.setattr(torch, 'isfinite', observed)
+    statistics_module._finite(value, 'genotype')
+    assert sum(calls) == value.numel()
+    calls.clear()
+    value[-1, -1] = float('nan')
+    with pytest.raises(ValueError, match='genotype must contain only finite values'):
+        statistics_module._finite(value, 'genotype')
+    assert sum(calls) == value.numel()
 
 
 @pytest.mark.parametrize("shape,element_size", [((345_967, 4_999), 4), ((2,), 4), ((187,), 4),

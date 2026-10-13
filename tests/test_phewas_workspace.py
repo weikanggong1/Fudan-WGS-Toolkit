@@ -68,6 +68,23 @@ def test_repository_none_policy_matches_live_reserve_and_preserves_cap(monkeypat
             repository._admit('cuda:0', extra_bytes=expected['available_bytes']+1)
 
 
+def test_smaller_process_cap_keeps_reserve_by_evicting_only_cold_state(monkeypatch):
+    repository = ModelRepository([], workspace_bytes=0)
+    repository.models[(0, 'cuda:0')] = entry(200)
+    repository.models[(1, 'cuda:0')] = entry(100)
+    repository.pinned[(0, 'cuda:0')] = 1
+    simulated_cuda(monkeypatch, repository, total=1000)
+    with repository.memory_policy('cuda:0', limit_bytes=500, reserve_bytes=100):
+        # Physical free space is ample, but keeping the cold 100-byte model
+        # would consume the reserve inside the smaller process cap.
+        repository._admit('cuda:0', extra_bytes=200)
+        assert list(repository.models) == [(0, 'cuda:0')]
+        assert repository.evictions == 1
+        assert repository.pinned[(0, 'cuda:0')] == 1
+        with pytest.raises(MemoryError, match='pinned states are retained'):
+            repository._admit('cuda:0', extra_bytes=201)
+
+
 @pytest.mark.parametrize('sparse', [False, True])
 def test_binary_derivation_estimates_real_precision_and_projection_peak(sparse):
     from fudan_wgs_toolkit.phewas_storage import _binary_derivation_peak_bytes

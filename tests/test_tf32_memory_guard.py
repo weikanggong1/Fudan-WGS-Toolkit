@@ -25,7 +25,7 @@ def test_vector_layout_and_zero_k_estimates():
 
 @pytest.mark.parametrize('cap,live,binding',[(50,60,'process_cap'),(70,60,'live_free'),(60,60,'both'),(-1,60,'process_cap'),(60,-1,'live_free')])
 def test_live_shared_device_and_process_budget_bind_independently(cap,live,binding):
-    d=tf32._product_workspace_availability(allocated=100,reserved=120,free=live-10,limit=100+cap,reserve=10)
+    d=tf32._product_workspace_availability(allocated=100,reserved=120,free=live-10,limit=100+cap+10,reserve=10)
     assert d['binding']==binding and d['available_bytes']==max(0,min(cap,live))
     assert d['cap_available_bytes']==cap and d['live_available_bytes']==live
 
@@ -59,7 +59,7 @@ def test_invalid_live_reserve_rejected(reserve):
         tf32.configure_tf32(memory_reserve_bytes=reserve)
 
 
-def test_configured_live_reserve_reaches_guard_without_reducing_process_cap(monkeypatch):
+def test_configured_reserve_reaches_both_live_and_process_guard(monkeypatch):
     monkeypatch.setattr(tf32, '_memory_limit_bytes', tf32._memory_limit_bytes)
     monkeypatch.setattr(tf32, '_memory_reserve_bytes', tf32._memory_reserve_bytes)
     configured=tf32.configure_tf32(memory_limit_gib=80,memory_reserve_bytes=512)
@@ -73,7 +73,26 @@ def test_configured_live_reserve_reaches_guard_without_reducing_process_cap(monk
         tf32._guard_product_workspace(left,right,mode='tf32')
     snapshot=tf32.execution_metadata()['tf32_memory_guard']['last_rejection']
     assert configured['tf32_memory_reserve_bytes']==snapshot['reserve_bytes']==512
-    assert snapshot['cap_available_bytes']==80*2**30-100
+    assert snapshot['cap_available_bytes']==80*2**30-100-512
+
+
+@pytest.mark.parametrize('unused_cache',[0,10000])
+def test_process_reserve_is_preserved_even_with_idle_device_and_owned_cache(monkeypatch,unused_cache):
+    # Output fits the raw cap, but would leave only 15 bytes of a 16-byte
+    # reserve. An idle device or a large reusable cache cannot override it.
+    monkeypatch.setattr(tf32,'_memory_limit_bytes',100+16+16-1)
+    monkeypatch.setattr(tf32,'_memory_reserve_bytes',16)
+    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:100)
+    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:100+unused_cache)
+    monkeypatch.setattr(torch.cuda,'get_allocator_backend',lambda:'native',raising=False)
+    monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
+    monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(10**9,80*2**30))
+    left=SimpleNamespace(shape=(2,2),dtype=torch.float32,device='cuda:0')
+    right=SimpleNamespace(shape=(2,2),dtype=torch.float32,device='cuda:0')
+    with pytest.raises(MemoryError,match='binding=process_cap'):
+        tf32._guard_product_workspace(left,right,mode='tf32')
+    snapshot=tf32.execution_metadata()['tf32_memory_guard']['last_rejection']
+    assert snapshot['required_bytes']==16 and snapshot['available_bytes']==15
 
 
 def test_available_ignores_negative_unused_reservation():

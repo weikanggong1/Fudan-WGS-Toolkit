@@ -374,7 +374,7 @@ class SharedStateBroker:
         allocated = torch.cuda.memory_allocated(self.device)
         unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
         cap = int(total) if self._limit is None else min(int(total), self._limit)
-        return max(0, min(int(free)+unused-self._reserve, cap-allocated))
+        return max(0, min(int(free)+unused, cap-allocated)-self._reserve)
 
     @contextmanager
     def raw_state_cache(self, capacity_bytes, *, live_fraction=.25):
@@ -428,7 +428,7 @@ class SharedStateBroker:
                 allocated = torch.cuda.memory_allocated(self.device)
                 unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
                 free, _ = torch.cuda.mem_get_info(self.device)
-                if ((self._limit is None or allocated+required <= self._limit)
+                if ((self._limit is None or allocated+required+self._reserve <= self._limit)
                         and required <= max(0, free+unused-self._reserve)):
                     break
                 if self._raw_sources:
@@ -438,7 +438,7 @@ class SharedStateBroker:
             allocated = torch.cuda.memory_allocated(self.device)
             unused = torch.cuda.memory_reserved(self.device) - allocated
             free, _ = torch.cuda.mem_get_info(self.device)
-            if ((self._limit is not None and allocated + required > self._limit)
+            if ((self._limit is not None and allocated + required + self._reserve > self._limit)
                     or required > max(0, free + unused - self._reserve)):
                 raise MemoryError('shared six-state workspace exceeds live CUDA budget')
 

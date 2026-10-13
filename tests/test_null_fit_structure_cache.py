@@ -232,8 +232,13 @@ class TestFitStructureCache(unittest.TestCase):
         guard_cuda_workspace(230, 'cuda:0')
         with self.assertRaisesRegex(MemoryError, 'available 230'):
             guard_cuda_workspace(231, 'cuda:0', context='test structure')
-        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 490)
+        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 470)
         assert available_cuda_bytes('cuda:0') == 10
+        guard_cuda_workspace(10, 'cuda:0')
+        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 490)
+        assert available_cuda_bytes('cuda:0') == 0
+        with self.assertRaisesRegex(MemoryError, 'available 0'):
+            guard_cuda_workspace(1, 'cuda:0', context='reserved process capacity')
 
     def test_modified_design_is_not_reused_or_evicted_during_active_lease(self):
         ids = np.arange(8).astype(str)

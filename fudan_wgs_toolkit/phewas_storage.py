@@ -923,7 +923,10 @@ class ModelRepository:
             unused = max(0, torch.cuda.memory_reserved(device)-allocated)
             limit = self._memory_policies.get(device, (None, 0))[0]
             cap = int(total) if limit is None else min(int(total), limit)
-            available = max(0, min(int(free)+unused-reserve, cap-allocated))
+            # Keep the reserve inside both the physical and process ceilings.
+            # Subtracting it only from driver free space lets a smaller
+            # process allocator cap be filled completely by planned tensors.
+            available = max(0, min(int(free)+unused, cap-allocated)-reserve)
             if required <= available:
                 return
             if self._evict_one(device=device, protect=protect):

@@ -466,7 +466,11 @@ def prepare_binary_burdens(model, genotype, maf, annotations=None, names=None, *
         _finite(source, "genotype")
         g = source.to(dtype=dtype) if count == source.shape[1] else source[:, selected].to(dtype=dtype)
         burdens = matmul(g, weights, mode=mode)
-        cmac = g.sum(dtype=torch.float64)
+        # Scalar metadata uses the same bounded FP64 reduction as preparation.
+        # A full native genotype must not request an N-by-M FP64 reduction
+        # temporary outside the burden/SPA workspace admission.
+        from .pipeline import _cmac_scalar_sum
+        cmac = _cmac_scalar_sum(g)
     else:
         burdens = torch.zeros((model.n, weights.shape[1]), dtype=dtype, device=model.device)
         for start in range(0, count, variant_tile_size):

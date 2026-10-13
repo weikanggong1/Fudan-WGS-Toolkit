@@ -76,8 +76,10 @@ def validate_split_k(split_k):
 def configure_tf32(*,memory_limit_gib=20,memory_reserve_bytes=256*2**20,split_k=0,**obsolete):
     """Configure native products; preflight is not an allocator guarantee.
 
-    memory_limit_gib bounds estimated process allocations. Only split_k=0 is
-    accepted. Old component, fusion and tile controls are intentionally rejected.
+    memory_limit_gib bounds estimated process allocations including the
+    configured reserve. New products must leave that reserve inside both the
+    process cap and the live device capacity. Only split_k=0 is accepted. Old
+    component, fusion and tile controls are intentionally rejected.
     """
     global _memory_limit_bytes,_memory_reserve_bytes
     if obsolete:raise TypeError('Obsolete TF32 component/fusion/tile settings are unsupported')
@@ -122,8 +124,14 @@ def _estimated_product_workspace(left_shape,right_shape,*,mode,left_dtype,right_
 
 
 def _product_workspace_availability(*,allocated,reserved,free,limit,reserve):
+    """Leave reserve inside both the process budget and live device capacity.
+
+    Cached unused blocks count as reusable capacity, never as live allocation
+    credit. Even a physically idle device must not let a product consume the
+    reserve within a smaller configured process cap.
+    """
     reusable=max(int(reserved)-int(allocated),0)
-    cap=int(limit)-int(allocated);live=int(free)+reusable-int(reserve)
+    cap=int(limit)-int(allocated)-int(reserve);live=int(free)+reusable-int(reserve)
     return dict(allocated_bytes=int(allocated),reserved_bytes=int(reserved),cuda_free_bytes=int(free),
         reusable_reserved_bytes=reusable,process_limit_bytes=int(limit),reserve_bytes=int(reserve),
         cap_available_bytes=cap,live_available_bytes=live,
@@ -149,14 +157,15 @@ def _allocator_backend():
 
 
 def _owned_cache_sufficient(allocated,reserved,required,*,limit,reserve):
-    """Byte-valued sufficient condition for the unchanged live/cap guard.
+    """Byte-valued sufficient condition for the reserve-aware live/cap guard.
 
     For any nonnegative fresh CUDA free value, owned unused cache minus reserve
     already covers required. This is a preflight, not a fragmentation or
     concurrent-allocation guarantee; actual allocation errors still propagate.
     """
     unused=max(int(reserved)-int(allocated),0)
-    return unused>=int(required)+int(reserve) and int(allocated)+int(required)<=int(limit)
+    return (unused>=int(required)+int(reserve)
+            and int(allocated)+int(required)+int(reserve)<=int(limit))
 
 
 def _guard_product_workspace(left,right,*,mode):
@@ -343,7 +352,7 @@ def execution_metadata(*,reset=False):
             'allocator_backend_check_counts':dict(_memory_guard_backend_counts),
             'last_owned_cache_pass':_memory_guard_last_owned_cache_pass,
             'last_rejection':_memory_guard_last_rejection,'component_workspace_bytes':0,
-            'policy':'Fresh native owned cache >= required + reserve AND allocated + required <= process cap; otherwise fresh CUDA free plus unused reserved minus reserve and unchanged cap',
+            'policy':'Fresh native owned cache >= required + reserve AND allocated + required + reserve <= process cap; otherwise min(process cap minus allocated minus reserve, fresh CUDA free plus unused reserved minus reserve)',
             'counter_scope':'nonzero estimated workspace checks; owned passes + CUDA free queries = total checks after completed checks',
             'timing_scope':'query timers measure only fresh mem_get_info route, including device-context entry/exit; allocator timer measures fresh allocated/reserved/backend; guard timer includes both routes. Nested observations, not additive to end-to-end wall.',
             'limitation':'Concurrent allocations/fragmentation can still OOM; preflight is not a reservation'}}

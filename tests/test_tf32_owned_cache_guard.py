@@ -36,7 +36,7 @@ def snapshots(monkeypatch,allocated,reserved,free=30*2**30):
 ])
 def test_byte_boundaries_keep_cap_and_fallback(monkeypatch,cache_delta,cap_delta,owned,rejected):
     required=4*2*3;allocated=100
-    tf32._memory_limit_bytes=allocated+required+cap_delta
+    tf32._memory_limit_bytes=allocated+required+tf32._memory_reserve_bytes+cap_delta
     calls=snapshots(monkeypatch,allocated,
         allocated+required+tf32._memory_reserve_bytes+cache_delta)
     if rejected:
@@ -131,9 +131,19 @@ def test_no_workspace_check_for_zero_output_and_metrics_reset(monkeypatch):
 @pytest.mark.parametrize('required',[1,24,1048576])
 def test_owned_condition_implies_the_original_guard_for_any_nonnegative_free(required):
     reserve=256*2**20;allocated=10*2**20
-    reserved=allocated+required+reserve;limit=allocated+required
+    reserved=allocated+required+reserve;limit=allocated+required+reserve
     assert tf32._owned_cache_sufficient(allocated,reserved,required,limit=limit,reserve=reserve)
     for free in (0,1,128*2**20,10*2**30):
         original=tf32._product_workspace_availability(allocated=allocated,reserved=reserved,
             free=free,limit=limit,reserve=reserve)
         assert original['available_bytes']>=required
+
+
+@pytest.mark.parametrize('reserve',[1,256*2**20,2*2**30])
+def test_owned_cache_cannot_consume_process_reserve(reserve):
+    required=24;allocated=100
+    reserved=allocated+required+reserve+2**30
+    assert not tf32._owned_cache_sufficient(allocated,reserved,required,
+        limit=allocated+required+reserve-1,reserve=reserve)
+    assert tf32._owned_cache_sufficient(allocated,reserved,required,
+        limit=allocated+required+reserve,reserve=reserve)

@@ -14,6 +14,7 @@ from typing import Sequence
 import torch
 
 from .tf32 import matmul, validate_mode
+from .tensor_validation import tensor_all_finite
 
 from ._precision_eigen import record_gpu_eigen_route, record_ordered_tail
 
@@ -116,7 +117,10 @@ def _double(value, *, device=None) -> torch.Tensor:
 
 
 def _finite(value: torch.Tensor, name: str) -> None:
-    if not bool(torch.isfinite(value).all()):
+    # A samples-by-variants CUDA matrix can occupy several GiB. The mature
+    # blocked validator preserves its strides and checks every value without
+    # materializing another full abs/Boolean matrix.
+    if not tensor_all_finite(value):
         raise ValueError(f"{name} must contain only finite values")
 
 
