@@ -1,0 +1,241 @@
+{
+  "additional_original_R_outlier_check": {
+    "all_128_traits_independently_R_assessed": false,
+    "baseline_vs_R": {
+      "classification_errors": 0,
+      "errors_above_tolerance": 15,
+      "finite_pairs": 15,
+      "max_delta_log10p": 0.05237664426059219,
+      "nan_pairs": 0,
+      "pairs": 15,
+      "significant_errors": 0,
+      "significant_finite_pairs": 0,
+      "significant_max_delta_log10p": 0.0,
+      "significant_pairs": 0,
+      "status": "requires_review",
+      "zero_pairs": 0
+    },
+    "candidate_vs_R": {
+      "classification_errors": 0,
+      "errors_above_tolerance": 0,
+      "finite_pairs": 15,
+      "max_delta_log10p": 8.801420659931836e-05,
+      "nan_pairs": 0,
+      "pairs": 15,
+      "significant_errors": 0,
+      "significant_finite_pairs": 0,
+      "significant_max_delta_log10p": 0.0,
+      "significant_pairs": 0,
+      "status": "passed",
+      "zero_pairs": 0
+    },
+    "cpu_threads": 2,
+    "mask_variants": 9950,
+    "returncode": 0,
+    "sampled_pss_highwater_gib": 1.3311386108398438,
+    "samples": 343034,
+    "selected_traits": 3,
+    "selection": "Three distinct actual worst ncRNA old/new differences",
+    "status": "passed",
+    "wall_seconds": 40.17795467376709
+  },
+  "components": {
+    "actual_cuda": {
+      "failed": 0,
+      "passed": 24,
+      "skipped": 0,
+      "wall_seconds": 7.78
+    },
+    "cpu": {
+      "passed": 2951,
+      "skipped": 188,
+      "subtests_passed": 204,
+      "wall_seconds": 458.06
+    }
+  },
+  "date": "2026-10-13",
+  "missense_summary_assembly": {
+    "disruptive_association_independently_R_assessed": false,
+    "final_CSV_matches_assembly": true,
+    "input_probability_pairs": 128,
+    "maximum_R_delta_log10p": 1.9984014443252818e-15,
+    "scope": "Assembly only using identical saved elementary probabilities",
+    "status": "passed",
+    "summary_values": 384
+  },
+  "official_precision_fixed_models": {
+    "additional_author_wrapper_comparisons_per_mode": 120,
+    "annotation_weight_branch_assessed": false,
+    "approved_solver_difference": {
+      "count": 1,
+      "independent_original_formula_R_delta_log10p": 2.361906226155952e-10,
+      "original_official_delta_log10p": 2.793320326177988,
+      "original_official_difference_preserved": true,
+      "reference_solver_replaced": true,
+      "root_maximum_absolute_residual": 1.16147980122605e-09
+    },
+    "direct_comparisons_including_wrapper_duplicates": {
+      "classification_errors": 0,
+      "errors_above_tolerance": 0,
+      "finite_pairs": 329,
+      "max_delta_log10p": 0.0001200677764128244,
+      "nan_pairs": 0,
+      "pairs": 329,
+      "significant_errors": 0,
+      "significant_finite_pairs": 26,
+      "significant_max_delta_log10p": 1.183261923309864e-05,
+      "significant_pairs": 26,
+      "zero_pairs": 0
+    },
+    "direct_core_values_passed": 209,
+    "direct_core_values_with_solver_difference": 1,
+    "gene_mask_variants": [
+      8,
+      158,
+      60,
+      426,
+      9950
+    ],
+    "gene_variant_type": "variant",
+    "gpu_peak_allocated_gib": 3.5462722778320312,
+    "gpu_peak_reserved_gib": 4.7734375,
+    "individual_variants": 10,
+    "prefill_modes": [
+      false,
+      true
+    ],
+    "prefill_probability_difference": 0.0,
+    "primary_probability_values_per_mode": 210,
+    "sampled_pss_highwater_gib": 3.909809112548828,
+    "samples": 343034,
+    "status": "passed_with_declared_solver_exception",
+    "timing_scope": "Two-mode fixed MatrixMarket precision replay; not prepared-cache chromosome end-to-end or an R/GPU timing ratio",
+    "traits": 6,
+    "wall_seconds": 88.8954164981842
+  },
+  "prepared_cache_bounded_end_to_end": {
+    "all_metadata_cmac_order_and_nonfinite_states_verified": true,
+    "baseline_seconds": 486.93130050599575,
+    "baseline_source_sha256": "827b8ea4fe6a6d6f793799e167acf95e836e5d5395905cfc9b5f3183937c18f1",
+    "candidate_seconds": 376.0519920978695,
+    "coding_mask_variants_min_max": [
+      8,
+      158
+    ],
+    "cpu_threads": 5,
+    "genetic_frame_read_calls_per_ncrna": {
+      "baseline": 60,
+      "candidate": 60
+    },
+    "gpu_budget_gib": 76,
+    "gpu_peak_allocated_gib": {
+      "baseline": 7.511,
+      "candidate": 8.163
+    },
+    "gpu_peak_reserved_gib": {
+      "baseline": 8.676,
+      "candidate": 10.752
+    },
+    "host_budget_gib": 20,
+    "jobs": 2,
+    "logical_variant_column_reads_per_ncrna": {
+      "baseline": 19900,
+      "candidate": 9950
+    },
+    "mask_panel_calls_per_ncrna": {
+      "baseline": 40,
+      "candidate": 20
+    },
+    "ncrna_actual_variants": 9950,
+    "ncrna_candidate_variants": 16069,
+    "old_new_probability_comparison": {
+      "classification_errors": 0,
+      "errors_above_tolerance": 512,
+      "finite_logp_pairs": 0,
+      "finite_p_pairs": 10752,
+      "infinite_logp_pairs": 0,
+      "logp_pairs": 0,
+      "max_delta_log10p": 0.05235881468629122,
+      "nan_pairs": 0,
+      "p_pairs": 10752,
+      "significant_errors": 0,
+      "significant_finite_pairs": 550,
+      "significant_max_delta_log10p": 8.869665155675222e-07,
+      "status": "requires_review",
+      "zero_p_pairs": 0
+    },
+    "os_page_cache_controlled": false,
+    "per_call": [
+      {
+        "baseline_seconds": 65.50969098880887,
+        "candidate_seconds": 63.464299517683685,
+        "kind": "coding",
+        "repetition": 0
+      },
+      {
+        "baseline_seconds": 40.35373524110764,
+        "candidate_seconds": 39.5577971637249,
+        "kind": "coding",
+        "repetition": 1
+      },
+      {
+        "baseline_seconds": 153.22597237862647,
+        "candidate_seconds": 97.66614454705268,
+        "kind": "ncrna",
+        "repetition": 0
+      },
+      {
+        "baseline_seconds": 139.8408971549943,
+        "candidate_seconds": 85.32796581927687,
+        "kind": "ncrna",
+        "repetition": 1
+      }
+    ],
+    "physical_disk_traffic_assessed": false,
+    "repetitions": 2,
+    "sampled_pss_highwater_gib": {
+      "baseline": 5.322,
+      "candidate": 5.272
+    },
+    "samples": 343034,
+    "scope": "One original coding job with seven masks and one original ncRNA job; existing model loading, association, CSV write/readback and input verification included",
+    "speedup": 1.2948510066109935,
+    "stage_timings_additive": false,
+    "traits": 128
+  },
+  "references": {
+    "author_compatible_core": {
+      "commit": "51da5189456bb25e5e667360e1033c2fc9db6790",
+      "repository": "yuxinyuanqt/STAAR"
+    },
+    "author_compatible_pipeline": {
+      "commit": "0b12061f23f66556199494bc336fc40c793c3d09",
+      "repository": "yuxinyuanqt/STAARpipeline"
+    },
+    "executed_official_score_and_spa": {
+      "commit": "ed3e26f7fb4c5d70a765840d089e5863896ec081",
+      "files": [
+        "src/Individual_Score_Test_sp.cpp",
+        "src/Individual_Score_Test_SPA.cpp"
+      ],
+      "repository": "li-lab-genetics/STAARpipeline"
+    },
+    "official_interface": {
+      "commit": "7a2c49617b3791c35a20504e260c038c02a4c643",
+      "repository": "li-lab-genetics/STAARpipelinePheWAS"
+    }
+  },
+  "schema": "binary_bounded_validation_v1",
+  "scope_boundaries": {
+    "full_799_trait_end_to_end_assessed": false,
+    "full_annotation_selector_assessed": false,
+    "full_chromosome_end_to_end_assessed": false,
+    "independent_model_fitting_assessed": false,
+    "long_run_four_gpu_memory_assessed": false,
+    "models_refitted": false,
+    "new_genetic_cache_prepared": false,
+    "production_changed": false
+  },
+  "source_sha256": "cacef6df8e1a5ca933eb6be841273a3d217fd0461586337c50bc497e37dbb6cd",
+  "tolerance_delta_log10p": 0.001
+}

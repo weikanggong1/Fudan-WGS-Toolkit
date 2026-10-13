@@ -119,6 +119,260 @@ def binary_burden_score_covariance_batch(models, burdens, *, allocation_guard=No
         native_projection_batches=batches, admission_fallbacks=fallbacks)
 
 
+def binary_burden_diag_workspace(n, burdens, covariates, traits, *, sample_chunk_size=8192,
+                                 maximum_nnz=0):
+    """Bound NEW FP32 sample partials and small products; fitted state is resident.
+
+    This estimate contains no ``traits x samples x burdens`` or burden-by-burden
+    covariance. At most 32 independent traits are processed in one tile.
+    """
+    if type(sample_chunk_size) is not int or sample_chunk_size < 1:
+        raise ValueError('sample_chunk_size must be a positive integer')
+    if type(maximum_nnz) is not int or maximum_nnz < 0:
+        raise ValueError('maximum_nnz must be a nonnegative integer')
+    t = min(32, traits)
+    parts = (n+sample_chunk_size-1)//sample_chunk_size
+    nnz_parts = (maximum_nnz+sample_chunk_size-1)//sample_chunk_size
+    vector_layout = (4*t*n*(burdens+covariates)
+                     if burdens == 1 or covariates == 1 else 0)
+    return (4*parts*t*burdens*(2+covariates) + 4*nnz_parts*t*burdens
+            + 32*t*burdens*(2+covariates) + vector_layout + 120*t + 256*2**20)
+
+
+def _guard_binary_burden_diag_workspace(burdens, required):
+    """Admit all NEW sample partials before allocating their first tensor."""
+    if burdens.is_cuda:
+        from .tf32 import _guard_workspace
+        _guard_workspace(burdens.device, dict(required_bytes=required, cast_bytes=0,
+            layout_copy_allowance_bytes=0, output_bytes=required,
+            backend='binary_burden_diagonal_workspace'),
+            left_shape=burdens.shape, right_shape=(burdens.shape[0], 32))
+
+
+def _normal_fp32_burden_accuracy_required(model, burdens):
+    return (burdens.is_cuda and burdens.dtype == torch.float32
+            and model.matmul_mode == 'tf32' and not model.use_spa)
+
+
+def _native_burden_diagonal_supported(models, burdens):
+    if not (burdens.is_cuda and burdens.dtype == torch.float32 and not burdens.requires_grad):
+        return False
+    n, unused_b = burdens.shape
+    q = models[0].x.shape[1]
+    for model in models:
+        sx = model.precision_x if model.precision_x is not None else model.xw.T
+        precision = model.precision if model.precision is not None else model.fitted_probability
+        precision_supported = (precision.dtype == torch.float32
+            and precision.device == burdens.device and not precision.requires_grad
+            and ((precision.layout == torch.strided and precision.shape == (n,))
+                 or (precision.layout == torch.sparse_coo and precision.shape == (n, n)
+                     and precision.is_coalesced())))
+        if not (model.family == 'binomial' and model.n_pheno == 1
+                and model.matmul_mode == 'tf32' and not model.use_spa
+                and model.x.shape[1] == q and precision_supported and all(
+                    value.layout == torch.strided and value.dtype == torch.float32
+                    and value.shape == shape and value.device == burdens.device
+                    and not value.requires_grad for value, shape in (
+                        (sx, (n, q)),
+                        (model.scaled_residuals, (n,)),
+                        (model.fixed_effect_covariance, (q, q))))):
+            return False
+    return True
+
+
+def _try_burden_diagonal_products(models, burdens, *, allocation_guard, sample_chunk_size):
+    """Optional tile admission precedes every native partial allocation."""
+    from ._binary_burden_diag import diagonal_burden_products
+    n, b = burdens.shape
+    q = models[0].x.shape[1]
+    maximum_nnz = max((model.precision._nnz() for model in models
+        if model.precision is not None and model.precision.layout == torch.sparse_coo), default=0)
+    required = binary_burden_diag_workspace(n, b, q, len(models),
+        sample_chunk_size=sample_chunk_size, maximum_nnz=maximum_nnz)
+    try:
+        if allocation_guard is not None and allocation_guard(required) is False:
+            return None
+        _guard_binary_burden_diag_workspace(burdens, required)
+    except MemoryError:
+        return None
+    return diagonal_burden_products(models, burdens, sample_chunk_size=sample_chunk_size)
+
+
+def _accurate_independent_burden_workspace(model, burdens):
+    """Conservative NEW weighted/layout/cast space for one original model."""
+    n, b = burdens.shape
+    q = model.x.shape[1]
+    precision = model.precision
+    precision_bytes = 0
+    if precision is not None:
+        if precision.layout == torch.strided and precision.ndim == 2:
+            # Native dense TF32 products may need a contiguous precision copy;
+            # a dtype conversion is separately allowed before this layout copy.
+            precision_bytes = 4*precision.numel()
+            if precision.dtype != torch.float32:
+                precision_bytes += 4*precision.numel()
+        elif precision.layout != torch.strided:
+            # Sparse casts/coalescing/SPMM may own indices plus values. Count
+            # complete extra sparse source storage twice rather than an N*N.
+            values = precision.values() if precision.layout != torch.sparse_coo else precision._values()
+            if precision.layout == torch.sparse_coo:
+                index_bytes = precision._indices().numel()*precision._indices().element_size()
+            elif precision.layout in (torch.sparse_csr, torch.sparse_bsr):
+                index_bytes = (precision.crow_indices().numel()*precision.crow_indices().element_size()
+                               + precision.col_indices().numel()*precision.col_indices().element_size())
+            elif precision.layout in (torch.sparse_csc, torch.sparse_bsc):
+                index_bytes = (precision.ccol_indices().numel()*precision.ccol_indices().element_size()
+                               + precision.row_indices().numel()*precision.row_indices().element_size())
+            else:
+                raise ValueError('accurate independent burden fallback requires supported sparse precision storage')
+            precision_bytes = 2*(index_bytes+4*values.numel())
+    return (24*n*b + 16*n*q + 32*b*q + 8*q*q + 128*q
+            + precision_bytes + 256*2**20)
+
+
+def _accurate_independent_burden_products(model, burdens, *, allocation_guard):
+    """Keep original precision/long-H products with an accurate small C.
+
+    This independent fallback never constructs a burden-square covariance.
+    It admits weighted[N,B], source casts/layouts and its bounded tiny-C
+    projection before calling the mature supplied-precision implementation.
+    Failure to admit raises; it cannot silently return the old rounded C.
+    """
+    from types import SimpleNamespace
+    from ._binary_burden_diag import _ieee_covariance_projection
+    required = _accurate_independent_burden_workspace(model, burdens)
+    if allocation_guard is not None and allocation_guard(required) is False:
+        raise MemoryError('accurate independent binary burden workspace was not admitted')
+    _guard_binary_burden_diag_workspace(burdens, required)
+    g = weighted = cross = projected = covariance = covariance_model = score = variance = None
+    try:
+        g, mode = model._association_genotype(burdens, None)
+        weighted, cross = model._fitted_projection(g, mode)
+        covariance = model.fixed_effect_covariance.to(dtype=g.dtype)
+        if g.shape[1] == 1 or cross.shape[0] == 1:
+            from .tf32 import batched_matmul
+            projected = batched_matmul(cross.T[None, :, :], [covariance], mode='tf32')[0]
+        else:
+            covariance_model = SimpleNamespace(fixed_effect_covariance=covariance)
+            projected = _ieee_covariance_projection(cross[None, :, :], [covariance_model])[0]
+        variance = (g*weighted).sum(0)-(projected*cross.T).sum(-1)
+        score = matmul(g.T, model.scaled_residuals.to(dtype=g.dtype), mode=mode)
+        return score, variance
+    finally:
+        g = weighted = cross = projected = covariance = covariance_model = score = variance = None
+
+
+def binary_burden_score_variance_batch(models, burdens, *, allocation_guard=None,
+                                      sample_chunk_size=8192, trait_batch_size=32):
+    """Return ``score[traits, weights]`` and only ``diag(V)[traits, weights]``.
+
+    CUDA FP32 diagonal or coalesced COO precision uses independent sample/NNZ
+    chunks to expose GPU parallelism. Every COO entry, including off-diagonal
+    precision, is retained. IEEE FP32 diagonal sums avoid unused burden
+    products. The long fixed-effect cross projection retains native TF32,
+    while its small fitted covariance contraction uses ordinary IEEE FP32.
+    All reductions remain FP32: this does not reconstruct FP64 products.
+    Other CUDA normal FP32 sparse/dense precision uses an independently
+    admitted original weighted-genotype/long-cross product and the same
+    accurate small covariance contraction, without a burden-square matrix.
+    Rejected trait batches retry single-trait native work; a denied accurate
+    single-trait budget raises MemoryError. CPU/FP64/SPA controls retain their
+    mature full-covariance calculation and discard its unused off-diagonal
+    results.
+    The original full-covariance interface remains available independently.
+    """
+    models = tuple(models)
+    if not models:
+        raise ValueError('binary burden batches require at least one model')
+    if type(trait_batch_size) is not int or not 1 <= trait_batch_size <= 32:
+        raise ValueError('trait_batch_size must be an integer between 1 and 32')
+    if type(sample_chunk_size) is not int or sample_chunk_size < 1:
+        raise ValueError('sample_chunk_size must be a positive integer')
+    if not isinstance(burdens, torch.Tensor) or burdens.ndim != 2:
+        raise ValueError('burdens must be a samples-by-weights matrix')
+    n, b = burdens.shape
+    if any(model.n != n or model.device != burdens.device for model in models):
+        raise ValueError('burdens and fitted models must share the ordered sample dimension and device')
+    if any(_normal_fp32_burden_accuracy_required(model, burdens) for model in models):
+        for model in models:
+            if not _normal_fp32_burden_accuracy_required(model, burdens):
+                continue
+            sx = model.precision_x if model.precision_x is not None else model.xw.T
+            precision = model.precision if model.precision is not None else model.fitted_probability
+            if burdens.requires_grad or any(value.requires_grad for value in
+                    (sx, precision, model.scaled_residuals, model.fixed_effect_covariance)):
+                raise ValueError('normal FP32 binary burden products require inference tensors without gradients')
+    if not tensor_all_finite(burdens):
+        raise ValueError('burdens must be a finite samples-by-weights matrix')
+    scores, variances = [], []
+    counts = dict(native_projection_batches=0, admission_fallbacks=0,
+                  native_diagonal_batches=0, diagonal_admission_fallbacks=0,
+                  sample_chunks=0, split_projection_products=0,
+                  legacy_vector_cross_products=0, cuda_diagonal_kernel_launches=0,
+                  cpu_diagonal_oracle_batches=0, sparse_nnz_chunks=0,
+                  sparse_precision_products=0, sparse_nnz_terms=0,
+                  native_sparse_diagonal_batches=0,
+                  ieee_covariance_projection_batches=0,
+                  accurate_independent_projection_batches=0,
+                  independent_diagonal_retries=0)
+    def append_diagonal(result):
+        score, variance, execution = result
+        scores.extend(score.unbind(0))
+        variances.extend(variance.unbind(0))
+        counts['native_projection_batches'] += 1
+        counts['native_diagonal_batches'] += 1
+        counts['native_sparse_diagonal_batches'] += int(execution['sparse_precision_products'] > 0)
+        for key, value in execution.items():
+            counts[key] += value
+    for start in range(0, len(models), trait_batch_size):
+        tile = models[start:start+trait_batch_size]
+        native = _native_burden_diagonal_supported(tile, burdens)
+        result = (_try_burden_diagonal_products(tile, burdens,
+            allocation_guard=allocation_guard, sample_chunk_size=sample_chunk_size) if native else None)
+        if result is not None:
+            append_diagonal(result)
+            continue
+        if native:
+            counts['admission_fallbacks'] += 1
+            counts['diagonal_admission_fallbacks'] += 1
+        if not any(_normal_fp32_burden_accuracy_required(model, burdens) for model in tile):
+            # CPU/FP64/SPA controls retain the mature full-covariance contract.
+            score, covariance, execution = binary_burden_score_covariance_batch(
+                tile, burdens, allocation_guard=allocation_guard)
+            scores.extend(score.unbind(0))
+            variances.extend(covariance.diagonal(dim1=-2, dim2=-1).clone().unbind(0))
+            counts['native_projection_batches'] += execution['native_projection_batches']
+            counts['admission_fallbacks'] += execution['admission_fallbacks']
+            continue
+        # Different user-selected covariate dimensions and rejected optional
+        # trait stacks use one independently admitted original model at a time.
+        for model in tile:
+            if _native_burden_diagonal_supported((model,), burdens):
+                counts['independent_diagonal_retries'] += 1
+                result = _try_burden_diagonal_products((model,), burdens,
+                    allocation_guard=allocation_guard, sample_chunk_size=sample_chunk_size)
+                if result is None:
+                    raise MemoryError('accurate independent binary diagonal workspace was not admitted')
+                append_diagonal(result)
+            elif _normal_fp32_burden_accuracy_required(model, burdens):
+                score, variance = _accurate_independent_burden_products(model, burdens,
+                    allocation_guard=allocation_guard)
+                scores.append(score)
+                variances.append(variance)
+                counts['accurate_independent_projection_batches'] += 1
+                ieee_projection = int(burdens.is_cuda and model.x.shape[1] > 1 and b > 1)
+                counts['ieee_covariance_projection_batches'] += ieee_projection
+                counts['cuda_diagonal_kernel_launches'] += ieee_projection
+            else:
+                score, covariance, execution = binary_burden_score_covariance_batch(
+                    (model,), burdens, allocation_guard=allocation_guard)
+                scores.extend(score.unbind(0))
+                variances.extend(covariance.diagonal(dim1=-2, dim2=-1).clone().unbind(0))
+                counts['native_projection_batches'] += execution['native_projection_batches']
+                counts['admission_fallbacks'] += execution['admission_fallbacks']
+    return torch.stack(scores), torch.stack(variances), counts
+
+
 @dataclass
 class BinaryNullModel:
     sample_ids: np.ndarray

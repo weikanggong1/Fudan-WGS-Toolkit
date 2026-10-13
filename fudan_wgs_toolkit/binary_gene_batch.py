@@ -1,6 +1,6 @@
 """Bounded independent binary gene tiles with shared exact burden columns."""
 from __future__ import annotations
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, field
 import math
 import traceback
@@ -8,8 +8,10 @@ import numpy as np
 import torch
 
 from .binary import (PreparedBinaryBurdens, _BINARY_BURDEN_SEAL, _genotype_stamp,
-    _BinaryPreparedTileBinding, _BinaryPanelSource, staar_binary_phewas)
-from .binary_null import binary_burden_score_covariance_batch
+    _BinaryPreparedTileBinding, _BinaryPanelSource, staar_binary_phewas,
+    _validate_spa_sidecar, _spa_requested, _guard_exact_burden_workspace, binary_spa,
+    _unassessed_spa_result, _copy_spa_result)
+from .binary_null import binary_burden_score_variance_batch
 from .statistics import _double, _chi1_from_score, _cauchy_sf_tensor
 from .precision_audit import explicit_binary_spa_fp64
 
@@ -182,6 +184,106 @@ def _spa_combination_rows(values):
     return torch.where(torch.where(accepted, p, 0.).sum(1) > 0, result, 1.)
 
 
+def _selected_spa_batches(selected):
+    """Pack at most four fitted states and sixteen selected burden columns.
+
+    Traits with more than eight selected columns retain their mature solver
+    call. This avoids reloading a large selected sidecar across many chunks.
+    """
+    selected_pairs = torch.nonzero(selected, as_tuple=False).detach().cpu().tolist()
+    traits = {}
+    for trait, column in selected_pairs:
+        traits.setdefault(trait, []).append(column)
+    batch, width = [], 0
+    for trait, columns in traits.items():
+        if len(columns) > 8:
+            continue
+        if batch and (len(batch) == 4 or width+len(columns) > 16):
+            yield batch
+            batch, width = [], 0
+        batch.append((trait, columns))
+        width += len(columns)
+    if batch:
+        yield batch
+
+
+def _bounded_selected_spa(models, factories, prepared, cache, nominal, selected,
+        *, tol, max_iter, allocation_guard, workspace_release, measure, execution):
+    """Optional multi-state SPA; all original sidecar leases stay in scope.
+
+    A separate conservative reservation covers stacked FP64 projection and
+    the doubled upper/lower root width. Admission failure returns the affected
+    traits to the unchanged independent path before publishing any result.
+    """
+    completed = {}
+    execution.update(spa_trait_batches=0, spa_batched_traits=0,
+        spa_batched_columns=0, spa_combined_tail_batches=0,
+        spa_batch_admission_fallbacks=0)
+    if cache is None:
+        return completed
+    for batch in _selected_spa_batches(selected):
+        width = sum(len(columns) for _, columns in batch)
+        q = max(models[i].x.shape[1] for i, _ in batch)
+        # Forty-eight FP64 sample slabs cover the doubled tail root plus CGF,
+        # active gathers, projected columns and heterogeneous probabilities.
+        required = 48*8*prepared.burdens.shape[0]*width+128*q*width+256*2**20
+        admitted = False
+        try:
+            with measure('gene_binary_selected_spa_batch_admission'):
+                if allocation_guard is not None and allocation_guard(required) is False:
+                    execution['spa_batch_admission_fallbacks'] += 1
+                    continue
+                _guard_exact_burden_workspace(prepared.burdens.device, required)
+                admitted = True
+            with ExitStack() as owners:
+                sidecars = {}
+                for trait, _ in batch:
+                    sidecar = owners.enter_context(factories[trait]())
+                    _validate_spa_sidecar(models[trait], sidecar)
+                    sidecars[trait] = sidecar
+                with explicit_binary_spa_fp64(), measure('gene_binary_batched_selective_spa'):
+                    projections, probabilities, scores = [], [], []
+                    for trait, columns in batch:
+                        sidecar = sidecars[trait]
+                        index = torch.tensor(columns, dtype=torch.int64, device=nominal.device)
+                        exact = cache.get(prepared, index)
+                        scores.append(exact.T@sidecar.scaled_residuals)
+                        projections.append(exact-sidecar.projection_left@(sidecar.xw@exact))
+                        probabilities.append(sidecar.fitted_probability[:, None].expand(-1, len(columns)))
+                    state = binary_spa(torch.cat(scores), torch.cat(projections, dim=1),
+                        torch.cat(probabilities, dim=1), tol=tol, max_iter=max_iter,
+                        combine_tails=True)
+                    offset, outcomes = 0, {}
+                    for trait, columns in batch:
+                        stop = offset+len(columns)
+                        index = torch.tensor(columns, dtype=torch.int64, device=nominal.device)
+                        pvalues = nominal[trait].clone()
+                        flags = _unassessed_spa_result(pvalues)
+                        pvalues[index] = state.pvalues[offset:stop]
+                        _copy_spa_result(flags, index, type(state)(*(
+                            getattr(state, name)[offset:stop] for name in (
+                                'pvalues', 'used_bisection', 'failed', 'iterations',
+                                'iteration_limit', 'converged', 'root_residual',
+                                'support_boundary', 'outside_support', 'bracket_iterations'))))
+                        outcomes[trait] = (pvalues, flags)
+                        offset = stop
+                    completed.update(outcomes)
+                    execution['spa_trait_batches'] += 1
+                    execution['spa_batched_traits'] += len(batch)
+                    execution['spa_batched_columns'] += width
+                    execution['spa_combined_tail_batches'] += 1
+        except MemoryError:
+            execution['spa_batch_admission_fallbacks'] += 1
+        finally:
+            # Drop optional stacks before releasing their reservation. No
+            # fitted state/projected columns persist into the next batch.
+            sidecars = projections = probabilities = scores = state = outcomes = None
+            sidecar = exact = None
+            if workspace_release is not None and (admitted or allocation_guard is not None):
+                workspace_release()
+    return completed
+
+
 def evaluate_binary_burden_tile(models, genotype, maf, annotations, names, *,
         prepared_burdens, spa_acquires, exact_burden_cache,
         rare_maf_cutoff=.01, rv_num_cutoff=2, rv_num_cutoff_max=10**9,
@@ -196,32 +298,46 @@ def evaluate_binary_burden_tile(models, genotype, maf, annotations, names, *,
     models, spa_acquires = tuple(models), tuple(spa_acquires)
     if len(models) != len(spa_acquires):
         raise ValueError('every binary model needs its own optional SPA factory')
+    if not 0 < p_filter_cutoff <= 1:
+        raise ValueError('invalid binary MAF, variant or SPA cutoffs')
     binding = _checked_binding(models, prepared_burdens, genotype, maf, annotations, names,
         rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max)
+    if len(prepared_burdens.maf) < rv_num_cutoff or len(prepared_burdens.maf) >= rv_num_cutoff_max:
+        raise ValueError('rare-variant count is outside the allowed interval')
+    for model, acquire in zip(models, spa_acquires):
+        _spa_requested(model, None, acquire)
     measure = (lambda name: profiler.measure(name, gpu=True)) if profiler is not None else (lambda name: nullcontext())
     try:
         with measure('gene_binary_normal_projection_score'):
-            scores, covariances, execution = binary_burden_score_covariance_batch(models,
+            scores, variances, execution = binary_burden_score_variance_batch(models,
                 prepared_burdens.burdens, allocation_guard=normal_allocation_guard)
     finally:
         if normal_workspace_release is not None:
             normal_workspace_release()
     with measure('gene_binary_shared_exact_burdens'):
-        nominal = _chi1_from_score(scores, covariances.diagonal(dim1=-2, dim2=-1))
+        nominal = _chi1_from_score(scores, variances)
         # IEEE GEMM and the historical GEMV can differ in their reduction order.
         # Preserve the strict SPA admission boundary with original vector scores
         # only for the rare tile rows near that threshold.
         execution['threshold_score_rechecks'] = 0
+        execution['threshold_product_rechecks'] = 0
+        execution['threshold_variances_preserved'] = 0
         if execution['native_projection_batches']:
-            close = ((nominal-p_filter_cutoff).abs() <= 2e-5*p_filter_cutoff).any(1)
+            close = ((nominal-p_filter_cutoff).abs() <= 2e-3*p_filter_cutoff).any(1)
             rows = torch.nonzero(close, as_tuple=True)[0].detach().cpu().tolist()
             if rows:
                 from .tf32 import matmul
                 for i in rows:
-                    scores[i].copy_(matmul(prepared_burdens.burdens.T,
-                                          models[i].scaled_residuals, mode='tf32'))
-                    nominal[i] = _chi1_from_score(scores[i], covariances[i].diagonal())
+                    # Only the vector reduction order needs rechecking. The
+                    # fitted-state diagonal already uses the accurate bounded
+                    # projection; an old full covariance would overwrite it.
+                    burdens = prepared_burdens.burdens
+                    residual = models[i].scaled_residuals.to(dtype=burdens.dtype)
+                    original_score = matmul(burdens.T, residual, mode=models[i].matmul_mode)
+                    scores[i].copy_(original_score)
+                    nominal[i] = _chi1_from_score(scores[i], variances[i])
                 execution['threshold_score_rechecks'] = len(rows)
+                execution['threshold_variances_preserved'] = len(rows)
         requires_spa = torch.tensor([factory is not None for factory in spa_acquires],
                                    dtype=torch.bool, device=nominal.device)
         selected = (nominal < p_filter_cutoff) & requires_spa[:, None]
@@ -230,13 +346,22 @@ def evaluate_binary_burden_tile(models, genotype, maf, annotations, names, *,
             with explicit_binary_spa_fp64():
                 exact_burden_cache.get(prepared_burdens, union)
     probabilities, counts = [], []
+    batched_spa = _bounded_selected_spa(models, spa_acquires, prepared_burdens,
+        exact_burden_cache, nominal, selected, tol=tol, max_iter=max_iter,
+        allocation_guard=normal_allocation_guard, workspace_release=normal_workspace_release,
+        measure=measure, execution=execution)
     for i, (model, acquire) in enumerate(zip(models, spa_acquires)):
+        if i in batched_spa:
+            values, state = batched_spa[i]
+            probabilities.append(values)
+            counts.append(torch.stack((selected[i].sum(), state.failed.sum())))
+            continue
         with measure('gene_binary_selective_spa'):
             values, diagnostic = staar_binary_phewas(model, genotype, maf, annotations, names,
                 spa_acquire=acquire, prepared_burdens=prepared_burdens,
                 rare_maf_cutoff=rare_maf_cutoff, rv_num_cutoff=rv_num_cutoff,
                 rv_num_cutoff_max=rv_num_cutoff_max, p_filter_cutoff=p_filter_cutoff,
-                tol=tol, max_iter=max_iter, _normal_products=(scores[i], covariances[i]),
+                tol=tol, max_iter=max_iter, _normal_products=(scores[i], variances[i]),
                 _exact_burden_cache=exact_burden_cache, _device_output=True,
                 _prepared_binding=binding)
         probabilities.append(values)

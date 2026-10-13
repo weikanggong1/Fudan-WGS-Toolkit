@@ -113,6 +113,19 @@ def _combiner(callback: Callable[[Sequence[float]], float] | None):
     return cct
 
 
+def _summary_key(row: dict[str, Any], public_key: str) -> str:
+    """Retain the summary namespace supplied by the computed input row."""
+    private_key = "STAAR-" + public_key[4:]
+    if public_key in row and private_key in row:
+        public_value, private_value = float(row[public_key]), float(row[private_key])
+        if public_value != private_value and not (math.isnan(public_value) and math.isnan(private_value)):
+            raise ValueError("conflicting public and private association summaries")
+        # Identical aliases carry one statistic. Retain the public spelling,
+        # rather than leave an alias holding the pre-disruptive combination.
+        del row[private_key]
+    return private_key if private_key in row else public_key
+
+
 def add_disruptive_missense(
     missense: Mapping[str, Any], disruptive: Mapping[str, Any] | None,
     *, use_spa: bool = False,
@@ -124,10 +137,14 @@ def add_disruptive_missense(
     are ones and existing combined p-values remain unchanged. A valid ordinary
     result updates six WGS summaries and WGS-O, retaining ACAT-O. The SPA
     branch updates the two burden summaries and WGS-B, using the upstream
-    missing-value/one filtering convention.
+    missing-value/one filtering convention. Each updated summary retains the
+    input row's existing namespace, including the private result boundary.
+    Conflicting aliases are rejected before producing a combined row.
     """
     row = dict(missense)
     tests = _ELEMENTARY_TESTS[2:4] if use_spa else _ELEMENTARY_TESTS
+    summary_keys = {summary: _summary_key(row, summary) for _, summary in tests}
+    omnibus_key = _summary_key(row, "WGS-B" if use_spa else "WGS-O")
     for base, _ in tests:
         value = 1.0 if disruptive is None else float(disruptive[base])
         if use_spa and math.isnan(value):
@@ -143,14 +160,14 @@ def add_disruptive_missense(
         if use_spa:
             selected = [value for value in values if not math.isnan(value) and value < 1]
             # Source tests sum(p[p < 1]) > 0, including its all-zero behavior.
-            row[summary] = float(combine(selected)) if sum(selected) > 0 else 1.0
+            row[summary_keys[summary]] = float(combine(selected)) if sum(selected) > 0 else 1.0
         else:
-            row[summary] = float(combine(values))
+            row[summary_keys[summary]] = float(combine(values))
     if use_spa:
         selected = [value for value in all_values if not math.isnan(value) and value < 1]
-        row["WGS-B"] = float(combine(selected)) if sum(selected) > 0 else 1.0
+        row[omnibus_key] = float(combine(selected)) if sum(selected) > 0 else 1.0
     else:
-        row["WGS-O"] = float(combine(all_values))
+        row[omnibus_key] = float(combine(all_values))
     return row
 
 

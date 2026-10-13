@@ -291,6 +291,9 @@ class PerTraitCheckpointCSVWriter:
         self.verification_cache_size = verification_cache_size
         self.invocation = uuid.uuid4().hex
         self.streams, self._verified, self._owners = OrderedDict(), OrderedDict(), {}
+        # Only handles with unsynchronized bytes need a durability barrier at
+        # eviction/close. Successful member appends have already crossed it.
+        self._dirty_streams = set()
         self._recovered_traits = set()
         self._owned_traits = set()
         self.reused_blocks = self.computed_blocks = 0
@@ -475,9 +478,13 @@ class PerTraitCheckpointCSVWriter:
         raw = self.streams.pop(file_id, None)
         if raw is not None:
             try:
-                raw.flush(); os.fsync(raw.fileno())
+                if file_id in self._dirty_streams:
+                    raw.flush(); os.fsync(raw.fileno())
             finally:
-                raw.close()
+                try:
+                    raw.close()
+                finally:
+                    self._dirty_streams.discard(file_id)
 
     def _recover_tail(self, info):
         self._close_stream(info['id'])
@@ -509,12 +516,65 @@ class PerTraitCheckpointCSVWriter:
 
     def _ensure_file(self, trait, kind, chromosome, columns):
         file_id, relative = self._file_identity(trait,kind,chromosome,columns)
-        self.db.execute('INSERT OR IGNORE INTO files(id,trait,kind,chromosome,relative_path,columns_json) VALUES(?,?,?,?,?,?)',
-            (file_id,trait,kind,chromosome,relative,_canonical(columns)))
-        info = self._file_info(file_id)
+        row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
+        if row is None:
+            self.db.execute('INSERT OR IGNORE INTO files(id,trait,kind,chromosome,relative_path,columns_json) VALUES(?,?,?,?,?,?)',
+                (file_id,trait,kind,chromosome,relative,_canonical(columns)))
+            info = self._file_info(file_id)
+        else:
+            info = self._file(row)
         if info['columns'] != columns:
             raise CommittedCSVCorruption('canonical CSV schema signature collision')
         return info
+
+    def _prepare_first_files(self, kind, chromosome, trait_indices, values):
+        """Register initial schemas together, before any compression or append.
+
+        Peek one existing row per trait without copying association arrays. A
+        malformed later result still fails at its original position, after
+        earlier uncommitted appends have been preserved by the recovery path.
+        File endpoints are reread for every tile; no mutable ledger/path cache
+        survives a call, and no SQLite writer transaction spans scientific IO.
+        """
+        prepared, files, missing = [], {}, []
+        for trait, (_, result) in zip(trait_indices, values):
+            iterator = iter(_rows(result))
+            try:
+                pending = next(iterator, None)
+            except TypeError as error:
+                prepared.append((trait, iterator, None, error))
+                continue
+            prepared.append((trait, iterator, pending, None))
+            if pending is None or 'trait_index' in pending:
+                continue
+            columns = ['trait_index', *pending]
+            if any(not isinstance(column, str) or not column for column in columns):
+                continue
+            file_id, relative = self._file_identity(trait, kind, chromosome, columns)
+            row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
+            if row is None:
+                missing.append((file_id, trait, kind, chromosome, relative, _canonical(columns)))
+            else:
+                info = self._file(row)
+                if info['columns'] != columns:
+                    raise CommittedCSVCorruption('canonical CSV schema signature collision')
+                files[file_id] = info
+        if missing:
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                self.db.executemany('''INSERT OR IGNORE INTO files
+                    (id,trait,kind,chromosome,relative_path,columns_json) VALUES(?,?,?,?,?,?)''', missing)
+                for item in missing:
+                    info = self._file_info(item[0])
+                    if info['columns'] != json.loads(item[5]):
+                        raise CommittedCSVCorruption('canonical CSV schema signature collision')
+                    files[item[0]] = info
+                self.db.execute('COMMIT')
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute('ROLLBACK')
+                raise
+        return prepared, files
 
     def _stream(self, info, expected_end):
         file_id = info['id']
@@ -541,6 +601,9 @@ class PerTraitCheckpointCSVWriter:
 
     def _append_member(self, info, start, rows, *, trait_index=None):
         raw = self._stream(info,start)
+        # Mark before gzip writes its header: even failed compression/fsync
+        # leaves a dirty suffix that close/recovery must not call synchronized.
+        self._dirty_streams.add(info['id'])
         hashing = _AppendHash(raw)
         count = selected = failed = 0
         with gzip.GzipFile(filename='',fileobj=hashing,mode='wb',compresslevel=1,mtime=0) as compressed:
@@ -560,6 +623,7 @@ class PerTraitCheckpointCSVWriter:
                     count,selected,failed = _write_bound_trait_rows(
                         output,rows,trait_index,info['columns'][1:])
         raw.flush(); os.fsync(raw.fileno())
+        self._dirty_streams.discard(info['id'])
         return dict(file_id=info['id'],start=start,end=start+hashing.size,rows=count,
                     header=int(start==0),sha256=hashing.digest.hexdigest()), selected, failed
 
@@ -717,9 +781,12 @@ class PerTraitCheckpointCSVWriter:
         counts = dict.fromkeys(map(str,key['trait_indices']),0)
         columns = ['trait_index']; selected = failed = 0
         try:
-            for trait,(_,result) in zip(key['trait_indices'],values):
+            prepared, initial_files = self._prepare_first_files(
+                kind, key['chromosome'], key['trait_indices'], values)
+            for trait, iterator, pending, initial_error in prepared:
+                if initial_error is not None:
+                    raise initial_error
                 # Only one existing result is referenced; no copied tile is held.
-                iterator = iter(_rows(result)); pending = next(iterator,None)
                 while pending is not None:
                     if 'trait_index' in pending:
                         raise ValueError('association row cannot override its bound trait index')
@@ -727,7 +794,10 @@ class PerTraitCheckpointCSVWriter:
                     source_schema = tuple(pending)
                     if any(not isinstance(c,str) or not c for c in schema):
                         raise ValueError('association row requires nonempty string column names')
-                    info = self._ensure_file(trait,kind,key['chromosome'],schema)
+                    file_id, _ = self._file_identity(trait, kind, key['chromosome'], schema)
+                    info = initial_files.get(file_id)
+                    if info is None:
+                        info = self._ensure_file(trait,kind,key['chromosome'],schema)
                     before.setdefault(info['id'],info['committed_end'])
                     start = ends.get(info['id'],info['committed_end'])
                     def consecutive_rows():

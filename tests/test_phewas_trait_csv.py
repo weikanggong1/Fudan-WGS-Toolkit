@@ -561,6 +561,107 @@ def test_close_releases_all_owners_even_if_one_stream_flush_fails(tmp_path,monke
     recovered.finish()
 
 
+def test_synchronized_members_do_not_repeat_fsync_on_eviction_or_close(tmp_path, monkeypatch):
+    writer = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING, max_open_streams=1)
+    original = os.fsync
+    synchronized = []
+    def observed(descriptor):
+        target = os.readlink(f'/proc/self/fd/{descriptor}')
+        if target.endswith('results.csv.gz.partial'):
+            synchronized.append(target)
+            assert not writer.db.in_transaction
+        return original(descriptor)
+    monkeypatch.setattr(os, 'fsync', observed)
+    for job in range(3):
+        writer.write_tile('coding', '21', [(0, [row(job)]), (1, [row(job)])], job_index=job)
+        assert not writer._dirty_streams
+    # Six complete members are durable before their scientific tile commit.
+    assert len(synchronized) == 6
+    writer.close()
+    assert len(synchronized) == 6
+    assert not writer.streams and not writer._dirty_streams and not writer._owners
+    recovered = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING, resume=True)
+    for job in range(3):
+        assert recovered.checkpoint_tile('coding', '21', job, [0, 1]) is not None
+    assert recovered.finish()['rows']['coding'] == 6
+
+
+def test_failed_member_sync_remains_dirty_until_recovery_and_never_commits(tmp_path, monkeypatch):
+    writer = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING)
+    original = os.fsync
+    attempts = []
+    def fail_first(descriptor):
+        target = os.readlink(f'/proc/self/fd/{descriptor}')
+        if target.endswith('results.csv.gz.partial'):
+            attempts.append(bool(writer._dirty_streams))
+            if len(attempts) == 1:
+                raise OSError('injected member durability failure')
+        return original(descriptor)
+    monkeypatch.setattr(os, 'fsync', fail_first)
+    with pytest.raises(OSError, match='member durability'):
+        writer.write_tile('coding', '21', [(0, [row()])], job_index=0)
+    assert attempts[:2] == [True, True]  # failed append and dirty close retry
+    assert not writer.streams and not writer._dirty_streams
+    assert writer.db.execute('SELECT COUNT(*) FROM blocks').fetchone()[0] == 0
+    assert next(tmp_path.rglob('*.partial')).stat().st_size == 0
+    assert len(list((tmp_path/'.trait_checkpoints/uncommitted').rglob('tail.gz'))) == 1
+    writer.write_tile('coding', '21', [(0, [row(.4)])], job_index=0)
+    result = writer.finish()
+    assert result['rows']['coding'] == 1 and rows(tmp_path, result)[0]['STAAR-O'] == '0.4'
+
+
+def test_initial_file_metadata_has_one_short_transaction_and_existing_files_are_read_only(tmp_path, monkeypatch):
+    writer = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING, max_open_streams=1)
+    statements = []
+    writer.db.set_trace_callback(statements.append)
+    original = writer._append_member
+    def append(*args, **kwargs):
+        assert not writer.db.in_transaction
+        return original(*args, **kwargs)
+    monkeypatch.setattr(writer, '_append_member', append)
+    writer.write_tile('coding', '21', [(trait, [row(trait)]) for trait in range(32)], job_index=0)
+    assert statements.count('BEGIN IMMEDIATE') == statements.count('COMMIT') == 2
+    assert sum('INSERT OR IGNORE INTO files' in statement for statement in statements) == 32
+    statements.clear()
+    writer.write_tile('coding', '21', [(trait, [row(trait+1)]) for trait in range(32)], job_index=1)
+    assert statements.count('BEGIN IMMEDIATE') == statements.count('COMMIT') == 1
+    assert not any('INSERT OR IGNORE INTO files' in statement for statement in statements)
+    assert writer.finish()['rows']['coding'] == 64
+
+
+def test_initial_file_registration_failure_rolls_back_all_metadata_and_can_retry(tmp_path):
+    writer = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING)
+    writer.db.executescript('''CREATE TRIGGER reject_second BEFORE INSERT ON files
+        WHEN NEW.trait=1 BEGIN SELECT RAISE(ABORT,'injected file registration failure'); END;''')
+    with pytest.raises(sqlite3.IntegrityError, match='file registration'):
+        writer.write_tile('coding', '21', [(0, [row()]), (1, [row()])], job_index=0)
+    assert not writer.db.in_transaction
+    assert writer.db.execute('SELECT COUNT(*) FROM files').fetchone()[0] == 0
+    assert writer.db.execute('SELECT COUNT(*) FROM blocks').fetchone()[0] == 0
+    assert not list(tmp_path.rglob('*.partial'))
+    writer.db.execute('DROP TRIGGER reject_second')
+    writer.write_tile('coding', '21', [(0, [row()]), (1, [row()])], job_index=0)
+    assert writer.finish()['rows']['coding'] == 2
+
+
+def _crash_after_file_registration(directory):
+    writer = PerTraitCheckpointCSVWriter(directory, binding=BINDING)
+    writer._append_member = lambda *args, **kwargs: os._exit(74)
+    writer.write_tile('coding', '21', [(0, [row()]), (1, [row()])], job_index=0)
+
+
+def test_registration_without_csv_after_crash_is_missing_work_not_a_checkpoint(tmp_path):
+    process = multiprocessing.get_context('fork').Process(
+        target=_crash_after_file_registration, args=(str(tmp_path),))
+    process.start(); process.join(30)
+    assert process.exitcode == 74
+    recovered = PerTraitCheckpointCSVWriter(tmp_path, binding=BINDING, resume=True)
+    assert recovered.db.execute('SELECT COUNT(*) FROM files').fetchone()[0] == 2
+    assert recovered.checkpoint_tile('coding', '21', 0, [0, 1]) is None
+    recovered.write_tile('coding', '21', [(0, [row()]), (1, [row()])], job_index=0)
+    assert recovered.finish()['rows']['coding'] == 2
+
+
 def test_abort_receipt_failure_still_releases_database_and_trait_owner(tmp_path,monkeypatch):
     writer=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING)
     writer.write_tile('coding','21',[(0,[row()])],job_index=0)
