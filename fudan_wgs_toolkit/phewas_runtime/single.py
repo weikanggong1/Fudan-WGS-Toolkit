@@ -25,6 +25,8 @@ _METRICS = dict(calls=0, active_trait_blocks=0, computed_trait_blocks=0,
                 phenotype_score_extreme_tail_fallback_columns=0,
                 phenotype_score_control_d2h_batches=0, phenotype_score_control_d2h_bytes=0,
                 original_variance_calls=0,
+                projection_trait_batches=0, projection_batched_traits=0,
+                projection_budget_fallbacks=0,
                 dense_genotype_h2d_bytes=0, dense_genotype_d2h_bytes=0)
 
 
@@ -158,44 +160,135 @@ def process_single_batches(pipelines, blocks, ordinal_offsets, chromosome,
     return outputs, ordinals
 
 
-def _variance_from_shared_genotype(model, genotype, centered, mean):
+_UNSUPPLIED_PROJECTION_STATE = object()
+
+
+def _variance_from_shared_genotype(model, genotype, centered, mean, *,
+                                   cross=None, projection_state=_UNSUPPLIED_PROJECTION_STATE):
     """Keep the existing finite-state Single variance, omitting its score GEMV.
 
     Scores use IEEE FP32 tiles or original vector products. Centering and
     the fitted P1 correction retain the mature per-model diagonal formula;
     neither weights nor covariance are borrowed from another phenotype.
     """
-    from ..tf32 import matmul
-    state_method = getattr(model, '_centered_single_projection_state', None)
-    state = None if state_method is None else state_method()
-    if state is not None:
-        precision = (model.inverse_variance if model.family == 'gaussian'
-                     else model.precision)
-        weighted = precision[:, None] * centered
-        cross = matmul(model.precision_x.T, centered, mode='tf32')
+    weighted = projected = rotated = precision = None
+    try:
+        from ..tf32 import matmul
+        if projection_state is _UNSUPPLIED_PROJECTION_STATE:
+            state_method = getattr(model, '_centered_single_projection_state', None)
+            state = None if state_method is None else state_method()
+        else:
+            state = projection_state
+        if state is not None:
+            precision = (model.inverse_variance if model.family == 'gaussian'
+                         else model.precision)
+            weighted = precision[:, None] * centered
+            if cross is None:
+                cross = matmul(model.precision_x.T, centered, mode='tf32')
+            projected = matmul(cross.T, model.fixed_effect_covariance, mode='tf32')
+            variance = ((centered * weighted).sum(dim=0)
+                        - (projected * cross.T).sum(dim=1))
+            del weighted, cross, projected
+            p_one, p_one_sum = state
+            variance += (2 * mean * matmul(centered.T, p_one, mode='tf32')
+                         + mean.square() * p_one_sum)
+            return variance
+        if model.family == 'gaussian' and hasattr(model, 'spectrum'):
+            rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
+            weighted = model.inverse_variance[:, None] * rotated
+            if cross is None:
+                cross = matmul(model.precision_x.T, genotype, mode='tf32')
+        elif model.family == 'binomial' and hasattr(model, '_fitted_projection'):
+            if cross is None:
+                weighted, cross = model._fitted_projection(genotype, 'tf32')
+            else:
+                precision = model.precision
+                if precision is None:
+                    precision = model.fitted_probability * (1-model.fitted_probability)
+                precision = precision.to(dtype=genotype.dtype)
+                if precision.ndim == 1:
+                    weighted = precision[:, None] * genotype
+                elif precision.layout != torch.strided:
+                    weighted = torch.sparse.mm(precision, genotype)
+                else:
+                    weighted = matmul(precision, genotype, mode='tf32')
+            rotated = genotype
+        else:
+            # Third-party models may expose only the validated single-trait API.
+            # Count this original computation honestly rather than inventing a
+            # projection from incomplete fitted state.
+            return model.individual_score_variance(genotype, matmul_mode='tf32')[1]
         projected = matmul(cross.T, model.fixed_effect_covariance, mode='tf32')
-        variance = ((centered * weighted).sum(dim=0)
-                    - (projected * cross.T).sum(dim=1))
-        del weighted, cross, projected
-        p_one, p_one_sum = state
-        variance += (2 * mean * matmul(centered.T, p_one, mode='tf32')
-                     + mean.square() * p_one_sum)
-        return variance
-    if model.family == 'gaussian' and hasattr(model, 'spectrum'):
-        rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
-        weighted = model.inverse_variance[:, None] * rotated
-        cross = matmul(model.precision_x.T, genotype, mode='tf32')
-    elif model.family == 'binomial' and hasattr(model, '_fitted_projection'):
-        weighted, cross = model._fitted_projection(genotype, 'tf32')
-        rotated = genotype
-    else:
-        # Third-party models may expose only the validated single-trait API.
-        # Count this original computation honestly rather than inventing a
-        # projection from incomplete fitted state.
-        return model.individual_score_variance(genotype, matmul_mode='tf32')[1]
-    projected = matmul(cross.T, model.fixed_effect_covariance, mode='tf32')
-    return ((rotated * weighted).sum(dim=0)
-            - (projected * cross.T).sum(dim=1))
+        return ((rotated * weighted).sum(dim=0)
+                - (projected * cross.T).sum(dim=1))
+    finally:
+        # A retained error traceback must not pin NEW cohort-sized buffers.
+        weighted = projected = rotated = precision = cross = None
+
+
+def _shared_projection_groups(models, genotype, centered):
+    """Group only mature fitted cores with the same native product geometry."""
+    from ..binary_null import BinaryNullModel
+    from ..null_model import GaussianNullModel
+    groups, states = {}, {}
+    for index, model in enumerate(models):
+        if not isinstance(model, (BinaryNullModel, GaussianNullModel)):
+            continue
+        state = model._centered_single_projection_state()
+        sx = model.precision_x
+        if sx is None and model.family == 'binomial':
+            sx = model.xw.T
+        if (not isinstance(sx, torch.Tensor) or sx.layout != torch.strided
+                or sx.dtype != torch.float32 or sx.device != genotype.device):
+            continue
+        right = centered if state is not None else genotype
+        key = (tuple(sx.T.shape), id(right))
+        states[index] = state
+        groups.setdefault(key, []).append((index, sx.T, right))
+    return groups, states
+
+
+def _batched_variances(models, genotype, centered, mean):
+    """Reuse projection launches, preserving each original weighted/diag core.
+
+    Only small trait-by-Q-by-M outputs are retained. Each group is used and
+    released before the next group; admission includes the original one-model
+    weighted, product and (for Gaussian) rotated genotype peak.
+    """
+    from .. import tf32
+    groups, states = _shared_projection_groups(models, genotype, centered)
+    result = [None] * len(models)
+    for entries in groups.values():
+        for begin in range(0, len(entries), 32):
+            tile = entries[begin:begin+32]
+            if len(tile) < 2:
+                continue
+            lefts, right = [entry[1] for entry in tile], tile[0][2]
+            estimate = tf32._estimated_batched_workspace(lefts, [right]*len(tile), breakdown=True)
+            n, m = genotype.shape
+            original_peak = max((12 if models[index].family == 'gaussian' else 8)*n*m
+                                for index, _, _ in tile)
+            q = lefts[0].shape[0]
+            required = dict(estimate, required_bytes=estimate['required_bytes']+original_peak+8*q*m+64*m)
+            try:
+                tf32._guard_workspace(genotype.device, required,
+                    left_shape=(len(tile), *lefts[0].shape), right_shape=tuple(right.shape))
+            except MemoryError:
+                _METRICS['projection_budget_fallbacks'] += 1
+                continue
+            crosses = tf32.batched_matmul(lefts, right, mode='tf32')
+            try:
+                for offset, (index, _, _) in enumerate(tile):
+                    result[index] = _variance_from_shared_genotype(models[index], genotype,
+                        centered, mean, cross=crosses[offset], projection_state=states[index])
+                _METRICS['projection_trait_batches'] += 1
+                _METRICS['projection_batched_traits'] += len(tile)
+            finally:
+                del crosses
+    for index, model in enumerate(models):
+        if result[index] is None:
+            result[index] = _variance_from_shared_genotype(model, genotype, centered, mean)
+    return result
 
 
 def process_single_shared_genotype(pipelines, block, ordinal_offset, chromosome,
@@ -280,11 +373,16 @@ def process_single_shared_genotype(pipelines, block, ordinal_offset, chromosome,
     correction_fields = ('pvalues', 'pvalue_log10', 'pvalue_log', 'normal_pvalues',
                          'normal_pvalue_log10', 'spa_selected', 'spa_zero_log_unverified')
     flag_fields = ('used_bisection', 'failed', 'iterations', 'iteration_limit')
-    for index, model in enumerate(models):
+    if genotype.is_cuda and len(models) > 1:
         with first.profiler.measure('phewas_individual_variance', gpu=True):
-            variance = _variance_from_shared_genotype(model, genotype, centered, mean)
-        variances.append(variance)
-        _METRICS['original_variance_calls'] += 1
+            variances = _batched_variances(models, genotype, centered, mean)
+        _METRICS['original_variance_calls'] += len(models)
+    else:
+        for index, model in enumerate(models):
+            with first.profiler.measure('phewas_individual_variance', gpu=True):
+                variance = _variance_from_shared_genotype(model, genotype, centered, mean)
+            variances.append(variance)
+            _METRICS['original_variance_calls'] += 1
     del centered, mean
     # IEEE matrix and vector products have different FP32 reduction orders.
     # Extremely sensitive normal tails must retain the mature entire-column

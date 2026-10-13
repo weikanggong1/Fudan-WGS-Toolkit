@@ -312,6 +312,41 @@ def _share_annotations(pipelines):
         pipeline._coding_masks_cache = first._coding_masks_cache
 
 
+def _workspace_storage_diagnostics(owners):
+    """Count explicit arrays while distinguishing a streamed logical matrix.
+
+    A host panel recipe retains one-dimensional axes, not N-by-M dosage.
+    Reader, cache and fitted-state object graphs keep their separate owners;
+    unsupported objects still fail the strict storage telemetry contract.
+    """
+    from ..binary_gene_batch import BinaryHostPanelSource
+    from ..phewas_resources import tensor_storage_footprint
+    sources, seen = [], set()
+
+    def explicit(value):
+        if isinstance(value, BinaryHostPanelSource):
+            arrays = value.explicit_storage_owners()
+            if id(value) not in seen:
+                seen.add(id(value))
+                sources.append(dict(source_type='BinaryHostPanelSource',
+                    logical_shape=list(value.shape),
+                    maximum_panel_width=value.maximum_panel_width,
+                    whole_matrix_materialized=False,
+                    storage_owner_scope='direct recipe arrays only',
+                    retained_array_names=list(arrays)))
+            return arrays
+        if isinstance(value, dict):
+            return {key: explicit(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [explicit(item) for item in value]
+        return value
+
+    result = tensor_storage_footprint(explicit(owners))
+    if sources:
+        result['host_panel_sources'] = sources
+    return result
+
+
 def _reader_metadata_diagnostics(metadata):
     """Allowlisted endpoint counters; never copy reader paths or sample keys."""
     values = metadata.reader_metadata
@@ -321,6 +356,21 @@ def _reader_metadata_diagnostics(metadata):
         value = values.get(key)
         if isinstance(value, (int, float, bool)) and math.isfinite(value):
             result[key] = value
+    annotation = values.get('annotation_cache')
+    if isinstance(annotation, dict):
+        counters = {}
+        for key in ('builds', 'hits', 'misses', 'publishes', 'published_bytes',
+                    'mapped_bytes', 'read_seconds', 'write_seconds',
+                    'fallback_invalid', 'fallback_write', 'fallback_read_only',
+                    'fallback_size', 'lock_busy', 'disabled_unverified_source'):
+            value = annotation.get(key)
+            if (isinstance(value, (int, float, bool)) and math.isfinite(value)
+                    and value >= 0):
+                counters[key] = value
+        if counters:
+            result['annotation_cache'] = counters
+            result['annotation_cache_metrics_scope'] = (
+                'reader lifetime; mapped_bytes is cumulative file size, not peak RAM')
     return result
 
 
@@ -658,10 +708,19 @@ def _prepare_shared_gene(pipeline, indices, broker):
             # Exception-local tensors lose their owners here. Recompute only
             # preparation using the unchanged bounded CPU route.
             pass
+    # Binary inference consumes only weighted burdens, so its host fallback
+    # needs a reread recipe rather than a full N-by-M floating/compact copy.
+    # The existing verified reader lease proves the cohort and physical cache.
+    stream_binary = (getattr(pipeline, '_binary_burden_only',
+                             getattr(model, 'family', None) == 'binomial')
+                     and isinstance(pipeline.genotype, SharedTraitReader))
     parts, physical, frequencies, groups = [], [], [], []
     prefiltered = 0
-    for offset in range(0, len(indices), options.genotype_block_size):
-        selected = indices[offset:offset+options.genotype_block_size]
+    step = min(options.genotype_block_size, 512) if stream_binary else options.genotype_block_size
+    for offset in range(0, len(indices), step):
+        selected = indices[offset:offset+step]
+        if stream_binary:
+            _prepare_host_guard(pipeline, model, len(selected))
         raw = broker.read_states(selected)
         block = broker.trait_block(raw, pipeline.union_rows)
         del raw
@@ -678,18 +737,19 @@ def _prepare_shared_gene(pipeline, indices, broker):
         if len(columns):
             # Compact CPU parts are already host allocations; obtain/extend
             # the owner lease before retaining them, not only before dense G.
-            _prepare_host_guard(pipeline, model, len(physical)+len(columns),
-                sum(part.dosage.numel()*part.dosage.element_size() for part in parts))
-            compact = block.select_columns(columns)
-            # This handoff contains exact six-state-derived minor dosage, not
-            # phenotype/model data. CPU conversion/imputation retains FP32.
-            compact = compact.to_host()
+            if not stream_binary:
+                _prepare_host_guard(pipeline, model, len(physical)+len(columns),
+                    sum(part.dosage.numel()*part.dosage.element_size() for part in parts))
+                compact = block.select_columns(columns)
+                # This handoff contains exact six-state-derived minor dosage.
+                compact = compact.to_host()
             physical.extend((offset+columns).tolist())
             frequencies.extend(maf[columns])
             allele_missing = block.allele_missing_rate()
             group = np.where(alt > .5, 2, np.where((source_maf >= .01) | (allele_missing >= .01), 1, 0))
             groups.extend(group[columns])
-            parts.append(compact)
+            if not stream_binary:
+                parts.append(compact)
         del block
     count = len(physical)
     if count < options.rv_num_cutoff:
@@ -700,6 +760,32 @@ def _prepare_shared_gene(pipeline, indices, broker):
     if maximum is not None and count > maximum:
         pipeline.skipped_sets.append(dict(eligible_variants=count, reason='eligible_M_exceeds_configured_limit'))
         return None
+    if stream_binary:
+        from ..binary_gene_batch import BinaryHostPanelSource
+        group = np.asarray(groups, dtype=np.int64)
+        order = np.argsort(group, kind='stable')
+        physical = np.asarray(physical, dtype=np.int64)[order]
+        maf = np.asarray(frequencies, dtype=np.float64)[order]
+        geometry = SimpleNamespace(n=model.n)
+        # Keep only resource callbacks, not a closure owning a fitted model or
+        # this pipeline. The numerical source belongs to the open reader lease.
+        guard, set_future = pipeline.host_memory_guard, pipeline.host_memory_set_future
+        resource_owner = SimpleNamespace(host_memory_guard=guard, host_memory_set_future=set_future)
+        def panel_guard(width, materialized):
+            _prepare_host_guard(resource_owner, geometry, width, materialized)
+        def panel_ready():
+            if callable(set_future):
+                set_future(0, phase='binary_host_panel_ready')
+        ids = np.asarray(pipeline.genotype._broker._reader.sample_ids(), dtype=str)[pipeline.union_rows]
+        source = BinaryHostPanelSource(pipeline.genotype, pipeline._single_axis_binding,
+            pipeline.union_rows, pipeline.trait_rows[0], indices[physical], maf, ids,
+            options.imputation, panel_guard, panel_ready)
+        panel_ready()
+        return dict(_genotype_host=source, _variant_indices=source.variants,
+            _extraction_groups=group[order], maf=maf, mac=np.rint(maf*2*model.n),
+            annotations=phred[physical], names=names, cmac=None,
+            acat_calibration='chi2', rare_maf_cutoff=options.rare_maf_cutoff,
+            rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
     parts_bytes = sum(part.dosage.numel()*part.dosage.element_size() for part in parts)
     _prepare_host_guard(pipeline, model, count, parts_bytes)
     host = np.empty((model.n, count), dtype=np.float32, order='F')
@@ -1369,7 +1455,7 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                 preparation_model, q = _gene_preparation_geometry(repository,
                     group['descriptors'][0], broker, metadata, verified)
                 for mi, indices in enumerate(masks):
-                    prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                    prepared, prototype, host, genotype, burdens, exact_burdens = None, None, None, None, None, None
                     covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
                     try:
                         prototype = _thin_pipeline(axis, preparation_model, axis._axis.samples,
@@ -1419,7 +1505,9 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         with _gene_workspace_scope(repository, broker, initial_peak) as workspace:
                             # Materialize only if the live device can admit original
                             # fitted ordinary covariance products plus this one G.
-                            if resident_input or (m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda'):
+                            from ..binary import _BinaryPanelSource
+                            if resident_input or (not isinstance(host, _BinaryPanelSource)
+                                    and m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda'):
                                 # Relatedness may vary between traits in one cohort;
                                 # two genotype copies cover the original block path.
                                 try:
@@ -1459,37 +1547,80 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                   if gaussian_indices else None)
                                     shared_simt = score_metadata()['fp32_simt_products'] > before_simt
                                     gauss_columns = {i: j for j, i in enumerate(gaussian_indices)}
+                                    binary_indices = [i for i, model in enumerate(models) if model.family == 'binomial']
+                                    binary_outputs = None
+                                    if binary_indices:
+                                        from ..binary import (prepare_binary_burdens, PreparedBinaryBurdens,
+                                                              ExactBinaryBurdenCache)
+                                        from ..binary_null import BinaryNullModel
+                                        if burdens is None:
+                                            workspace.ensure_free(phase='gene_binary_burden_prepare')
+                                            with prototype.profiler.measure('gene_binary_shared_burdens', gpu=True):
+                                                burdens = prepare_binary_burdens(models[binary_indices[0]], genotype,
+                                                    prepared['maf'], prepared['annotations'], prepared['names'],
+                                                    rare_maf_cutoff=options.rare_maf_cutoff,
+                                                    rv_num_cutoff=options.rv_num_cutoff,
+                                                    rv_num_cutoff_max=options.rv_num_cutoff_max)
+                                            if isinstance(burdens, PreparedBinaryBurdens):
+                                                prepared['cmac'] = burdens.cmac
+                                        if (isinstance(burdens, PreparedBinaryBurdens)
+                                                and all(isinstance(models[i], BinaryNullModel) for i in binary_indices)):
+                                            from ..binary_gene_batch import evaluate_binary_burden_tile
+                                            if exact_burdens is None:
+                                                exact_burdens = ExactBinaryBurdenCache(burdens,
+                                                    allocation_guard=lambda required: workspace.ensure_free(
+                                                        additional_bytes=required, phase='gene_binary_exact_burden'))
+                                            def admit_normal(required):
+                                                try:
+                                                    workspace.set_required(tile_peak+required, phase='gene_binary_normal_batch')
+                                                    return True
+                                                except MemoryError:
+                                                    workspace.set_required(tile_peak, phase='gene_binary_normal_scalar_fallback')
+                                                    return False
+                                            def release_normal():
+                                                workspace.set_required(tile_peak, phase='gene_binary_normal_complete')
+                                            factories = [lambda index=tile[i]['trait_index']:
+                                                repository.acquire_spa(index, str(broker.device)) for i in binary_indices]
+                                            with prototype.profiler.measure('gene_binary_nominal_and_spa', gpu=True):
+                                                outputs, execution = evaluate_binary_burden_tile(
+                                                    [models[i] for i in binary_indices], genotype,
+                                                    prepared['maf'], prepared['annotations'], prepared['names'],
+                                                    prepared_burdens=burdens, spa_acquires=factories,
+                                                    exact_burden_cache=exact_burdens,
+                                                    rare_maf_cutoff=options.rare_maf_cutoff,
+                                                    rv_num_cutoff=options.rv_num_cutoff,
+                                                    rv_num_cutoff_max=options.rv_num_cutoff_max,
+                                                    p_filter_cutoff=options.p_filter_cutoff,
+                                                    tol=options.spa_tol, max_iter=options.spa_max_iter,
+                                                    normal_allocation_guard=admit_normal,
+                                                    normal_workspace_release=release_normal,
+                                                    profiler=prototype.profiler)
+                                            binary_outputs = dict(zip(binary_indices, outputs))
+                                            del outputs, execution, factories
                                     for ti, (descriptor, model) in enumerate(zip(tile, models)):
                                         p = _thin_pipeline(axis, model, axis._axis.samples, options, configuration, structural)
                                         if model.family == 'binomial':
                                             from ..binary import prepare_binary_burdens, staar_binary_phewas
-                                            if burdens is None:
-                                                # Model-tile admission precedes binding/checking its
-                                                # fitted states. Recheck the remaining owner budget at
-                                                # the actual burden allocation boundary; G is already
-                                                # resident and never credited as free storage.
-                                                workspace.ensure_free(phase='gene_binary_burden_prepare')
-                                                with p.profiler.measure('gene_binary_shared_burdens', gpu=True):
-                                                    burdens = prepare_binary_burdens(model, genotype, prepared['maf'],
-                                                        prepared['annotations'], prepared['names'], rare_maf_cutoff=options.rare_maf_cutoff,
-                                                        rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max)
-                                            with p.profiler.measure('gene_binary_nominal_and_spa', gpu=True):
-                                                value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
-                                                    prepared['annotations'], prepared['names'],
-                                                    spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
-                                                    prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
-                                                    rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
-                                                    p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
-                                                    max_iter=options.spa_max_iter, return_diagnostics=True)
-                                            selected = int(diagnostic['spa_selected'].sum())
-                                            failed = int(diagnostic['spa'].failed.sum())
+                                            if binary_outputs is not None:
+                                                value, selected, failed = binary_outputs[ti]
+                                            else:
+                                                with p.profiler.measure('gene_binary_nominal_and_spa', gpu=True):
+                                                    value, diagnostic = staar_binary_phewas(model, genotype, prepared['maf'],
+                                                        prepared['annotations'], prepared['names'],
+                                                        spa_acquire=lambda: repository.acquire_spa(descriptor['trait_index'], str(broker.device)),
+                                                        prepared_burdens=burdens, rare_maf_cutoff=options.rare_maf_cutoff,
+                                                        rv_num_cutoff=options.rv_num_cutoff, rv_num_cutoff_max=options.rv_num_cutoff_max,
+                                                        p_filter_cutoff=options.p_filter_cutoff, tol=options.spa_tol,
+                                                        max_iter=options.spa_max_iter, return_diagnostics=True)
+                                                selected = int(diagnostic['spa_selected'].sum())
+                                                failed = int(diagnostic['spa'].failed.sum())
+                                                if diagnostic['variant_covariance_constructed']:
+                                                    raise RuntimeError('binary burden path must not construct a variant covariance')
+                                                del diagnostic
                                             report['binary_spa_selected'] += selected
                                             report['binary_spa_failed'] += failed
                                             binary_counts[descriptor['trait_index']]['selected'] += selected
                                             binary_counts[descriptor['trait_index']]['failed'] += failed
-                                            if diagnostic['variant_covariance_constructed']:
-                                                raise RuntimeError('binary burden path must not construct a variant covariance')
-                                            del diagnostic
                                         else:
                                             cov_new = (4*genotype_elements*(2 if model.spectrum.blocks else 1)
                                                        +32*m*m+256*2**20
@@ -1534,8 +1665,8 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                             del covariance, payload
                                         result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
                                         del p, model, value
-                                    del scores, models
-                        del prepared, host, genotype, burdens
+                                    del scores, models, binary_outputs
+                        del prepared, host, genotype, burdens, exact_burdens
                     except BaseException as error:
                         # Completed leaf frames can otherwise retain a model,
                         # G and V even after the cache and leases are closed.
@@ -1544,7 +1675,7 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                     finally:
                         if prototype is not None:
                             prototype.models = []
-                        prepared, prototype, host, genotype, burdens = None, None, None, None, None
+                        prepared, prototype, host, genotype, burdens, exact_burdens = None, None, None, None, None, None
                         # A retained caller exception must not extend the last
                         # model lease or keep a completed covariance alive.
                         covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
@@ -1647,7 +1778,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         configuration['_single_host_lease_factory'] = host_memory_lease_factory
         profiler = StageProfiler(device, enabled=configuration.get('stage_profile', False))
         configuration['_stage_profiler'] = profiler
-        from ..phewas_resources import ResourceTelemetry, tensor_storage_footprint
+        from ..phewas_resources import ResourceTelemetry
         telemetry = ResourceTelemetry(configuration.get('memory_telemetry_seconds', 30.))
         last_sample = [None]
         memory_samples = []
@@ -1660,7 +1791,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             if token == last_sample[0]:
                 return
             last_sample[0] = token
-            sample.update(phase=phase, explicit_workspace_owners=tensor_storage_footprint(owners),
+            sample.update(phase=phase, explicit_workspace_owners=_workspace_storage_diagnostics(owners),
                           fitted_state_owners=getattr(model_repository, 'resident_storage_summary', lambda: {})())
             sample['fastskat_lobpcg_owner'] = lobpcg_owner.metadata()
             memory_samples.append(sample)
@@ -1850,6 +1981,9 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             report['model_repository'] = model_repository.summary()
         return report
     except BaseException as error:
+        # A caller may retain the original exception for diagnostics. Its leaf
+        # frames must not extend completed Single/gene tensor or model leases.
+        _clear_inactive_exception_frames(error)
         abort = getattr(writer, 'abort', None)
         if callable(abort):
             try:

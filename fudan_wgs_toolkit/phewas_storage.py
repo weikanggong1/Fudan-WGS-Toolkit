@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import wraps
 import csv
 import errno
@@ -22,11 +23,15 @@ from .binary_null import BinaryNullModel
 from .null_model import GaussianNullModel, KinshipSpectrum
 from .tensor_validation import finite_check_scratch_bytes
 from .npy_io import readonly_npy_mmap
+from .model_verification_cache import shared_verification
 
 
 _VERIFIED_FILES = {}
+_HASH_EXPECTED_IDENTITY = ContextVar('fitted_file_hash_identity', default=None)
 _FILE_VERIFICATION_METRICS = dict(calls=0, identity_hits=0, content_hashes=0,
-                                  content_bytes=0, content_hash_seconds=0.0)
+                                  content_bytes=0, content_hash_seconds=0.0,
+                                  shared_receipt_hits=0, shared_receipt_publications=0,
+                                  shared_receipt_unavailable=0)
 
 
 def _file_identity(stat):
@@ -45,17 +50,31 @@ def verify_file(path, expected):
             raise ValueError('immutable fitted-state identity changed')
         _FILE_VERIFICATION_METRICS['identity_hits'] += 1
         return identity
-    start = time.perf_counter()
-    actual = digest_file(path)
-    _FILE_VERIFICATION_METRICS['content_hashes'] += 1
-    _FILE_VERIFICATION_METRICS['content_bytes'] += stat.st_size
-    _FILE_VERIFICATION_METRICS['content_hash_seconds'] += time.perf_counter()-start
-    # Never associate bytes read while a file was replaced/modified with the
-    # identity observed before the content scan.
-    if _file_identity(path.stat()) != identity:
-        raise ValueError('immutable fitted-state identity changed during verification')
-    if actual != expected:
-        raise ValueError('fitted-state checksum differs')
+    with shared_verification(path, expected, identity) as receipt:
+        if receipt['hit']:
+            # Reuse content proof only for the exact original inode/version.
+            with path.open('rb', buffering=0) as stream:
+                if (_file_identity(os.fstat(stream.fileno())) != identity
+                        or _file_identity(path.stat()) != identity):
+                    raise ValueError('immutable fitted-state identity changed during verification')
+            _FILE_VERIFICATION_METRICS['shared_receipt_hits'] += 1
+        else:
+            start = time.perf_counter()
+            token = _HASH_EXPECTED_IDENTITY.set((str(path.absolute()), identity))
+            try:
+                actual = digest_file(path)
+            finally:
+                _HASH_EXPECTED_IDENTITY.reset(token)
+            _FILE_VERIFICATION_METRICS['content_hashes'] += 1
+            _FILE_VERIFICATION_METRICS['content_bytes'] += stat.st_size
+            _FILE_VERIFICATION_METRICS['content_hash_seconds'] += time.perf_counter()-start
+            # Do not publish bytes read while a source was replaced/modified.
+            if _file_identity(path.stat()) != identity:
+                raise ValueError('immutable fitted-state identity changed during verification')
+            if actual != expected:
+                raise ValueError('fitted-state checksum differs')
+    _FILE_VERIFICATION_METRICS['shared_receipt_publications'] += int(receipt['published'])
+    _FILE_VERIFICATION_METRICS['shared_receipt_unavailable'] += int(receipt['unavailable'])
     _VERIFIED_FILES[key] = (identity, expected)
     return identity
 
@@ -183,10 +202,20 @@ def _load_sparse_tensor(name, meta, directory, device, tensor_cache, tensor):
 
 
 def digest_file(path):
+    path = Path(path)
+    identity = _file_identity(path.stat())
+    expected = _HASH_EXPECTED_IDENTITY.get()
+    if expected is not None and expected[0] == str(path.absolute()) and expected[1] != identity:
+        raise ValueError('immutable fitted-state identity changed during verification')
     h = hashlib.sha256()
-    with Path(path).open('rb') as f:
+    with path.open('rb') as f:
+        if _file_identity(os.fstat(f.fileno())) != identity:
+            raise ValueError('immutable fitted-state identity changed during verification')
         for block in iter(lambda: f.read(8 * 2**20), b''):
             h.update(block)
+        if (_file_identity(os.fstat(f.fileno())) != identity
+                or _file_identity(path.stat()) != identity):
+            raise ValueError('immutable fitted-state identity changed during verification')
     return h.hexdigest()
 
 

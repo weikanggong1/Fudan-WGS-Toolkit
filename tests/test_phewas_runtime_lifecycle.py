@@ -420,6 +420,19 @@ def test_reader_diagnostics_keep_read_and_hash_timers_without_private_metadata()
         metadata_checksums_enabled=True)
 
 
+def test_reader_diagnostics_expose_only_finite_annotation_cache_counters():
+    reader = SimpleNamespace(reader_metadata=dict(annotation_cache=dict(
+        hits=3, builds=1, mapped_bytes=4096, read_seconds=.25,
+        misses=float('nan'), write_seconds=-1, private_path='private_path',
+        sample_keys=['private_sample'], source_sha256='private_binding')))
+    diagnostics = runtime._reader_metadata_diagnostics(SharedMetadataReader(reader))
+    assert diagnostics['annotation_cache'] == dict(
+        hits=3, builds=1, mapped_bytes=4096, read_seconds=.25)
+    assert diagnostics['annotation_cache_metrics_scope'].endswith('not peak RAM')
+    assert 'private_path' not in repr(diagnostics)
+    assert 'private_sample' not in repr(diagnostics)
+
+
 @pytest.mark.parametrize('outcome', ['success', 'attempt_error', 'publish_error'])
 def test_real_host_gate_recovery_drops_optional_lru_without_refilling_or_masking_deferral(
         tmp_path, monkeypatch, outcome):

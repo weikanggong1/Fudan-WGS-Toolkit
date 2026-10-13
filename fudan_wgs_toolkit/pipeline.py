@@ -10,6 +10,8 @@ from collections import OrderedDict
 from contextlib import contextmanager
 import hashlib
 import math
+from functools import lru_cache
+from pathlib import Path
 from typing import Mapping, Sequence
 import numpy as np
 import torch
@@ -27,6 +29,14 @@ from .statistics import association_test
 from .multi import joint_association_test, joint_individual_logp
 from .binary import association_binary_spa, individual_score_test_spa
 from .results import coding_record, single_variant_record, assemble_phewas_results, TraitRows
+
+
+@lru_cache(maxsize=1)
+def _annotation_semantics():
+    """Frozen selection source binding; numerical model settings are unrelated."""
+    directory = Path(__file__).parent
+    return {name:hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            for name in ("pipeline.py", "masks.py", "annotation_index.py", "annotation_cache.py")}
 
 
 def _individual_log_probabilities(score, variance):
@@ -330,9 +340,32 @@ class PheWASPipeline:
             raise ValueError(f"required mask annotation missing from catalog: {name}")
         return _strings(self.genotype.read_field(self.annotation_catalog[name], rows))
 
+    def _persistent_annotations(self, fields):
+        """Optional reader-authenticated cache; ordinary readers keep old behavior."""
+        provider = getattr(self.genotype, "annotation_cache_source", None)
+        if not callable(provider):
+            return None
+        source = provider(fields)
+        if source is None:
+            return None
+        from .annotation_cache import AnnotationCache
+        binding = dict(source["binding"], semantics_sha256=_annotation_semantics(),
+                       annotation_catalog=self.annotation_catalog, qc_path=self.qc_path)
+        return AnnotationCache(source["directory"], binding, source["validate"], source["metrics"],
+                               future=getattr(self, "host_memory_set_future", None))
+
     def _base_mask(self, chromosome, variant_type):
         key = (_chromosome(chromosome), variant_type)
         if key not in self._base_masks:
+            cache = self._persistent_annotations([self.qc_path, "chromosome"] +
+                                                 (["allele"] if variant_type != "variant" else []))
+            rules = dict(chromosome=key[0], variant_type=variant_type)
+            if cache is not None:
+                loaded = cache.load_array("base_mask", rules, dtype=np.bool_, size=self.genotype.n_variants, maximum=2)
+                if loaded is not None:
+                    self._base_masks[key] = loaded
+                    return loaded
+                cache.record_build()
             output = np.zeros(self.genotype.n_variants, dtype=bool)
             for offset in range(0, self.genotype.n_variants, self.options.annotation_block_size):
                 rows = np.arange(offset, min(offset + self.options.annotation_block_size, self.genotype.n_variants))
@@ -342,18 +375,31 @@ class PheWASPipeline:
                                            dtype=bool, count=len(rows))
                 output[rows] = variant_filter(a, variant_type) & on_chromosome
             self._base_masks[key] = output
+            if cache is not None:
+                cache.save_array("base_mask", rules, output)
         return self._base_masks[key]
 
     def _annotation_categories(self):
         categories = ("upstream", "downstream", "UTR3", "UTR5", "UTR5;UTR3",
                       "ncRNA_exonic", "ncRNA_exonic;splicing", "ncRNA_splicing")
         if self._category_codes is None:
+            cache = self._persistent_annotations([self.annotation_catalog.get("GENCODE.Category", "GENCODE.Category")])
+            rules = dict(categories=list(categories))
+            if cache is not None:
+                loaded = cache.load_array("category_codes", rules, dtype=np.uint8, size=self.genotype.n_variants,
+                                          maximum=len(categories) + 1)
+                if loaded is not None:
+                    self._category_codes = loaded
+                    return loaded
+                cache.record_build()
             self._category_codes = np.zeros(self.genotype.n_variants, dtype=np.uint8)
             for offset in range(0, self.genotype.n_variants, self.options.annotation_block_size):
                 rows = np.arange(offset, min(offset + self.options.annotation_block_size, self.genotype.n_variants))
                 values = self._field("GENCODE.Category", rows)
                 for code, category in enumerate(categories, 1):
                     self._category_codes[rows[values == category]] = code
+            if cache is not None:
+                cache.save_array("category_codes", rules, self._category_codes)
         return self._category_codes
 
     def prepare_annotation_index(self, chromosome, *, promoter_intervals=None,
@@ -383,16 +429,41 @@ class PheWASPipeline:
             if index.promoter_signature is not None and index.promoter_signature != signature:
                 raise ValueError("one annotation index cannot mix different promoter references")
             index.promoter_signature = signature
-            if any(name in needed for name in promoters):
-                promoter_mask = np.zeros(self.genotype.n_variants, dtype=bool)
-                if signature:
-                    starts = np.asarray([item[0] for item in signature])
-                    ends = np.maximum.accumulate(np.asarray([item[1] for item in signature]))
-                    previous = np.searchsorted(starts, self.position, side="right") - 1
-                    valid = previous >= 0
-                    promoter_mask[valid] = self.position[valid] <= ends[previous[valid]]
         if not needed:
             return index
+        fields = [self.qc_path, "chromosome", "position"]
+        if self.options.variant_type != "variant":
+            fields.append("allele")
+        semantic_fields = []
+        if any(name in ("upstream", "downstream", "UTR", "ncRNA") for name in needed):
+            semantic_fields.append("GENCODE.Category")
+        if any(not name.startswith("enhancer_") for name in needed):
+            semantic_fields.append("GENCODE.Info")
+        if any(name.startswith("enhancer_") for name in needed):
+            semantic_fields.append("GeneHancer")
+        semantic_fields.extend(signal for signal in ("CAGE", "DHS")
+                               if any(name.endswith("_" + signal) for name in needed))
+        fields.extend(self.annotation_catalog.get(name, name) for name in semantic_fields)
+        cache = self._persistent_annotations(fields)
+        rules = dict(chromosome=key[0], variant_type=key[1], categories=needed,
+                     promoter_signature=None if index.promoter_signature is None else
+                     [list(pair) for pair in index.promoter_signature])
+        if cache is not None:
+            loaded = cache.load_index(rules)
+            if loaded is not None:
+                for gene, groups in loaded._groups.items():
+                    index._groups.setdefault(gene, {}).update(groups)
+                index.prepared_categories.update(loaded.prepared_categories)
+                return index
+            cache.record_build()
+        if any(name in needed for name in promoters):
+            promoter_mask = np.zeros(self.genotype.n_variants, dtype=bool)
+            if signature:
+                starts = np.asarray([item[0] for item in signature])
+                ends = np.maximum.accumulate(np.asarray([item[1] for item in signature]))
+                previous = np.searchsorted(starts, self.position, side="right") - 1
+                valid = previous >= 0
+                promoter_mask[valid] = self.position[valid] <= ends[previous[valid]]
         base = self._base_mask(chromosome, self.options.variant_type)
         class_codes = self._annotation_categories() if any(name in ("upstream", "downstream", "UTR", "ncRNA") for name in needed) else None
         chunks = {}
@@ -431,6 +502,15 @@ class PheWASPipeline:
                         selected = np.flatnonzero(signals[category.split("_")[1]][local])
                         index.add_assignments(chunks, category, rows[local[selected]], [assignments[j] for j in selected])
         index.finish(chunks, needed)
+        if cache is not None:
+            # Preserve the original newly encountered gene/category order while
+            # borrowing finished immutable arrays; persistence never concatenates.
+            delta = CandidateAnnotationIndex(*key)
+            delta.promoter_signature = index.promoter_signature
+            delta.prepared_categories = set(needed)
+            for gene, category in chunks:
+                delta._groups.setdefault(gene, {})[category] = index._groups[gene][category]
+            cache.save_index(rules, delta)
         return index
 
     def annotation_gene_manifest(self, chromosome, **kwargs):

@@ -18,6 +18,8 @@ except ImportError:
 
 _MODES=('fp64','tf32')
 _calls=_products=_ptx_verified=_vector_calls=_empty_calls=_outer_calls=0
+_matrix_kernel_launches=_batched_calls=_batched_products=_largest_trait_batch=0
+_MAXIMUM_TRAIT_BATCH_SIZE=32
 _ptx_inspections=_ptx_cache_hits=0
 _capability_cache={}
 _verified_compiled_cache={}
@@ -58,6 +60,35 @@ if triton is not None:
                                        [b],dtype=tl.float32,is_pure=True,pack=1)
             acc=tl.dot(a,b,acc,input_precision='tf32')
         tl.store(C+rows[:,None]*N+cols[None,:],acc,
+                 (rows[:,None]<M)&(cols[None,:]<N))
+
+    @triton.jit
+    def _batched_gemm(P,C,T,M,N,K,
+                      BM:tl.constexpr,BN:tl.constexpr,BK:tl.constexpr):
+        # Six int64 rows contain operand pointers and their original strides.
+        # A model matrix is never stacked or copied to form the trait axis.
+        batch=tl.program_id(2).to(tl.int64)
+        a_ptr=tl.load(P+batch).to(tl.pointer_type(tl.float32))
+        b_ptr=tl.load(P+T+batch).to(tl.pointer_type(tl.float32))
+        as0=tl.load(P+2*T+batch);as1=tl.load(P+3*T+batch)
+        bs0=tl.load(P+4*T+batch);bs1=tl.load(P+5*T+batch)
+        rows=(tl.program_id(0)*BM+tl.arange(0,BM)).to(tl.int64)
+        cols=(tl.program_id(1)*BN+tl.arange(0,BN)).to(tl.int64)
+        inner=tl.arange(0,BK).to(tl.int64)
+        acc=tl.full((BM,BN),0,tl.float32)
+        # This is the same ordered BK=32 reduction and RNA conversion as _gemm.
+        for start in range(tl.cdiv(K,BK)):
+            kk=start*BK+inner
+            a=tl.load(a_ptr+rows[:,None]*as0+kk[None,:]*as1,
+                      (rows[:,None]<M)&(kk[None,:]<K),other=0)
+            b=tl.load(b_ptr+kk[:,None]*bs0+cols[None,:]*bs1,
+                      (kk[:,None]<K)&(cols[None,:]<N),other=0)
+            a=tl.inline_asm_elementwise("cvt.rna.tf32.f32 $0, $1;", "=r,r",
+                                       [a],dtype=tl.float32,is_pure=True,pack=1)
+            b=tl.inline_asm_elementwise("cvt.rna.tf32.f32 $0, $1;", "=r,r",
+                                       [b],dtype=tl.float32,is_pure=True,pack=1)
+            acc=tl.dot(a,b,acc,input_precision='tf32')
+        tl.store(C+batch*M*N+rows[:,None]*N+cols[None,:],acc,
                  (rows[:,None]<M)&(cols[None,:]<N))
 
 
@@ -169,16 +200,20 @@ def _owned_cache_sufficient(allocated,reserved,required,*,limit,reserve):
 
 
 def _guard_product_workspace(left,right,*,mode):
+    estimate=_estimated_product_workspace(left.shape,right.shape,mode=mode,left_dtype=left.dtype,right_dtype=right.dtype,breakdown=True)
+    _guard_workspace(left.device,estimate,left_shape=left.shape,right_shape=right.shape)
+
+
+def _guard_workspace(device,estimate,*,left_shape,right_shape):
     global _memory_guard_queries,_memory_guard_rejections,_memory_guard_max_workspace_bytes,_memory_guard_query_seconds,_memory_guard_last_rejection
     global _memory_guard_checks,_memory_guard_owned_cache_passes,_memory_guard_total_seconds,_memory_guard_allocator_seconds,_memory_guard_last_owned_cache_pass
-    estimate=_estimated_product_workspace(left.shape,right.shape,mode=mode,left_dtype=left.dtype,right_dtype=right.dtype,breakdown=True)
     required=estimate['required_bytes']
     if not required:return
     start=time.perf_counter()
     _memory_guard_checks+=1
     _memory_guard_max_workspace_bytes=max(_memory_guard_max_workspace_bytes,required)
     allocator_start=time.perf_counter()
-    allocated=torch.cuda.memory_allocated(left.device);reserved=torch.cuda.memory_reserved(left.device)
+    allocated=torch.cuda.memory_allocated(device);reserved=torch.cuda.memory_reserved(device)
     backend=_allocator_backend()
     _memory_guard_allocator_seconds+=time.perf_counter()-allocator_start
     _memory_guard_backend_counts[backend]=_memory_guard_backend_counts.get(backend,0)+1
@@ -196,14 +231,14 @@ def _guard_product_workspace(left,right,*,mode):
     query_start=time.perf_counter()
     _memory_guard_queries+=1
     try:
-        with torch.cuda.device(left.device):free,_=torch.cuda.mem_get_info()
+        with torch.cuda.device(device):free,_=torch.cuda.mem_get_info()
     finally:
         _memory_guard_query_seconds+=time.perf_counter()-query_start
         _memory_guard_total_seconds+=time.perf_counter()-start
     snapshot=_product_workspace_availability(allocated=allocated,reserved=reserved,free=free,limit=_memory_limit_bytes,reserve=_memory_reserve_bytes)
     if required>snapshot['available_bytes']:
         _memory_guard_rejections+=1
-        _memory_guard_last_rejection=dict(snapshot,**estimate,allocator_backend=backend,left_shape=list(left.shape),right_shape=list(right.shape))
+        _memory_guard_last_rejection=dict(snapshot,**estimate,allocator_backend=backend,left_shape=list(left_shape),right_shape=list(right_shape))
         raise MemoryError(f'Native TF32 workspace requires estimated {required} new bytes, available {snapshot["available_bytes"]}; '
             f'allocated={allocated}, reserved={reserved}, CUDAfree={free}, cap_available={snapshot["cap_available_bytes"]}, '
             f'live_available={snapshot["live_available_bytes"]}, binding={snapshot["binding"]}, casts={estimate["cast_bytes"]}, '
@@ -251,7 +286,7 @@ def _native_geometry(m,n,k):
 
 
 def _matrix_product(left,right):
-    global _calls,_ptx_verified,_padded_output_elements
+    global _calls,_ptx_verified,_padded_output_elements,_matrix_kernel_launches
     if triton is None:raise RuntimeError('Native TF32 matrices require Triton >=3 and CUDA')
     if _device_capability(left.device)[0]<8:raise RuntimeError('Native TF32 requires Ampere or newer CUDA hardware')
     m,k=left.shape;n=right.shape[1];bm,bn,bk,warps,stages=_native_geometry(m,n,k)
@@ -259,7 +294,7 @@ def _matrix_product(left,right):
     with torch.cuda.device(left.device):
         compiled=_gemm[(triton.cdiv(m,bm),triton.cdiv(n,bn))](left,right,result,m,n,k,*left.stride(),*right.stride(),BM=bm,BN=bn,BK=bk,num_warps=warps,num_stages=stages)
     _verify_compiled_tf32(compiled)
-    _calls+=1;_ptx_verified+=1
+    _calls+=1;_ptx_verified+=1;_matrix_kernel_launches+=1
     _padded_output_elements+=triton.cdiv(m,bm)*bm*triton.cdiv(n,bn)*bn-m*n
     return result
 
@@ -320,15 +355,198 @@ def matmul(left,right,*,mode='fp64'):
     return result
 
 
+def _batch_operand_views(operand):
+    """Normalize a shared matrix or trait matrices using views only."""
+    if isinstance(operand,torch.Tensor):
+        if operand.layout!=torch.strided:raise ValueError('Batched products require dense operands')
+        if operand.ndim==2:return (operand,),True
+        if operand.ndim==3:return tuple(operand.unbind(0)),False
+        raise ValueError('Batched products require 2D shared or 3D trait-axis operands')
+    if isinstance(operand,(tuple,list)):
+        values=tuple(operand)
+        if not values or any(not isinstance(value,torch.Tensor) or value.ndim!=2 for value in values):
+            raise ValueError('Batched operand sequences must contain nonempty 2D tensors')
+        return values,False
+    raise TypeError('Batched operands must be tensors or tensor sequences')
+
+
+def _normalise_batched_operands(left,right,*,maximum_batch_size):
+    if type(maximum_batch_size) is not int or not 1<=maximum_batch_size<=_MAXIMUM_TRAIT_BATCH_SIZE:
+        raise ValueError('maximum_batch_size must be an integer between 1 and 32')
+    # Bound host view objects too: unbind of an inadmissible 3D trait axis can
+    # allocate many Python/Tensor owners before any CUDA workspace check.
+    for operand in (left,right):
+        count=(operand.shape[0] if isinstance(operand,torch.Tensor) and operand.ndim==3
+               else len(operand) if isinstance(operand,(tuple,list)) else 1)
+        if count>maximum_batch_size:
+            raise ValueError(f'Trait batch size must be between 1 and {maximum_batch_size}')
+    lefts,left_shared=_batch_operand_views(left)
+    rights,right_shared=_batch_operand_views(right)
+    count=max(len(lefts),len(rights))
+    if not count or count>maximum_batch_size:
+        raise ValueError(f'Trait batch size must be between 1 and {maximum_batch_size}')
+    if (not left_shared and len(lefts)!=count) or (not right_shared and len(rights)!=count):
+        raise ValueError('Batched operands must have equal trait counts; only 2D matrices are shared')
+    if left_shared:lefts=lefts*count
+    if right_shared:rights=rights*count
+    if any(value.layout!=torch.strided for value in (*lefts,*rights)):
+        raise ValueError('Batched products require dense operands')
+    if any(tuple(value.shape)!=tuple(lefts[0].shape) for value in lefts) or any(tuple(value.shape)!=tuple(rights[0].shape) for value in rights):
+        raise ValueError('Every trait in a batch must have the same matrix dimensions')
+    _native_route(lefts[0].shape,rights[0].shape)
+    device=lefts[0].device
+    if any(value.device!=device for value in (*lefts,*rights)):
+        raise ValueError('Batched products require inputs on the same device')
+    return lefts,rights
+
+
+def _operand_view_key(value):
+    # Geometry rather than Python object identity deduplicates equal views too.
+    # data_ptr already includes storage_offset; obtaining it does not read CUDA.
+    return (value.data_ptr(),tuple(value.shape),tuple(value.stride()),value.dtype,value.device)
+
+
+def _estimated_batched_workspace(lefts,rights,*,breakdown=False):
+    """Count only NEW storage, including pointers, casts and batch output.
+
+    Model matrices and the common genotype panel remain resident inputs. FP64
+    input views with the same pointer/shape/strides are cast once. Singleton
+    routes retain independent FP32 formulas and a conservative layout/temporary
+    allowance; ordinary TF32 GEMM never materializes strided inputs.
+    """
+    count=len(lefts);m,k=lefts[0].shape;n=rights[0].shape[1]
+    route=_native_route(lefts[0].shape,rights[0].shape)
+    casts=0;seen=set()
+    if route!='empty':
+        for value in (*lefts,*rights):
+            if value.dtype==torch.float64:
+                key=_operand_view_key(value)
+                if key not in seen:casts+=4*value.numel();seen.add(key)
+    pointers=48*count if route=='tf32_mma' else 0
+    output=4*count*m*n
+    layout=4*count*(m*k+k*n) if route in ('gemv','dot') else 0
+    temporary=4*m*n if route in ('gemv','dot','outer') else 0
+    estimate=dict(required_bytes=casts+pointers+output+layout+temporary,cast_bytes=casts,
+        pointer_table_bytes=pointers,layout_copy_allowance_bytes=layout,
+        output_bytes=output,temporary_output_bytes=temporary,component_workspace_bytes=0,
+        trait_batch_size=count,route='batched_'+route)
+    return estimate if breakdown else estimate['required_bytes']
+
+
+def _cast_batched_operands(lefts,rights):
+    # Local ownership lasts through enqueue. No source/cast is cached globally.
+    casts={}
+    def convert(value):
+        if value.dtype==torch.float32:return value
+        key=_operand_view_key(value)
+        if key not in casts:casts[key]=value.to(torch.float32)
+        return casts[key]
+    try:
+        return tuple(map(convert,lefts)),tuple(map(convert,rights))
+    finally:
+        # A later cast can fail after earlier matrices have been allocated.
+        # The traceback must not keep that local ownership dictionary alive.
+        casts.clear()
+
+
+def _batch_descriptor_rows(lefts,rights):
+    return [[value.data_ptr() for value in lefts],[value.data_ptr() for value in rights],
+            [value.stride(0) for value in lefts],[value.stride(1) for value in lefts],
+            [value.stride(0) for value in rights],[value.stride(1) for value in rights]]
+
+
+def _batched_matrix_product(lefts,rights):
+    global _calls,_ptx_verified,_padded_output_elements,_matrix_kernel_launches
+    if triton is None:raise RuntimeError('Native TF32 matrices require Triton >=3 and CUDA')
+    device=lefts[0].device
+    if _device_capability(device)[0]<8:raise RuntimeError('Native TF32 requires Ampere or newer CUDA hardware')
+    count=len(lefts);m,k=lefts[0].shape;n=rights[0].shape[1]
+    bm,bn,bk,warps,stages=_native_geometry(m,n,k)
+    # Pointer table includes each original FP32 view's own strides. Shared
+    # operands repeat pointers, rather than repeat their actual matrix data.
+    pointers=result=None
+    try:
+        pointers=torch.tensor(_batch_descriptor_rows(lefts,rights),dtype=torch.int64,device=device)
+        result=torch.empty((count,m,n),dtype=torch.float32,device=device)
+        with torch.cuda.device(device):
+            compiled=_batched_gemm[(triton.cdiv(m,bm),triton.cdiv(n,bn),count)](
+                pointers,result,count,m,n,k,BM=bm,BN=bn,BK=bk,num_warps=warps,num_stages=stages)
+        _verify_compiled_tf32(compiled)
+        _calls+=count;_ptx_verified+=count;_matrix_kernel_launches+=1
+        _padded_output_elements+=count*(triton.cdiv(m,bm)*bm*triton.cdiv(n,bn)*bn-m*n)
+        return result
+    finally:
+        # Release NEW tensors even if allocation, launch or PTX audit fails.
+        # The normal returned output keeps its own reference after return.
+        pointers=result=None;lefts=rights=()
+
+
+def batched_matmul(left,right,*,mode='tf32',maximum_batch_size=32):
+    """Independent trait products with a shared or per-trait right operand.
+
+    Each operand is a shared 2D tensor, a 3D tensor with trait axis first, or a
+    sequence of same-shaped 2D tensors. Only a 2D operand broadcasts across
+    traits. The output always has shape [traits, rows, columns]. At most 32
+    traits are admitted; callers split larger batches before entering this API.
+
+    Native TF32 uses original pointers/strides and one three-dimensional kernel
+    launch, with the same RNA rounding, BK=32 K order and FP32 accumulator as
+    independent matmul calls. The workspace guard covers pointer tables, FP32
+    output, required casts and singleton-route temporary allowance. It neither
+    admits nor owns caller allocations used to form weighted genotype panels.
+    FP64 mode is an explicit independent-product control, including on CPU.
+    """
+    global _products,_vector_calls,_empty_calls,_outer_calls
+    global _batched_calls,_batched_products,_largest_trait_batch
+    validate_mode(mode)
+    lefts,rights=_normalise_batched_operands(left,right,maximum_batch_size=maximum_batch_size)
+    if mode=='fp64':return torch.stack([a@b for a,b in zip(lefts,rights)])
+    if any(value.dtype not in (torch.float32,torch.float64) for value in (*lefts,*rights)):
+        raise ValueError('Native TF32 accepts only float32/float64 input storage')
+    if not lefts[0].is_cuda:
+        raise ValueError('Native TF32 requires inputs on the same CUDA device')
+    count=len(lefts);m,k=lefts[0].shape;n=rights[0].shape[1]
+    route=_native_route(lefts[0].shape,rights[0].shape)
+    estimate=_estimated_batched_workspace(lefts,rights,breakdown=True)
+    result=a=b=None
+    try:
+        _guard_workspace(lefts[0].device,estimate,left_shape=(count,m,k),right_shape=(count,k,n))
+        if route=='empty':
+            result=torch.zeros((count,m,n),dtype=torch.float32,device=lefts[0].device)
+            _empty_calls+=count
+        else:
+            lefts,rights=_cast_batched_operands(lefts,rights)
+            if route=='tf32_mma':result=_batched_matrix_product(lefts,rights)
+            else:
+                result=torch.empty((count,m,n),dtype=torch.float32,device=lefts[0].device)
+                for index,(a,b) in enumerate(zip(lefts,rights)):
+                    result[index].copy_(_outer_product(a,b) if route=='outer' else _vector_product(a,b))
+                if route=='outer':_outer_calls+=count
+                else:
+                    _vector_calls+=count;_vector_routes[route]=_vector_routes.get(route,0)+count
+        _products+=count;_modes[mode]=_modes.get(mode,0)+count
+        _batched_calls+=1;_batched_products+=count;_largest_trait_batch=max(_largest_trait_batch,count)
+        return result
+    finally:
+        # Retry owners may retain the exception; do not pin NEW cast/output
+        # matrices in this frame while the caller shrinks the phenotype tile.
+        lefts=rights=();result=a=b=None
+
+
 def execution_metadata(*,reset=False):
     """Report observed execution; configuration alone is never MMA evidence."""
     global _calls,_products,_ptx_verified,_vector_calls,_empty_calls,_outer_calls,_padded_output_elements
     global _ptx_inspections,_ptx_cache_hits
+    global _matrix_kernel_launches,_batched_calls,_batched_products,_largest_trait_batch
     global _memory_guard_queries,_memory_guard_rejections,_memory_guard_max_workspace_bytes,_memory_guard_query_seconds,_memory_guard_last_rejection
     global _memory_guard_checks,_memory_guard_owned_cache_passes,_memory_guard_total_seconds,_memory_guard_allocator_seconds,_memory_guard_last_owned_cache_pass
     report={'backend':'triton_explicit_native_tf32' if _calls else 'not_used',
         'logical_product_count':_products,'logical_product_modes':dict(_modes),
-        'tf32_gemm_call_count':_calls,'tf32_actual_kernel_launch_count':_calls,
+        'tf32_gemm_call_count':_calls,'tf32_actual_kernel_launch_count':_matrix_kernel_launches,
+        'tf32_gemm_counter_scope':'GEMM/verified counts are independent trait products; actual launch count records ordinary or batched kernel launches',
+        'trait_batched_call_count':_batched_calls,'trait_batched_product_count':_batched_products,
+        'largest_trait_batch':_largest_trait_batch,'maximum_trait_batch_size':_MAXIMUM_TRAIT_BATCH_SIZE,
+        'batched_operand_policy':'Original FP32 pointers/strides; no stacked model matrices; shared exact FP64 views cast once',
         'ptx_verified_tf32_gemm_count':_ptx_verified,'fp32_vector_product_count':_vector_calls,
         'fp32_vector_routes':dict(_vector_routes),'fp32_outer_product_count':_outer_calls,
         'empty_product_count':_empty_calls,
@@ -359,6 +577,7 @@ def execution_metadata(*,reset=False):
     if reset:
         _calls=_products=_ptx_verified=_vector_calls=_empty_calls=_outer_calls=_padded_output_elements=0
         _ptx_inspections=_ptx_cache_hits=0
+        _matrix_kernel_launches=_batched_calls=_batched_products=_largest_trait_batch=0
         _modes.clear();_vector_routes.clear()
         _memory_guard_queries=_memory_guard_rejections=_memory_guard_max_workspace_bytes=0
         _memory_guard_query_seconds=0.;_memory_guard_last_rejection=None

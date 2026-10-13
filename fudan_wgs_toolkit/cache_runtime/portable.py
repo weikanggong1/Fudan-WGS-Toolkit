@@ -315,9 +315,11 @@ class PortableMetadataReader:
         self._metadata_seconds = self._verification_seconds = 0.0
         self._sha_baseline = dict(_SHA_METRICS)
         self._sample_lookup = None
+        self._annotation_cache_metrics = {}
         raw = (self.directory / "manifest.json").read_bytes()
         if (self.directory / "COMPLETE").read_text() != hashlib.sha256(raw).hexdigest():
             raise ValueError("portable metadata completion marker differs")
+        self._metadata_manifest_sha256 = hashlib.sha256(raw).hexdigest()
         self.manifest = json.loads(raw)
         if self.manifest.get("format") != FORMAT or self.manifest.get("schema_version") != 1:
             raise ValueError("unsupported portable metadata format")
@@ -529,6 +531,41 @@ class PortableMetadataReader:
         self._metadata_seconds += time.perf_counter() - started
         return values
 
+    def annotation_cache_source(self, fields):
+        """Bind optional derived masks to authenticated original annotations.
+
+        This verifies the files without decoding strings. Repeated requests use
+        the existing identity-bracketed verification, not another content scan.
+        Unchecked readers cannot authorize persistent annotation reuse.
+        """
+        if not self._verify_checksums:
+            self._annotation_cache_metrics["disabled_unverified_source"] = True
+            return None
+        names = set()
+        def files(spec):
+            if "file" in spec:
+                names.add(spec["file"])
+            for value in spec.values():
+                if isinstance(value, dict):
+                    files(value)
+        selected = sorted(set(fields))
+        for field in selected:
+            if field not in self.manifest["fields"]:
+                return None  # The original selector reports a missing field.
+            files(self.manifest["fields"][field])
+        names = tuple(sorted(names))
+        def validate():
+            for name in names:
+                self._verify(name)
+        validate()
+        return dict(directory=self.directory / ".candidate_annotations",
+            binding=dict(metadata_manifest_sha256=self._metadata_manifest_sha256,
+                genotype_manifest_sha256=self.manifest["genotype_manifest_sha256"],
+                n_variants=self.n_variants,
+                fields={field:self.manifest["fields"][field] for field in selected},
+                files={name:self.manifest["files"][name] for name in names}),
+            validate=validate, metrics=self._annotation_cache_metrics)
+
     @property
     def reader_metadata(self):
         manifest_checksum = _sha(self.directory / "manifest.json")
@@ -538,6 +575,8 @@ class PortableMetadataReader:
             metadata_checked_files=self._checked_files,
             metadata_checksum_verification_seconds=self._verification_seconds,
             metadata_checksums_enabled=self._verify_checksums,
+            annotation_cache=dict(self._annotation_cache_metrics,
+                metrics_scope="reader lifetime; mapped_bytes is cumulative file size, not peak RAM"),
             metadata_checksum_process_delta={key: value-self._sha_baseline[key]
                 for key, value in _SHA_METRICS.items()},
             metadata_checksum_metrics_scope="process cumulative delta since this reader opened",

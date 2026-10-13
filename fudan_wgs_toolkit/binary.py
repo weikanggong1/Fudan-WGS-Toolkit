@@ -391,11 +391,47 @@ def association_binary_spa(genotype, maf, residual, fitted_probability, xw,
 _BINARY_BURDEN_SEAL = object()
 
 
+class _BinaryPanelSource:
+    """Private immutable-use source; concrete readers prove their open recipe."""
+    maximum_panel_width = 512
+    ndim = 2
+    is_cuda = False
+
+    def validate(self):
+        raise NotImplementedError
+
+    def read_columns(self, columns):
+        raise NotImplementedError
+
+
+def _binary_genotype_panel(source, columns, start, stop):
+    """Read one original ordered FP32 panel without a whole-mask host tensor."""
+    selected = columns[start:stop]
+    if isinstance(source, _BinaryPanelSource):
+        source.validate()
+        return source.read_columns(selected)
+    if len(columns) == source.shape[1]:
+        return source[:, start:stop]
+    return source[:, torch.as_tensor(selected, dtype=torch.int64, device=source.device)]
+
+
+def _binary_panel_width(source, requested):
+    return min(requested, source.maximum_panel_width) if isinstance(source, _BinaryPanelSource) else requested
+
+
+def _guard_exact_burden_workspace(device, required):
+    if torch.device(device).type == 'cuda':
+        from .tf32 import _guard_workspace
+        _guard_workspace(device, dict(required_bytes=required, cast_bytes=0,
+            layout_copy_allowance_bytes=0, output_bytes=required,
+            backend='binary_exact_burden_cache'), left_shape=(), right_shape=())
+
+
 @dataclass(frozen=True)
 class PreparedBinaryBurdens:
     """Immutable-use mask/cohort burdens; keep the source alive until reuse ends."""
     source: object
-    source_tensor: torch.Tensor
+    source_tensor: object
     source_stamp: tuple
     sample_ids: np.ndarray
     maf: torch.Tensor
@@ -409,7 +445,98 @@ class PreparedBinaryBurdens:
     _seal: object
 
 
+class ExactBinaryBurdenCache:
+    """Lazy original FP64 burdens owned by one immutable mask and sample axis.
+
+    Only selected weight columns are evaluated. Native TF32 burdens are never
+    upcast for SPA. The cache is discarded with its prepared mask; allocation
+    admission belongs to the caller's existing gene workspace.
+    """
+    def __init__(self, prepared, *, allocation_guard=None, variant_tile_size=512):
+        if not isinstance(prepared, PreparedBinaryBurdens) or prepared._seal is not _BINARY_BURDEN_SEAL:
+            raise ValueError("exact burden cache requires verified prepared burdens")
+        if type(variant_tile_size) is not int or variant_tile_size < 1:
+            raise ValueError("variant_tile_size must be a positive integer")
+        self.prepared = prepared
+        self.allocation_guard = allocation_guard
+        self.variant_tile_size = variant_tile_size
+        self.weights = self.values = None
+        self.filled = set()
+        self.build_calls = self.columns_computed = 0
+        self._metadata_stamp = (_genotype_stamp(prepared.maf),
+            None if prepared.annotations is None else _genotype_stamp(prepared.annotations))
+
+    def get(self, prepared, index):
+        if (prepared is not self.prepared or prepared.source_stamp != _genotype_stamp(prepared.source)
+                or self._metadata_stamp != (_genotype_stamp(prepared.maf),
+                    None if prepared.annotations is None else _genotype_stamp(prepared.annotations))):
+            raise ValueError("exact burden cache has a different or mutated prepared mask")
+        columns = index.detach().cpu().tolist()
+        width = prepared.weights.shape[1]
+        if len(set(columns)) != len(columns) or any(c < 0 or c >= width for c in columns):
+            raise ValueError("exact burden columns must be unique valid weight indices")
+        missing = [c for c in columns if c not in self.filled]
+        g, count = prepared.source_tensor, len(prepared.maf)
+        if not columns:
+            return torch.empty((g.shape[0], 0), dtype=torch.float64,
+                               device=prepared.burdens.device)
+        if missing:
+            tile = _binary_panel_width(g, self.variant_tile_size)
+            panel = min(count, tile)
+            new_bytes = (12*g.shape[0]*panel + 8*g.shape[0]*(len(missing)+len(columns))
+                         + 8*count*len(missing))
+            if self.values is None:
+                new_bytes += 8*(g.shape[0]+count)*width
+            if self.allocation_guard is not None:
+                self.allocation_guard(new_bytes)
+            _guard_exact_burden_workspace(prepared.burdens.device, new_bytes)
+            if self.values is None:
+                self.weights = annotation_weights(prepared.maf, prepared.annotations,
+                                                   dtype=torch.float64)[0]
+                self.values = torch.empty((g.shape[0], width), dtype=torch.float64,
+                                          device=prepared.burdens.device)
+            selected = torch.tensor(missing, dtype=torch.int64, device=self.weights.device)
+            weights = self.weights[:, selected]
+            exact = torch.zeros((g.shape[0], len(missing)), dtype=torch.float64,
+                                device=prepared.burdens.device)
+            for start in range(0, count, tile):
+                stop = min(start+tile, count)
+                block = _binary_genotype_panel(g, prepared.columns, start, stop)
+                try:
+                    exact.add_(block.to(device=exact.device, dtype=torch.float64) @ weights[start:stop])
+                finally:
+                    del block
+            self.values[:, selected] = exact
+            self.filled.update(missing)
+            self.build_calls += 1
+            self.columns_computed += len(missing)
+        if self.allocation_guard is not None:
+            self.allocation_guard(8*g.shape[0]*len(columns))
+        _guard_exact_burden_workspace(prepared.burdens.device, 8*g.shape[0]*len(columns))
+        return self.values[:, index]
+
+
+class _BinaryPreparedTileBinding:
+    """Internal proof that common MAF/annotations and each model axis were checked."""
+    def __init__(self, prepared, models, genotype, maf, annotations, names,
+                 rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max):
+        self.prepared = prepared
+        self.models = frozenset(id(model) for model in models)
+        self.inputs = (id(genotype), id(maf), id(annotations), tuple(() if names is None else names),
+                       rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max)
+        self._seal = _BINARY_BURDEN_SEAL
+
+    def matches(self, prepared, model, genotype, maf, annotations, names,
+                rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max):
+        return (self._seal is _BINARY_BURDEN_SEAL and self.prepared is prepared
+            and id(model) in self.models and self.inputs ==
+            (id(genotype), id(maf), id(annotations), tuple(() if names is None else names),
+             rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max))
+
+
 def _genotype_stamp(value):
+    if isinstance(value, _BinaryPanelSource):
+        return value.validate()
     if isinstance(value, torch.Tensor):
         return (value.data_ptr(), tuple(value.shape), tuple(value.stride()),
                 str(value.dtype), str(value.device), value._version)
@@ -435,7 +562,10 @@ def prepare_binary_burdens(model, genotype, maf, annotations=None, names=None, *
         raise ValueError("variant_tile_size must be a positive integer")
     mode = validate_mode(getattr(model, "matmul_mode", "fp64"))
     dtype = torch.float32 if mode == "tf32" else torch.float64
-    source = torch.as_tensor(genotype)
+    source = genotype if isinstance(genotype, _BinaryPanelSource) else torch.as_tensor(genotype)
+    source_stamp = _genotype_stamp(genotype)
+    if isinstance(source, _BinaryPanelSource) and not np.array_equal(source.sample_ids, model.sample_ids):
+        raise ValueError("binary panel source has a different fitted sample axis")
     f = _double(maf, device=model.device)
     if source.ndim != 2 or source.shape[0] != model.n or f.shape != (source.shape[1],):
         raise ValueError("binary genotype/MAF must align with the fitted model")
@@ -473,20 +603,24 @@ def prepare_binary_burdens(model, genotype, maf, annotations=None, names=None, *
         cmac = _cmac_scalar_sum(g)
     else:
         burdens = torch.zeros((model.n, weights.shape[1]), dtype=dtype, device=model.device)
-        for start in range(0, count, variant_tile_size):
-            stop = min(start+variant_tile_size, count)
-            if count == source.shape[1]:
-                piece = source[:, start:stop]
-            else:
-                piece = source[:, torch.as_tensor(columns[start:stop], dtype=torch.int64)]
-            _finite(piece, "genotype")
-            block = piece.to(device=model.device, dtype=dtype)
-            burdens.add_(matmul(block, weights[start:stop], mode=mode))
-            cmac += block.sum(dtype=torch.float64)
+        tile = _binary_panel_width(source, variant_tile_size)
+        for start in range(0, count, tile):
+            stop = min(start+tile, count)
+            piece = block = None
+            try:
+                piece = _binary_genotype_panel(source, columns, start, stop)
+                _finite(piece, "genotype")
+                block = piece.to(device=model.device, dtype=dtype)
+                burdens.add_(matmul(block, weights[start:stop], mode=mode))
+                cmac += block.sum(dtype=torch.float64)
+            finally:
+                del piece, block
     ids = np.asarray(model.sample_ids, dtype=str).copy()
     ids.flags.writeable = False
     columns.flags.writeable = False
-    return PreparedBinaryBurdens(genotype, source, _genotype_stamp(genotype), ids, f,
+    if source_stamp != _genotype_stamp(genotype):
+        raise ValueError("binary genotype source changed during preparation")
+    return PreparedBinaryBurdens(genotype, source, source_stamp, ids, f,
         annotation, tuple(labels), columns, weights, burdens, float(cmac), mode, _BINARY_BURDEN_SEAL)
 
 
@@ -556,7 +690,9 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
                          rv_num_cutoff_max=10**9, p_filter_cutoff=.05,
                          tol=2**-13, max_iter=1000, spa_variant_tile_size=512,
                          prepared_burdens=None, variant_tile_size=512,
-                         return_diagnostics=False):
+                         return_diagnostics=False, _normal_products=None,
+                         _exact_burden_cache=None, _device_output=False,
+                         _prepared_binding=None):
     """Paper binary STAAR-Burden, with small covariance and selective SPA.
 
     A minor-oriented/imputed [N,M] genotype is multiplied by the two Beta
@@ -587,26 +723,33 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
             rare_maf_cutoff=rare_maf_cutoff, rv_num_cutoff=rv_num_cutoff,
             rv_num_cutoff_max=rv_num_cutoff_max, variant_tile_size=variant_tile_size)
     else:
+        bound = (isinstance(_prepared_binding, _BinaryPreparedTileBinding)
+            and _prepared_binding.matches(prepared, model, genotype, maf, annotations, names,
+                rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max))
         if (not isinstance(prepared, PreparedBinaryBurdens) or prepared._seal is not _BINARY_BURDEN_SEAL
                 or prepared.source is not genotype or prepared.source_stamp != _genotype_stamp(genotype)
-                or not np.array_equal(prepared.sample_ids, model.sample_ids)
+                or (not bound and not np.array_equal(prepared.sample_ids, model.sample_ids))
                 or prepared.matmul_mode != mode or prepared.burdens.device != model.device):
             raise ValueError("prepared binary burdens have a different source, cohort or execution mode")
-        full_f = _double(maf, device=model.device)
-        selected = (full_f > 0) & (full_f < rare_maf_cutoff)
-        index = torch.nonzero(selected, as_tuple=True)[0].cpu().numpy()
-        given_a = None if annotations is None else _double(annotations, device=model.device)[selected]
-        labels = tuple(f"annotation_{i+1}" for i in range(0 if given_a is None else given_a.shape[1])) if names is None else tuple(names)
-        if (not np.array_equal(index, prepared.columns) or not torch.equal(full_f[selected], prepared.maf)
-                or (given_a is None) != (prepared.annotations is None) or labels != prepared.names
-                or (given_a is not None and not torch.equal(given_a, prepared.annotations))):
-            raise ValueError("prepared binary burdens have different selected MAF/annotations")
+        if not bound:
+            full_f = _double(maf, device=model.device)
+            selected = (full_f > 0) & (full_f < rare_maf_cutoff)
+            index = torch.nonzero(selected, as_tuple=True)[0].cpu().numpy()
+            given_a = None if annotations is None else _double(annotations, device=model.device)[selected]
+            labels = tuple(f"annotation_{i+1}" for i in range(0 if given_a is None else given_a.shape[1])) if names is None else tuple(names)
+            if (not np.array_equal(index, prepared.columns) or not torch.equal(full_f[selected], prepared.maf)
+                    or (given_a is None) != (prepared.annotations is None) or labels != prepared.names
+                    or (given_a is not None and not torch.equal(given_a, prepared.annotations))):
+                raise ValueError("prepared binary burdens have different selected MAF/annotations")
     g, f, annotation = prepared.source_tensor, prepared.maf, prepared.annotations
     labels, count, weights, burdens = prepared.names, len(f), prepared.weights, prepared.burdens
     if count < rv_num_cutoff or count >= rv_num_cutoff_max:
         raise ValueError("rare-variant count is outside the allowed interval")
     k = len(labels)
-    score, covariance = model.score_covariance(burdens)
+    score, covariance = (model.score_covariance(burdens) if _normal_products is None
+                         else _normal_products)
+    if score.shape != (burdens.shape[1],) or covariance.shape != (burdens.shape[1], burdens.shape[1]):
+        raise ValueError("normal burden products must match the prepared weight columns")
     variance = covariance.diagonal()
     nominal = _chi1_from_score(score, variance)
     pvalues = nominal.clone()
@@ -615,25 +758,35 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
     with _spa_context(model, spa_model, spa_acquire, choose) as spa_model:
         if bool(choose.any()):
             index = torch.nonzero(choose, as_tuple=True)[0]
-            exact_weights = annotation_weights(f, annotation, dtype=torch.float64)[0][:, index]
-            exact_burdens = torch.zeros((g.shape[0], len(index)), dtype=torch.float64, device=model.device)
-            # Recompute selected columns in FP64 without doubling a long
-            # samples-by-variants slab. Only one variant tile is converted.
-            for start in range(0, count, spa_variant_tile_size):
-                stop = min(start+spa_variant_tile_size, count)
-                if count == g.shape[1]:
-                    block = g[:, start:stop]
-                else:
-                    columns = torch.tensor(prepared.columns[start:stop], dtype=torch.int64, device=g.device)
-                    block = g[:, columns]
-                exact_burdens.add_(block.to(device=model.device, dtype=torch.float64) @ exact_weights[start:stop])
+            if _exact_burden_cache is None:
+                exact_weights = annotation_weights(f, annotation, dtype=torch.float64)[0][:, index]
+                exact_burdens = torch.zeros((g.shape[0], len(index)), dtype=torch.float64, device=model.device)
+                # Recompute selected columns in FP64 without doubling a long
+                # samples-by-variants slab. Only one variant tile is converted.
+                tile = _binary_panel_width(g, spa_variant_tile_size)
+                for start in range(0, count, tile):
+                    stop = min(start+tile, count)
+                    block = _binary_genotype_panel(g, prepared.columns, start, stop)
+                    try:
+                        exact_burdens.add_(block.to(device=model.device, dtype=torch.float64) @ exact_weights[start:stop])
+                    finally:
+                        del block
+                del exact_weights
+            else:
+                exact_burdens = _exact_burden_cache.get(prepared, index)
             exact_scores = exact_burdens.T @ spa_model.scaled_residuals
             projected = exact_burdens - spa_model.projection_left @ (spa_model.xw @ exact_burdens)
             corrected = binary_spa(exact_scores, projected, spa_model.fitted_probability,
                                    tol=tol, max_iter=max_iter)
             pvalues[index] = corrected.pvalues
             _copy_spa_result(flags,index,corrected)
-            del exact_weights, exact_burdens, projected
+            del exact_burdens, projected
+    if _device_output:
+        return pvalues, dict(method="binary_burden_nominal_then_selective_SPA",
+            normal_only=not use_spa, num_burdens=len(pvalues),
+            covariance_shape=list(covariance.shape), variant_covariance_constructed=False,
+            nominal_pvalues=nominal, pvalues=pvalues, spa_selected=choose,
+            spa=flags, matmul_mode=mode, spa_mode="fp64" if use_spa else None)
     result = dict(num_variant=count, cMAC=prepared.cmac)
     width = k + 1
     for group, beta in enumerate(("1,25", "1,1")):

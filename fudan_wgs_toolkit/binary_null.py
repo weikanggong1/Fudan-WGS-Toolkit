@@ -18,6 +18,107 @@ from .tensor_validation import tensor_all_finite
 from .precision_audit import explicit_binary_fitted_projection_fp64
 
 
+def binary_burden_batch_workspace(n, burdens, covariates, traits):
+    """NEW bytes for at most 32 independent normal projections, excluding Z.
+
+    SigmaX views retain their original storage; only precision-applied Z is
+    stacked. The bound also covers the IEEE FP32 residual stack, one transient
+    weighted Z, small covariance/cross products, and bounded validation.
+    """
+    t = min(32, traits)
+    return (4*n*burdens*(t+1) + 4*n*t
+            + 64*t*(burdens*burdens+covariates*burdens) + 256*2**20)
+
+
+def _guard_binary_burden_batch_workspace(burdens, required):
+    """Independent interface admission precedes every optional sample stack."""
+    if burdens.is_cuda:
+        from .tf32 import _guard_workspace
+        _guard_workspace(burdens.device, dict(required_bytes=required, cast_bytes=0,
+            layout_copy_allowance_bytes=0, output_bytes=required,
+            backend='binary_burden_trait_workspace'),
+            left_shape=burdens.shape, right_shape=(burdens.shape[0], 32))
+
+
+def binary_burden_score_covariance_batch(models, burdens, *, allocation_guard=None):
+    """Independent fitted products, using a trait axis for native TF32 GEMM.
+
+    Every trait keeps its own precision, SigmaX, covariance and residual. Sparse
+    precision applications remain independent. Ordinary FP64 models and mixed
+    covariate geometries retain the established scalar-model calculation.
+    A rejected optional batch falls back before any stacked allocation.
+    """
+    from .tf32 import batched_matmul
+    from .phewas_runtime.scores import fp32_score_columns
+    models = tuple(models)
+    if not models:
+        raise ValueError("binary burden batches require at least one model")
+    n, b = burdens.shape
+    native = (burdens.dtype == torch.float32 and len(models) > 1
+        and all(model.family == 'binomial' and model.matmul_mode == 'tf32'
+                and not model.use_spa and model.n == n and model.device == burdens.device
+                and model.scaled_residuals.dtype == torch.float32
+                and model.fixed_effect_covariance.dtype == torch.float32
+                and (model.precision is None or model.precision.dtype == torch.float32)
+                and (model.precision_x if model.precision_x is not None else model.xw).dtype == torch.float32
+                for model in models)
+        and len({model.x.shape[1] for model in models}) == 1)
+    scores, covariances = [], []
+    batches = fallbacks = 0
+    for start in range(0, len(models), 32):
+        tile = models[start:start+32]
+        required = binary_burden_batch_workspace(n, b, max(model.x.shape[1] for model in tile), len(tile))
+        admitted = native and len(tile) > 1
+        if admitted and allocation_guard is not None:
+            try:
+                admitted = allocation_guard(required) is not False
+            except MemoryError:
+                admitted = False
+        if admitted:
+            try:
+                _guard_binary_burden_batch_workspace(burdens, required)
+            except MemoryError:
+                admitted = False
+        if not admitted:
+            fallbacks += int(native and len(tile) > 1)
+            for model in tile:
+                score, covariance = model.score_covariance(burdens)
+                scores.append(score)
+                covariances.append(covariance)
+            continue
+        # One finite check for this shared source, rather than one per trait.
+        if not tensor_all_finite(burdens):
+            raise ValueError("burdens must be a finite samples-by-weights matrix")
+        weighted = torch.empty((len(tile), n, b), dtype=torch.float32, device=burdens.device)
+        sx, cov = [], []
+        for i, model in enumerate(tile):
+            precision = model.precision
+            if precision is None:
+                precision = model.fitted_probability*(1-model.fitted_probability)
+            if precision.ndim == 1:
+                value = precision[:, None]*burdens
+            elif precision.layout != torch.strided:
+                value = torch.sparse.mm(precision, burdens)
+            else:
+                value = matmul(precision, burdens, mode='tf32')
+            weighted[i].copy_(value)
+            del value
+            sx.append((model.precision_x if model.precision_x is not None else model.xw.T).T)
+            cov.append(model.fixed_effect_covariance)
+        cross = batched_matmul(sx, burdens, mode='tf32')
+        base = batched_matmul(burdens.T, weighted, mode='tf32')
+        del weighted
+        projected = batched_matmul(cross.transpose(1, 2), cov, mode='tf32')
+        covariance = base-batched_matmul(projected, cross, mode='tf32')
+        covariance = (covariance+covariance.transpose(1, 2))/2
+        score = fp32_score_columns(burdens, [model.scaled_residuals for model in tile]).T
+        scores.extend(score.unbind(0))
+        covariances.extend(covariance.unbind(0))
+        batches += 1
+    return torch.stack(scores), torch.stack(covariances), dict(
+        native_projection_batches=batches, admission_fallbacks=fallbacks)
+
+
 @dataclass
 class BinaryNullModel:
     sample_ids: np.ndarray
