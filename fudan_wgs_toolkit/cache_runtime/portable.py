@@ -6,6 +6,7 @@ preparation operation on a supplied reader; it does not export genotypes.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -15,24 +16,57 @@ import time
 
 import numpy as np
 
+from ..npy_io import readonly_npy_mmap
 from .adapter_fast import CachedGenotypeAdapter
 from .fast_container import Container
 
 
 FORMAT = "portable-six-state-metadata-v1"
+_SHA_CACHE_LIMIT = 4096
+_SHA_CACHE = OrderedDict()
+_SHA_METRICS = dict(calls=0, identity_hits=0, content_hashes=0,
+                    content_bytes=0, content_hash_seconds=0.0)
+
+
+def _stat_identity(value):
+    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
 
 
 def _sha(path):
+    """Hash once per unchanged file identity; never cache an unbracketed scan."""
+    path = Path(path)
+    key = str(path.resolve())
+    identity = _identity(path)
+    _SHA_METRICS["calls"] += 1
+    previous = _SHA_CACHE.get(key)
+    if previous is not None and previous[0] == identity:
+        if _identity(path) != identity:
+            raise ValueError("portable file changed during checksum verification")
+        _SHA_CACHE.move_to_end(key)
+        _SHA_METRICS["identity_hits"] += 1
+        return previous[1]
     digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
+    started = time.perf_counter()
+    with path.open("rb", buffering=0) as stream:
+        if _stat_identity(os.fstat(stream.fileno())) != identity:
+            raise ValueError("portable file changed before checksum verification")
         for block in iter(lambda: stream.read(8 * 2**20), b""):
             digest.update(block)
-    return digest.hexdigest()
+        if _stat_identity(os.fstat(stream.fileno())) != identity or _identity(path) != identity:
+            raise ValueError("portable file changed during checksum verification")
+    result = digest.hexdigest()
+    _SHA_METRICS["content_hashes"] += 1
+    _SHA_METRICS["content_bytes"] += identity[2]
+    _SHA_METRICS["content_hash_seconds"] += time.perf_counter()-started
+    _SHA_CACHE[key] = (identity, result)
+    _SHA_CACHE.move_to_end(key)
+    while len(_SHA_CACHE) > _SHA_CACHE_LIMIT:
+        _SHA_CACHE.popitem(last=False)
+    return result
 
 
 def _identity(path):
-    value = Path(path).stat()
-    return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
+    return _stat_identity(Path(path).stat())
 
 
 class _ArrayWriter:
@@ -279,6 +313,7 @@ class PortableMetadataReader:
         self._verify_checksums = bool(verify_checksums)
         self._metadata_reads = self._checked_files = 0
         self._metadata_seconds = self._verification_seconds = 0.0
+        self._sha_baseline = dict(_SHA_METRICS)
         self._sample_lookup = None
         raw = (self.directory / "manifest.json").read_bytes()
         if (self.directory / "COMPLETE").read_text() != hashlib.sha256(raw).hexdigest():
@@ -361,7 +396,10 @@ class PortableMetadataReader:
     def _array(self, name):
         path = self._verify(name)
         if name not in self._arrays:
-            self._arrays[name] = np.load(path, mmap_mode="r", allow_pickle=False)
+            value = readonly_npy_mmap(path)
+            if _identity(path) != self._identities[name]:
+                raise ValueError("immutable portable metadata file changed")
+            self._arrays[name] = value
         return self._arrays[name]
 
     def _read(self, spec, indices):
@@ -493,14 +531,18 @@ class PortableMetadataReader:
 
     @property
     def reader_metadata(self):
+        manifest_checksum = _sha(self.directory / "manifest.json")
         return dict(backend="portable_metadata_mmap", original_genotype_required=False,
             original_genotype_sdk_imported=False, genotype_sdk_fallback_count=0,
             metadata_reads=self._metadata_reads, metadata_read_seconds=self._metadata_seconds,
             metadata_checked_files=self._checked_files,
             metadata_checksum_verification_seconds=self._verification_seconds,
             metadata_checksums_enabled=self._verify_checksums,
+            metadata_checksum_process_delta={key: value-self._sha_baseline[key]
+                for key, value in _SHA_METRICS.items()},
+            metadata_checksum_metrics_scope="process cumulative delta since this reader opened",
             genotype_manifest_sha256=self.manifest["genotype_manifest_sha256"],
-            metadata_manifest_sha256=_sha(self.directory / "manifest.json"))
+            metadata_manifest_sha256=manifest_checksum)
 
     def close(self):
         if self._closed:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
+from functools import wraps
 import csv
 import errno
 import gzip
@@ -20,24 +21,165 @@ import torch
 from .binary_null import BinaryNullModel
 from .null_model import GaussianNullModel, KinshipSpectrum
 from .tensor_validation import finite_check_scratch_bytes
+from .npy_io import readonly_npy_mmap
 
 
 _VERIFIED_FILES = {}
+_FILE_VERIFICATION_METRICS = dict(calls=0, identity_hits=0, content_hashes=0,
+                                  content_bytes=0, content_hash_seconds=0.0)
+
+
+def _file_identity(stat):
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def verify_file(path, expected):
     path = Path(path)
     stat = path.stat()
-    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    identity = _file_identity(stat)
     key = str(path.resolve())
+    _FILE_VERIFICATION_METRICS['calls'] += 1
     prior = _VERIFIED_FILES.get(key)
     if prior is not None:
         if prior != (identity, expected):
             raise ValueError('immutable fitted-state identity changed')
-        return
-    if digest_file(path) != expected:
+        _FILE_VERIFICATION_METRICS['identity_hits'] += 1
+        return identity
+    start = time.perf_counter()
+    actual = digest_file(path)
+    _FILE_VERIFICATION_METRICS['content_hashes'] += 1
+    _FILE_VERIFICATION_METRICS['content_bytes'] += stat.st_size
+    _FILE_VERIFICATION_METRICS['content_hash_seconds'] += time.perf_counter()-start
+    # Never associate bytes read while a file was replaced/modified with the
+    # identity observed before the content scan.
+    if _file_identity(path.stat()) != identity:
+        raise ValueError('immutable fitted-state identity changed during verification')
+    if actual != expected:
         raise ValueError('fitted-state checksum differs')
     _VERIFIED_FILES[key] = (identity, expected)
+    return identity
+
+
+def _sample_id_array(directory, spec, array_cache):
+    """Share exact authenticated identity axes, without retaining model state.
+
+    Every source path is verified even when another trait supplied the same
+    NPY content. Bytes backing releases file descriptors and cannot be made
+    writable; the weak cache does not pin axes after their final model owner.
+    """
+    filename = spec['file']
+    if Path(filename).name != filename:
+        raise ValueError('fitted-state path escaped its immutable directory')
+    path = directory/filename
+    verify_file(path, spec['sha256'])
+    key = (spec['sha256'], tuple(spec['shape']), spec['dtype'])
+    cached = None if array_cache is None else array_cache.get(key)
+    if cached is not None:
+        return cached
+    value = readonly_npy_mmap(path)
+    if list(value.shape) != spec['shape'] or value.dtype.str != spec['dtype']:
+        raise ValueError('fitted-state array geometry differs')
+    if value.dtype.kind not in 'US' or value.ndim != 1:
+        raise ValueError('fitted sample identities must be a one-dimensional string axis')
+    owned = np.frombuffer(value.tobytes(), dtype=value.dtype)
+    verify_file(path, spec['sha256'])
+    if array_cache is not None:
+        array_cache[key] = owned
+    return owned
+
+
+class _SharedSparsePattern:
+    """Weak sparse owners guard independently versioned aliases of one pattern.
+
+    Separate COO tensors share index storage but have independent mutation
+    counters. Check every still-live owner at a bank context boundary; checking
+    only the canonical index wrapper would miss writes through another COO.
+    """
+    def __init__(self, indices):
+        self.indices = indices
+        self._index_stamp = self._stamp_indices(indices)
+        self._owners = {}
+
+    @staticmethod
+    def _stamp_indices(indices):
+        return (id(indices), indices.data_ptr(), indices._version,
+                tuple(indices.shape), indices.dtype, indices.device)
+
+    @staticmethod
+    def _stamp_owner(owner):
+        indices = owner.indices()
+        return (owner._version, indices.data_ptr(), indices._version,
+                tuple(indices.shape), tuple(owner.shape), owner.dtype,
+                owner.device, owner.is_coalesced())
+
+    def register(self, owner):
+        token, reference = id(owner), weakref.ref(self)
+        def retired(_):
+            pattern = reference()
+            if pattern is not None:
+                pattern._owners.pop(token, None)
+        self._owners[token] = (weakref.ref(owner, retired), self._stamp_owner(owner))
+        owner._immutable_shared_pattern = self
+        owner._immutable_shared_indices = self.indices
+
+    def validate(self):
+        if self._stamp_indices(self.indices) != self._index_stamp:
+            raise ValueError('immutable shared sparse pattern was mutated')
+        for reference, stamp in tuple(self._owners.values()):
+            owner = reference()
+            if owner is not None and self._stamp_owner(owner) != stamp:
+                raise ValueError('immutable shared sparse owner was mutated')
+
+
+def _guard_fitted_bank_context(method):
+    """Check a shared pool once per outer acquire boundary, not per trait."""
+    @wraps(method)
+    @contextmanager
+    def guarded(self, *args, **kwargs):
+        if not self._fitted_context_depth:
+            self._validate_shared_sparse_patterns()
+        self._fitted_context_depth += 1
+        try:
+            with method(self, *args, **kwargs) as value:
+                yield value
+        finally:
+            self._fitted_context_depth -= 1
+            if not self._fitted_context_depth:
+                self._validate_shared_sparse_patterns()
+    return guarded
+
+
+def _load_sparse_tensor(name, meta, directory, device, tensor_cache, tensor):
+    """Reuse an exact sorted COO pattern; keep every trait's values separate.
+
+    Only a pattern whose first coalesce preserves its input indices may be
+    reused without a permutation/duplicate reduction. Other input patterns
+    retain the original coalesce path. A COO owner keeps the weak memo's index
+    wrapper alive, so shared storage follows fitted-bank eviction/closure.
+    """
+    spec = meta['arrays'][name+'_indices']
+    filename = spec['file']
+    if Path(filename).name != filename:
+        raise ValueError('fitted-state path escaped its immutable directory')
+    verify_file(directory/filename, spec['sha256'])
+    shape = tuple(meta[name+'_shape'])
+    key = ('coalesced_sparse_indices', str(device), spec['sha256'],
+           tuple(spec['shape']), spec['dtype'], shape)
+    pattern = tensor_cache.get(key)
+    values = tensor(name+'_values')
+    if pattern is not None:
+        pattern.validate()
+        result = torch.sparse_coo_tensor(pattern.indices, values, shape,
+                                        device=device, is_coalesced=True)
+    else:
+        indices = tensor(name+'_indices')
+        result = torch.sparse_coo_tensor(indices, values, shape, device=device).coalesce()
+        if torch.equal(indices, result.indices()):
+            pattern = _SharedSparsePattern(result.indices())
+            tensor_cache[key] = pattern
+    if pattern is not None:
+        pattern.register(result)
+    return result
 
 
 def digest_file(path):
@@ -179,7 +321,7 @@ def save_model_store(model, destination, *, sample_rows, fit_metadata, spa_model
                 sha256=digest_file(destination/'model.private.json'))
 
 
-def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
+def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None, array_cache=None):
     """Load the supplied fitted state without refitting or modifying its arrays."""
     root = Path(directory)
     root_meta = json.loads((root/'model.private.json').read_text())
@@ -194,7 +336,8 @@ def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
         if Path(filename).name != filename:
             raise ValueError('fitted-state path escaped its immutable directory')
         verify_file(directory/filename, spec['sha256'])
-        value = np.load(directory/filename, mmap_mode='r', allow_pickle=False)
+        value = readonly_npy_mmap(directory/filename)
+        verify_file(directory/filename, spec['sha256'])
         if list(value.shape) != spec['shape'] or value.dtype.str != spec['dtype']:
             raise ValueError('fitted-state array geometry differs')
         return value
@@ -206,6 +349,10 @@ def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
         # Only fixed design arrays are safely deduplicated across fitted states.
         cached = memo.get(key) if name == 'x' else None
         if cached is not None:
+            filename = spec['file']
+            if Path(filename).name != filename:
+                raise ValueError('fitted-state path escaped its immutable directory')
+            verify_file(directory/filename, spec['sha256'])
             return cached
         a = array(name)
         result = torch.tensor(np.asarray(a), device=device)
@@ -216,10 +363,9 @@ def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
         if name in meta['arrays']:
             return tensor(name)
         if name+'_indices' in meta['arrays']:
-            return torch.sparse_coo_tensor(tensor(name+'_indices'), tensor(name+'_values'),
-                                          meta[name+'_shape'], device=device).coalesce()
+            return _load_sparse_tensor(name, meta, directory, device, memo, tensor)
         return None
-    ids = np.asarray(array('sample_ids'))
+    ids = _sample_id_array(directory, meta['arrays']['sample_ids'], array_cache)
     if meta['family'] == 'gaussian':
         kin = KinshipSpectrum(tensor('eigenvalues'), [(tensor(f'block_{i}_rows'),
               tensor(f'block_{i}_rotation')) for i in meta['blocks']])
@@ -240,7 +386,7 @@ def load_model_store(directory, *, device='cpu', spa=False, tensor_cache=None):
     return model
 
 
-def load_spa_source(directory, *, device, tensor_cache):
+def load_spa_source(directory, *, device, tensor_cache, array_cache=None):
     """Load verified minimal FP64 fitted arrays; derive large SPA projections on GPU."""
     root = Path(directory)
     root_meta = json.loads((root/'model.private.json').read_text())
@@ -253,7 +399,8 @@ def load_spa_source(directory, *, device, tensor_cache):
             raise ValueError('SPA source array escaped its immutable directory')
         path = state/spec['file']
         verify_file(path, spec['sha256'])
-        value = np.load(path, mmap_mode='r', allow_pickle=False)
+        value = readonly_npy_mmap(path)
+        verify_file(path, spec['sha256'])
         if list(value.shape) != spec['shape'] or value.dtype.str != spec['dtype']:
             raise ValueError('SPA source array geometry differs')
         return value
@@ -262,6 +409,10 @@ def load_spa_source(directory, *, device, tensor_cache):
         key = (str(device), spec['sha256'], tuple(spec['shape']), spec['dtype'])
         cached = tensor_cache.get(key) if name == 'x' else None
         if cached is not None:
+            filename = spec['file']
+            if Path(filename).name != filename:
+                raise ValueError('SPA source array escaped its immutable directory')
+            verify_file(state/filename, spec['sha256'])
             return cached
         result = torch.tensor(np.asarray(array(name)), device=device)
         if name == 'x':
@@ -270,9 +421,9 @@ def load_spa_source(directory, *, device, tensor_cache):
     if 'precision' in meta['arrays']:
         precision = tensor('precision')
     else:
-        precision = torch.sparse_coo_tensor(tensor('precision_indices'), tensor('precision_values'),
-                                             meta['precision_shape'], device=device).coalesce()
-    return dict(sample_ids=np.asarray(array('sample_ids')), covariates=tensor('x'),
+        precision = _load_sparse_tensor('precision', meta, state, device, tensor_cache, tensor)
+    return dict(sample_ids=_sample_id_array(state, meta['arrays']['sample_ids'], array_cache),
+        covariates=tensor('x'),
         residual=tensor('scaled_residuals'), fitted_probability=tensor('fitted_probability'),
         fixed_effect_covariance=tensor('fixed_effect_covariance'), precision=precision,
         null_fit_source_sha256=meta['null_fit_source_sha256'],
@@ -403,6 +554,7 @@ class ModelRepository:
                                   file_descriptor_retries=0)
         self._closed = False
         self._workspace_reservations = []
+        self._fitted_context_depth = 0
         self._memory_policies = {}
         self._workspace_metrics = dict(workspace_admissions=0, workspace_evictions=0,
             workspace_cache_release_calls=0, workspace_required_bytes_highwater=0,
@@ -416,6 +568,8 @@ class ModelRepository:
         self._derived_normal_guards = {}
         self.binary_normal_derivations = self.binary_normal_cache_hits = 0
         self.tensor_cache = weakref.WeakValueDictionary()
+        self.sample_id_cache = weakref.WeakValueDictionary()
+        self._file_verification_baseline = dict(_FILE_VERIFICATION_METRICS)
         self.spa_sources, self.spa_pinned = OrderedDict(), {}
         self.spa_source_loads = self.spa_source_hits = 0
         self.loads = self.hits = self.evictions = 0
@@ -441,8 +595,12 @@ class ModelRepository:
             axis_key = model_meta['sample_rows_sha256']
             if axis_key not in self._sample_axes:
                 mapped = sample_axis_storage == 'mmap' and mapped_axes < mmap_budget
-                rows = np.load(path/'sample_rows.npy', mmap_mode='r' if mapped else None,
-                               allow_pickle=False)
+                if mapped:
+                    rows = readonly_npy_mmap(path/'sample_rows.npy')
+                else:
+                    with (path/'sample_rows.npy').open('rb', buffering=0) as stream:
+                        rows = np.load(stream, allow_pickle=False)
+                verify_file(path/'sample_rows.npy', model_meta['sample_rows_sha256'])
                 if rows.ndim != 1 or rows.dtype != np.dtype(np.int64):
                     raise ValueError('fitted sample rows must be a one-dimensional int64 axis')
                 self._sample_axes[axis_key] = (rows if mapped else
@@ -479,6 +637,11 @@ class ModelRepository:
         if self._closed:
             raise RuntimeError('fitted-state bank is closed')
 
+    def _validate_shared_sparse_patterns(self):
+        for key, value in tuple(self.tensor_cache.items()):
+            if key[0] == 'coalesced_sparse_indices':
+                value.validate()
+
     def close(self):
         """Release only this bank's owned references, never immutable files.
 
@@ -495,6 +658,7 @@ class ModelRepository:
         self._derived_normal_guards.clear()
         self.spa_sources.clear()
         self.tensor_cache.clear()
+        self.sample_id_cache.clear()
         self._sample_axes.clear()
         self._descriptors.clear()
         self._descriptors_by_index.clear()
@@ -557,8 +721,11 @@ class ModelRepository:
                 self._cache_metrics['file_descriptor_evictions'] += 1
 
     def _load_normal_model(self, index, device):
+        verify_file(Path(self.entries[index]['path'])/'model.private.json',
+                    self.entries[index]['sha256'])
         return self._load_with_file_descriptor_admission(device, lambda:
-            load_model_store(self.entries[index]['path'], device=device, tensor_cache=self.tensor_cache))
+            load_model_store(self.entries[index]['path'], device=device,
+                tensor_cache=self.tensor_cache, array_cache=self.sample_id_cache))
 
     @staticmethod
     def _owned_storages(value):
@@ -846,6 +1013,13 @@ class ModelRepository:
                 or any(ch not in '0123456789abcdef' for ch in binding)
                 or getattr(model, 'null_fit_source_sha256', None) != binding):
             raise ValueError('derived binary normal differs from its authenticated fitted source')
+        precision = getattr(model, 'precision', None)
+        source_precision = source._tensors[4]
+        pattern = getattr(source_precision, '_immutable_shared_pattern', None)
+        if (pattern is not None and precision is not None
+                and precision.layout == torch.sparse_coo
+                and precision.indices().data_ptr() == pattern.indices.data_ptr()):
+            pattern.register(precision)
         self._derived_normal_guards[key] = dict(
             fitted_source_sha256=binding, source=weakref.ref(source),
             source_stamp=self._binary_source_stamp(source),
@@ -871,6 +1045,7 @@ class ModelRepository:
                 raise ValueError('binary normal and SPA fitted-source bindings differ')
             self._binary_source_stamp(source)
 
+    @_guard_fitted_bank_context
     @contextmanager
     def acquire(self, indices, device):
         self._check_open()
@@ -954,6 +1129,7 @@ class ModelRepository:
             for key in keys:
                 self._refresh_entry('normal', key)
             self._trim_cache(device)
+    @_guard_fitted_bank_context
     @contextmanager
     def _acquire_binary_source(self, index, device):
         self._check_open()
@@ -966,10 +1142,13 @@ class ModelRepository:
             estimated = _binary_source_peak_bytes(meta)
             if torch.device(device).type == 'cuda':
                 self._admit(device, fitted_bytes=estimated, phase='binary_fitted_source')
+            verify_file(Path(self.entries[index]['path'])/'model.private.json',
+                        self.entries[index]['sha256'])
             from .binary_null import ImmutableFittedBinarySource
             self.spa_sources[key] = self._load_with_file_descriptor_admission(device, lambda:
                 ImmutableFittedBinarySource(**load_spa_source(self.entries[index]['path'],
-                    device=device, tensor_cache=self.tensor_cache)))
+                    device=device, tensor_cache=self.tensor_cache,
+                    array_cache=self.sample_id_cache)))
             loaded = True
             self.spa_source_loads += 1
         else:
@@ -1079,7 +1258,14 @@ class ModelRepository:
                     fitted_cache_limits_by_device={str(device): value for device, value in self._cache_limits.items()},
                     fitted_cache_unique_storage_bytes=self._cache_bytes(),
                     fitted_cache_eviction_policy='global_normal_and_spa_lru_with_active_pins',
-                    live_deduplicated_design_tensors=len(self.tensor_cache),
+                    live_deduplicated_design_tensors=sum(len(key) == 4 for key in self.tensor_cache),
+                    live_deduplicated_sparse_index_tensors=sum(
+                        key[0] == 'coalesced_sparse_indices' for key in self.tensor_cache),
+                    live_deduplicated_sample_id_axes=len(self.sample_id_cache),
+                    deduplicated_sample_id_bytes=sum(a.nbytes for a in self.sample_id_cache.values()),
+                    file_verification_process_delta={key: value-self._file_verification_baseline[key]
+                        for key, value in _FILE_VERIFICATION_METRICS.items()},
+                    file_verification_metrics_scope='process cumulative delta since this bank opened',
                     active_workspace_reservations=len(self._workspace_reservations),
                     closed=self._closed,
                     **self.resident_storage_summary(),

@@ -25,13 +25,20 @@ def _hash(value):
 
 
 def gpu_model_cache_capacity(gpu_ids,*,memory_limit_gib=None,reserve_bytes=2**30,
-                             cache_fraction=.5):
+                             cache_fraction=None,binary_only=False):
     """Resolve a common cache capacity before workers allocate fitted states.
 
     CUDA limits use physical capacity, caller cap and current driver/allocator
     headroom. A CPU-only contract test may supply an explicit GPU budget; no
     arbitrary capacity is invented when neither CUDA nor that budget exists.
+    Pure binary inference uses a .75 default, matching its runtime LRU policy;
+    Gaussian/mixed runs retain .5. An explicit fraction always takes priority.
+    This is an optional cache bound, not a credit against live allocations.
     """
+    if type(binary_only) is not bool:
+        raise ValueError('binary_only must be a boolean')
+    if cache_fraction is None:
+        cache_fraction = .75 if binary_only else .5
     if type(reserve_bytes) is not int or reserve_bytes<0:
         raise ValueError('GPU reserve must be a nonnegative byte count')
     if (isinstance(cache_fraction,bool) or not isinstance(cache_fraction,(int,float))

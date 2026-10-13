@@ -642,6 +642,8 @@ class HostMemoryGate:
     once. Summed process RSS therefore never supplies a second admission gate.
     Callers explicitly replace the future budget as their owned buffers become
     initialized or are released; an unknown RSS increase grants no credit.
+    Only increasing future budgets sample pressure; zero or decreasing budgets
+    retain identity-bound ledger publication without claiming live headroom.
     """
     def __init__(self,directory,*,host_limit_gib=None,reserve_gib=None,lock_timeout_seconds=5):
         self.automatic_limit = host_limit_gib is None
@@ -771,6 +773,40 @@ class HostMemoryGate:
             for token,record in state["leases"].items():
                 if token != lease.token and record["identity"] == lease.identity:
                     raise RuntimeError("one owner cannot hold nested host memory leases")
+            previous = state["leases"].get(lease.token)
+            if previous is not None and previous["identity"] != lease.identity:
+                raise RuntimeError("host memory lease token belongs to another owner")
+            others_future = sum(int(record["future_bytes"])
+                for token,record in state["leases"].items() if token != lease.token)
+            future = others_future+required_bytes
+            shrinking = previous is not None and required_bytes <= previous["future_bytes"]
+            # Zero or decreasing budgets cannot admit a NEW allocation. Keep
+            # the identity checks, peer ledger, lock and durable publication,
+            # but do not scan live cgroups or an attached task's complete PSS
+            # tree while buffers are being released. Every later increase
+            # takes the fresh-pressure path below, including growth from zero.
+            if not required_bytes or shrinking:
+                state["leases"][lease.token] = dict(identity=lease.identity,
+                    future_bytes=required_bytes,peak_future_bytes=max(required_bytes,
+                        previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label)
+                self._write(state)
+                self._retired_tokens.clear()
+                lease.required_bytes,lease.total_bytes = required_bytes,required_bytes
+                lease.phase = phase
+                # These are not observed current capacity/pressure values.
+                # Explicit nulls prevent diagnostics from mistaking a prior
+                # sample or the configured limit for newly measured headroom.
+                lease.last_admission = dict(workspace_bytes=required_bytes,total_bytes=required_bytes,
+                    capacity_bytes=None,future_bytes=future,live_effective_bytes=None,
+                    active_leases=len(state["leases"]),reserve_bytes=self.reserve_bytes,
+                    resolved_limit_bytes=self.limit_bytes,automatic_limit=self.automatic_limit,
+                    automatic_reserve=self.automatic_reserve,
+                    materialized_credit_bytes=lease.materialized_credit_bytes,
+                    future_new_allocations=True,shared_rss_admission=False,phase=phase,
+                    pressure_constraints=[],shrinking_or_zero=True,
+                    pressure_check_performed=False,
+                    pressure_check_skipped_reason="zero_or_nonincreasing_future_budget")
+                return
             live = read_host_memory()
             constraints = live.get("constraints",[live])
             capacity = max(0,min(self.limit_bytes,*[int(c["limit_bytes"]) for c in constraints])-self.reserve_bytes)
@@ -781,9 +817,6 @@ class HostMemoryGate:
                 self._write(state)
                 lease.closed = True
                 raise HostMemoryRequestTooLarge(required_bytes,capacity)
-            others_future = sum(int(record["future_bytes"])
-                for token,record in state["leases"].items() if token != lease.token)
-            future = others_future+required_bytes
             pressures = []
             project_scope_seen = False
             for constraint in constraints:
@@ -799,14 +832,9 @@ class HostMemoryGate:
                     projected_bytes=int(constraint["effective_current_bytes"])+future))
             available = min(capacity-others_future,*[
                 c["capacity_bytes"]-c["effective_current_bytes"]-others_future for c in pressures])
-            previous = state["leases"].get(lease.token)
-            # A zero budget allocates nothing. Decreasing an existing admitted
-            # future budget is also safe under pressure and must never force a
-            # caller to wait while releasing its buffers. An increase checks
-            # all live constraints plus every other owner's future budget.
-            shrinking = previous is not None and required_bytes <= previous["future_bytes"]
-            if (required_bytes and not shrinking and
-                    (future > capacity or any(c["projected_bytes"]>c["capacity_bytes"] for c in pressures))):
+            # All increases check freshly observed constraints and every other
+            # owner's future budget. No cached endpoint can admit new bytes.
+            if future > capacity or any(c["projected_bytes"]>c["capacity_bytes"] for c in pressures):
                 state["leases"].pop(lease.token,None)
                 self._write(state)
                 lease.closed = True
@@ -827,7 +855,8 @@ class HostMemoryGate:
                 automatic_reserve=self.automatic_reserve,
                 materialized_credit_bytes=lease.materialized_credit_bytes,
                 future_new_allocations=True,shared_rss_admission=False,phase=phase,
-                pressure_constraints=pressures,shrinking_or_zero=shrinking or not required_bytes)
+                pressure_constraints=pressures,shrinking_or_zero=False,
+                pressure_check_performed=True,pressure_check_skipped_reason=None)
 
     def _release(self,lease):
         # A tiny ledger lock may be held briefly by another publisher; no memory

@@ -493,6 +493,47 @@ def _prepare_host_guard(pipeline, model, selected_m, materialized_bytes=0):
         guard(n=model.n, m=int(selected_m), phase='prepare')
 
 
+def _model_cache_live_fraction(configuration, descriptors):
+    """Retain a binary fitted sweep while keeping live workspace admission.
+
+    A pure binary sweep uses small burden covariances rather than variant
+    covariances. Its independent fitted states can therefore keep a larger
+    optional LRU. Explicit caller bounds still win, and allocation continues
+    to evict unpinned entries whenever actual workspace needs more memory.
+    """
+    if 'model_cache_live_fraction' in configuration:
+        return configuration['model_cache_live_fraction']
+    return .75 if descriptors and all(d['family'] == 'binomial' for d in descriptors) else .5
+
+
+def _binary_gene_workspace_new_bytes(n, m, q, annotations, *, resident_genotype=True):
+    """Conservative NEW resident burden/SPA bytes; existing G is counted live.
+
+    B=2*(K+1) burden columns determine projection and covariance geometry.
+    Native burdens may select a second FP32 G (4*N*M). Selective exact SPA
+    owns at most one 512-variant gather plus its FP64 cast (12*N*panel),
+    FP64 weights, exact/projected/scaled burden arrays, active-column gathers,
+    derivative/cumulant temporaries, and bounded small covariance products.
+    Twenty-four FP64 N*B arrays conservatively cover the original SPA peak;
+    four FP32 N*B arrays cover native burdens and weighted projections.
+    No variant M*M covariance is allocated by this inference route. Fitted
+    bank/source uploads retain their separate repository admission.
+    """
+    b = 2*(annotations+1)
+    panel = min(m, 512)
+    # Host input streams the original FP32 burden panel; it never needs a
+    # full CUDA G. Retaining that panel alongside exact SPA is conservative.
+    selected_genotype = 4*n*(m if resident_genotype else panel)
+    spa_panel = 12*n*panel
+    native_and_spa_burdens = (4*4 + 24*8)*n*b
+    # Retained FP32 weights, selected FP64 weights, annotation copies and
+    # selection vectors; include covariate/burden and B*B temporary products.
+    weights_and_selection = 12*m*b + 16*m*annotations + 64*m
+    projections_and_covariance = 192*q*b + 32*b*b
+    return (selected_genotype + spa_panel + native_and_spa_burdens
+            + weights_and_selection + projections_and_covariance + 256*2**20)
+
+
 def _prepare_shared_gene_device(pipeline, indices, broker, phred, names):
     """Keep one small cohort/mask on device, preserving the original F layout.
 
@@ -502,9 +543,13 @@ def _prepare_shared_gene_device(pipeline, indices, broker, phred, names):
     """
     model, options = pipeline.models[0], pipeline.options
     n, candidate_m = model.n, len(indices)
-    # NEW peak: retained uint8 slabs, final FP32 G, indexing/count scratch,
-    # subsequent native covariance/projection and bounded cMAC reduction.
-    broker._guard(12*n*candidate_m + 32*candidate_m*candidate_m + 256*2**20)
+    # Preserve the mature linear bound for raw slabs, final G, indexing/count
+    # scratch and cMAC. Binary inference projects only burden columns, so its
+    # preparation must not reserve an unused variant covariance.
+    binary_only = getattr(pipeline, '_binary_burden_only',
+                          getattr(model, 'family', None) == 'binomial')
+    covariance_bytes = 0 if binary_only else 32*candidate_m*candidate_m
+    broker._guard(12*n*candidate_m + covariance_bytes + 256*2**20)
     parts, physical, frequencies, groups = [], [], [], []
     prefiltered = 0
     for offset in range(0, candidate_m, options.genotype_block_size):
@@ -1271,6 +1316,10 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         with repository.acquire([anchor['trait_index']], str(broker.device)) as models:
                             _check_model(models[0], anchor, metadata, verified)
                             prototype = _thin_pipeline(axis, models[0], axis._axis.samples, options, configuration, structural)
+                            # A binary anchor alone does not describe a mixed
+                            # cohort's future Gaussian variant covariance.
+                            prototype._binary_burden_only = all(
+                                d['family'] == 'binomial' for d in group['descriptors'])
                             with prototype.profiler.measure('gene_read_decode_cohort_prepare', gpu=True):
                                 with _gene_workspace_scope(repository, broker, 0):
                                     prepared = _prepare_shared_gene(prototype, indices, broker)
@@ -1300,9 +1349,12 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         device_score_new = 8*m*score_traits+64*2**20
                         tail_new = _gene_tail_new_bytes(n, m, options) if has_gaussian else 0
                         host_peak = (max(_gene_host_covariance_new_bytes(n, m, q, options),
-                                         4*m*m+tail_new, host_score_new) if has_gaussian else host_score_new)
-                        device_peak = max(8*genotype_elements+32*m*m+256*2**20,
-                                          4*m*m+tail_new, device_score_new)
+                                         4*m*m+tail_new, host_score_new) if has_gaussian else
+                            _binary_gene_workspace_new_bytes(n, m, q, len(prepared['names']),
+                                                             resident_genotype=False))
+                        device_peak = (max(8*genotype_elements+32*m*m+256*2**20,
+                                           4*m*m+tail_new, device_score_new) if has_gaussian else
+                            _binary_gene_workspace_new_bytes(n, m, q, len(prepared['names'])))
                         # Existing device G is already counted by live admission.
                         # Start with zero NEW bytes, then attempt the optional
                         # resident workspace inside the host-fallback handler.
@@ -1606,7 +1658,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         if callable(policy):
             repository_policy.enter_context(policy(device, limit_bytes=(None if memory_limit_gib is None else int(budget*2**30)),
                                                   reserve_bytes=memory_reserve_bytes,
-                                                  cache_live_fraction=configuration.get('model_cache_live_fraction', .5)))
+                                                  cache_live_fraction=_model_cache_live_fraction(configuration, descriptors)))
         tf32_metadata(reset=True); single_metadata(reset=True); statistics_execution_metadata(reset=True)
         start = time.perf_counter()
         kinds = ('individual', 'coding', 'noncoding', 'ncrna')

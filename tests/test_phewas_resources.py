@@ -190,7 +190,9 @@ def test_materialized_arrays_are_not_reserved_twice_and_zero_restores_capacity(h
         memory.update(current_bytes=120*G,effective_current_bytes=120*G)
         lease.set_future(60*G,phase="initialized_parts")
         assert lease.last_admission["future_bytes"]==60*G
-        assert lease.last_admission["pressure_constraints"][0]["projected_bytes"]==180*G
+        assert not lease.last_admission["pressure_check_performed"]
+        assert lease.last_admission["pressure_constraints"]==[]
+        assert lease.last_admission["live_effective_bytes"] is None
         memory.update(current_bytes=179*G,effective_current_bytes=179*G)
         # Releasing a cohort reservation cannot be deferred by unrelated
         # pressure, and the next mask does not inherit the old 140 GiB peak.
@@ -209,6 +211,109 @@ def test_zero_future_does_not_claim_capacity_but_next_allocation_checks_pressure
             assert lease.required_bytes==0
             lease.set_future(G,phase="before_copy")
     assert not json.loads(gate.path.read_text())["leases"]
+
+
+def test_zero_future_skips_live_sampling_but_keeps_durable_ledger(host,monkeypatch):
+    gate,*_=host
+    sync_calls=[]
+    original_sync=resources.os.fsync
+    def sync(fd):
+        sync_calls.append(fd)
+        return original_sync(fd)
+    def unavailable():
+        pytest.fail("a zero budget must not read live pressure or task PSS")
+    monkeypatch.setattr(resources,"read_host_memory",unavailable)
+    monkeypatch.setattr(resources.os,"fsync",sync)
+    with gate.lease() as lease:
+        for phase in ("gene_host_ready","gene_mask_released"):
+            lease.set_future(0,phase=phase)
+            sample=lease.last_admission
+            assert sample["pressure_check_performed"] is False
+            assert sample["pressure_check_skipped_reason"]=="zero_or_nonincreasing_future_budget"
+            assert sample["capacity_bytes"] is None and sample["live_effective_bytes"] is None
+            assert sample["pressure_constraints"]==[] and sample["future_bytes"]==0
+            assert json.loads(gate.path.read_text())["leases"][lease.token]["phase"]==phase
+        assert len(sync_calls)==3  # Initial zero plus both phase updates.
+    assert len(sync_calls)==4 and not json.loads(gate.path.read_text())["leases"]
+
+
+def test_decrease_and_equal_future_skip_sampling_but_growth_requires_fresh_pressure(host,monkeypatch):
+    gate,memory,*_=host
+    calls=[]
+    def sampled():
+        calls.append(dict(memory))
+        return dict(memory)
+    monkeypatch.setattr(resources,"read_host_memory",sampled)
+    with gate.lease(10*G) as lease:
+        assert len(calls)==1 and lease.last_admission["pressure_check_performed"]
+        memory.update(current_bytes=190*G,effective_current_bytes=190*G)
+        lease.set_future(5*G,phase="partly_initialized")
+        lease.set_future(5*G,phase="same_future")
+        lease.set_future(0,phase="released")
+        assert len(calls)==1
+        assert lease.last_admission["live_effective_bytes"] is None
+        with pytest.raises(resources.HostMemoryDeferred):
+            lease.set_future(G,phase="new_allocation")
+        assert len(calls)==2 and calls[-1]["effective_current_bytes"]==190*G
+    assert not json.loads(gate.path.read_text())["leases"]
+
+
+def test_zero_budget_reaps_only_dead_foreign_identity_and_retains_live_future(host,monkeypatch):
+    gate,_,identities,rss=host
+    dead=add_foreign_lease(gate,identities,rss,pid=987650,total_gib=14)
+    state=gate._load()
+    state["leases"]["dead"]=state["leases"].pop("foreign")
+    gate._write(state)
+    identities.pop(dead["pid"])
+    live=add_foreign_lease(gate,identities,rss,pid=987651,total_gib=24)
+    monkeypatch.setattr(resources,"read_host_memory",lambda:pytest.fail("zero admission must not sample"))
+    with gate.lease() as lease:
+        state=json.loads(gate.path.read_text())
+        assert set(state["leases"])=={"foreign",lease.token}
+        assert state["leases"]["foreign"]["identity"]==live
+        assert lease.last_admission["future_bytes"]==20*G
+    assert set(json.loads(gate.path.read_text())["leases"])=={"foreign"}
+
+
+def test_shrinking_keeps_own_identity_guard_and_original_ledger_on_failure(host,monkeypatch):
+    gate,_,identities,_=host
+    with gate.lease(G) as lease:
+        original=identities[os.getpid()]
+        identities[os.getpid()]=dict(original,start_ticks=original["start_ticks"]+1)
+        monkeypatch.setattr(resources,"read_host_memory",lambda:pytest.fail("owner fails before sampling"))
+        try:
+            with pytest.raises(RuntimeError,match="identity changed"):
+                lease.set_future(0,phase="release")
+            assert json.loads(gate.path.read_text())["leases"][lease.token]["future_bytes"]==G
+        finally:
+            identities[os.getpid()]=original
+
+
+def test_zero_admission_cannot_take_another_owners_token(host,monkeypatch):
+    gate,_,identities,rss=host
+    foreign=add_foreign_lease(gate,identities,rss,total_gib=14)
+    lease=gate.lease()
+    lease.token="foreign"
+    monkeypatch.setattr(resources,"read_host_memory",lambda:pytest.fail("token owner fails before sampling"))
+    with pytest.raises(RuntimeError,match="another owner"):
+        lease.__enter__()
+    record=json.loads(gate.path.read_text())["leases"]["foreign"]
+    assert record["identity"]==foreign and record["future_bytes"]==10*G
+
+
+def test_zero_admission_still_obeys_shared_ledger_lock(host,monkeypatch):
+    gate,*_=host
+    gate.lock_timeout_seconds=.05
+    fd=os.open(gate.lock_path,os.O_CREAT|os.O_RDWR,0o600)
+    monkeypatch.setattr(resources,"read_host_memory",lambda:pytest.fail("busy lock fails before sampling"))
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        with pytest.raises(resources.HostMemoryDeferred,match="lock_busy"):
+            with gate.lease():
+                pytest.fail("zero budget must not bypass peer ledger lock")
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def test_only_explicit_initialized_bytes_reduce_preparation_future(host):

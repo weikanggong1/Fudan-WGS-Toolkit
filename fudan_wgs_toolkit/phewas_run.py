@@ -1772,7 +1772,8 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
         binary_only=binary_only, input_contract=input_contract,
         association_partition_strategy=association_partition_strategy))
     plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,
-        memory_limit_gib=memory_limit_gib,reserve_bytes=int(memory_reserve_gib*2**30))
+        memory_limit_gib=memory_limit_gib,reserve_bytes=int(memory_reserve_gib*2**30),
+        binary_only=binary_only)
     output = Path(plan['output_directory'])
     if resume:
         prior = [path for pattern in ('worker_*.exit.anonymous.json', 'worker_*.failed.private.json',

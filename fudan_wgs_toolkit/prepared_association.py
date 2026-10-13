@@ -767,7 +767,8 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
         plan['input_contract'] = input_contract
     from .phewas_partition import gpu_model_cache_capacity
     plan['association_model_cache_capacity_bytes'] = gpu_model_cache_capacity(gpu_ids,
-        memory_limit_gib=options['memory_limit_gib'],reserve_bytes=int(options['memory_reserve_gib']*2**30))
+        memory_limit_gib=options['memory_limit_gib'],reserve_bytes=int(options['memory_reserve_gib']*2**30),
+        binary_only=binary_only)
     if output.exists() and any(output.iterdir()):
         if not options['resume']:
             raise FileExistsError('full association requires a fresh output directory; choose resume=True')
