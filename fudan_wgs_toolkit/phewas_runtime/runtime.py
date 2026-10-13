@@ -1560,7 +1560,17 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                     prepared['maf'], prepared['annotations'], prepared['names'],
                                                     rare_maf_cutoff=options.rare_maf_cutoff,
                                                     rv_num_cutoff=options.rv_num_cutoff,
-                                                    rv_num_cutoff_max=options.rv_num_cutoff_max)
+                                                    rv_num_cutoff_max=options.rv_num_cutoff_max,
+                                                    # Large shared cohorts are likely to select
+                                                    # some SPA columns. Reuse this bounded host
+                                                    # read for their original exact burdens;
+                                                    # preparation declines the optional seed
+                                                    # before allocation when admission fails.
+                                                    prefill_exact=sum(d['family'] == 'binomial'
+                                                        for d in group['descriptors']) >= 128,
+                                                    allocation_guard=lambda required: workspace.ensure_free(
+                                                        additional_bytes=required,
+                                                        phase='gene_binary_exact_prefill'))
                                             if isinstance(burdens, PreparedBinaryBurdens):
                                                 prepared['cmac'] = burdens.cmac
                                         if (isinstance(burdens, PreparedBinaryBurdens)
