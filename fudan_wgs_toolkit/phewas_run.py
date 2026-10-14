@@ -1647,6 +1647,9 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
         long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size)
+    if input_contract == 'continuous':
+        from .continuous_run import _continuous_performance_configuration
+        config = _continuous_performance_configuration(config)
     output = Path(output_directory).resolve()
     if output.exists() and any(output.iterdir()) and not resume:
         raise FileExistsError('output directory already contains an analysis; use resume=True or a new directory')
@@ -1708,6 +1711,9 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
         prepared_inputs_manifest_sha256=digest_file(prepared/'manifest.private.json'),
         configuration=config, strict_logp_delta_required=False,
         comparison_significance_p=1e-5, output_all_pvalues=True)
+    if input_contract == 'continuous':
+        # Derived from the already bound and validated prepared metadata.
+        plan['_continuous_spawn_families'] = list(assigned_families.values())
     previous_path = output/'plan.private.json'
     if previous_path.exists():
         previous = json.loads(previous_path.read_text())
@@ -1826,47 +1832,52 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
     workers = []
     started_workers = []
     thread_environment=('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS','NUMEXPR_NUM_THREADS')
-    previous_environment={name:os.environ.get(name) for name in thread_environment}
-    try:
-        # Spawn imports numerical libraries before entering execute_worker.
-        # Give those imports the same bounded CPU pool rather than allowing
-        # one BLAS helper pool per visible host CPU. The parent policy returns
-        # immediately after all owned children have inherited this environment.
-        for name in thread_environment:
-            os.environ[name]=str(cpu_threads)
-        for index,gpu in enumerate(gpu_ids):
-            handle=invocation_lease_for_spawn()
-            worker=None
-            try:
-                worker=context.Process(target=execute_worker,kwargs=dict(plan=plan,worker_id=index,
-                    worker_count=len(gpu_ids),device=f'cuda:{gpu}',invocation_lease=handle))
-                worker.start()
-            except BaseException as error:
-                if worker is not None and getattr(worker,'pid',None) is not None:
-                    # A rare start error after the OS child exists still owns
-                    # that exact child; include it in the cleanup below.
-                    started_workers.append(worker)
+    from ._continuous_spawn_allocator import continuous_spawn_allocator_scope
+    with continuous_spawn_allocator_scope(
+            input_contract=plan.get('input_contract', 'mixed'),
+            families=plan.get('_continuous_spawn_families', ()),
+            worker_count=len(gpu_ids)) as allocator_policy:
+        previous_environment={name:os.environ.get(name) for name in thread_environment}
+        try:
+            # Spawn imports numerical libraries before entering execute_worker.
+            # Give those imports the same bounded CPU pool rather than allowing
+            # one BLAS helper pool per visible host CPU. The parent policy returns
+            # immediately after all owned children have inherited this environment.
+            for name in thread_environment:
+                os.environ[name]=str(cpu_threads)
+            for index,gpu in enumerate(gpu_ids):
+                handle=invocation_lease_for_spawn()
+                worker=None
+                try:
+                    worker=context.Process(target=execute_worker,kwargs=dict(plan=plan,worker_id=index,
+                        worker_count=len(gpu_ids),device=f'cuda:{gpu}',invocation_lease=handle))
+                    worker.start()
+                except BaseException as error:
+                    if worker is not None and getattr(worker,'pid',None) is not None:
+                        # A rare start error after the OS child exists still owns
+                        # that exact child; include it in the cleanup below.
+                        started_workers.append(worker)
+                    else:
+                        try:
+                            close_pending_invocation_lease(handle)
+                        except BaseException as cleanup:
+                            _note(error, f'invocation transfer cleanup also failed: {cleanup}')
+                    raise
+                workers.append(worker)
+                started_workers.append(worker)
+        except BaseException:
+            for worker in started_workers:
+                if worker.is_alive():
+                    worker.terminate()
+            for worker in started_workers:
+                worker.join(timeout=10)
+            raise
+        finally:
+            for name,value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(name,None)
                 else:
-                    try:
-                        close_pending_invocation_lease(handle)
-                    except BaseException as cleanup:
-                        _note(error, f'invocation transfer cleanup also failed: {cleanup}')
-                raise
-            workers.append(worker)
-            started_workers.append(worker)
-    except BaseException:
-        for worker in started_workers:
-            if worker.is_alive():
-                worker.terminate()
-        for worker in started_workers:
-            worker.join(timeout=10)
-        raise
-    finally:
-        for name,value in previous_environment.items():
-            if value is None:
-                os.environ.pop(name,None)
-            else:
-                os.environ[name]=value
+                    os.environ[name]=value
     while any(worker.is_alive() for worker in workers):
         failed = [(i, worker.exitcode) for i,worker in enumerate(workers) if worker.exitcode not in (None, 0)]
         if failed:
@@ -1893,6 +1904,7 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
             worker.join(timeout=.2)
     if any(worker.exitcode != 0 for worker in workers):
         raise RuntimeError('a PheWAS worker failed; inspect private failure receipts')
+    atomic_json(output/f'spawn_allocator.{plan["attempt_id"]}.private.json', allocator_policy)
     reports = [json.loads((Path(plan['output_directory'])/f'worker_{i}.report.private.json').read_text())
                for i in range(len(workers))]
     dispatch = json.loads((output/f'association_dispatch.{plan["attempt_id"]}.private.json').read_text())

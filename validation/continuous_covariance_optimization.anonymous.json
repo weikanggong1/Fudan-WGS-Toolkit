@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "scientific_source_implementation_sha256": "877757bdb3fc356e67f2959ddfec9e6f4268aa2c960685646453a6fc81f09a80",
+  "actual_execution": true,
+  "comparison": {
+    "status": "passed_scoped_actual_precision_and_warm_timing",
+    "baseline_source_implementation_sha256": "cacef6df8e1a5ca933eb6be841273a3d217fd0461586337c50bc497e37dbb6cd",
+    "candidate_source_implementation_sha256": "877757bdb3fc356e67f2959ddfec9e6f4268aa2c960685646453a6fc81f09a80",
+    "probability_pairs": 3024,
+    "significant_union_pairs": 207,
+    "inverse_log10_P_maximum_delta": 3.047122562460647e-05,
+    "significant_union_inverse_log10_P_maximum_delta": 4.6405235876179063e-07,
+    "warm_paired_runtime_geometric_mean_speed_ratio": 2.3856638030896433,
+    "error_counts": {},
+    "benchmark_scope": {
+      "model_count": 4,
+      "actual_case_count": 1,
+      "actual_total_rounds": 3,
+      "warm_round_indices": [
+        1,
+        2
+      ],
+      "models_refitted": 0,
+      "genetic_cache_prepared": false,
+      "model_bank_persists_across_cases": true,
+      "reader_cache_lifecycle": "new native run_batched_configuration per case; not a persistent reader long-window test",
+      "binary_SPA": "not_assessed",
+      "full_388_models": "not_assessed",
+      "long_term_memory_stability": "not_assessed"
+    }
+  },
+  "independent_model": {
+    "probability_pairs": 504,
+    "maximum_inverse_log10_P_delta": 8.195773402275286e-06,
+    "all_fields_bitwise_equal": false,
+    "standard_errors_and_QC_exact": true
+  },
+  "resources": {
+    "status": "verified_actual_continuous09_final_memory_acceptance",
+    "final_host_memory_accepted": true,
+    "total_rounds": 40,
+    "warm_rounds": 2,
+    "measured_rounds": 38,
+    "actual_model_count": 16,
+    "actual_job_occurrences": 120,
+    "coverage_excludes": [
+      "packed Px",
+      "nonreturned internal workspaces",
+      "external native allocator owners",
+      "four-analysis-type long-mask or chromosome-switch stability",
+      "binary/SPA",
+      "388-model production"
+    ],
+    "late_platform": {
+      "values": {
+        "late_allocated_maximum_minus_first_bytes": 0,
+        "late_pss_absolute_half_median_delta_bytes": 1024.0,
+        "late_pss_maximum_minus_first_bytes": 4096,
+        "late_active_arena_estimate_range_bytes": 6891017
+      },
+      "limits": {
+        "late_allocated_maximum_minus_first_limit_bytes": 16777216,
+        "late_pss_absolute_half_median_delta_limit_bytes": 16777216,
+        "late_pss_maximum_minus_first_limit_bytes": 33554432,
+        "late_active_arena_estimate_range_limit_bytes": 33554432
+      },
+      "checks": {
+        "late_allocated_maximum_minus_first_limit_bytes": true,
+        "late_pss_absolute_half_median_delta_limit_bytes": true,
+        "late_pss_maximum_minus_first_limit_bytes": true,
+        "late_active_arena_estimate_range_limit_bytes": true
+      },
+      "all_thresholds_passed": true,
+      "active_arena_estimate_is_not_uordblks": true
+    },
+    "forced_gc": false,
+    "forced_empty_cache": false,
+    "malloc_trim_called": false,
+    "universal_leak_freedom_not_claimed": true
+  },
+  "allocator_configuration": {
+    "PYTHONMALLOC": "malloc",
+    "MALLOC_ARENA_MAX": "2",
+    "MALLOC_MMAP_THRESHOLD_": "131072",
+    "MALLOC_TRIM_THRESHOLD_": "131072"
+  },
+  "official_comparison": "not_executed_in_this_implementation_benchmark",
+  "benchmark_is_not_full_analysis": true
+}

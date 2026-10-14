@@ -622,44 +622,49 @@ def _dispatch(plan, entries, resources, gpu_ids):
                                      device=f'cuda:{gpu_ids[0]}')])
     context = mp.get_context('spawn')
     names = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
-    previous = {name: os.environ.get(name) for name in names}
     owned = []
-    try:
-        for name in names:
-            os.environ[name] = str(resources['cpu_threads'])
-        for index, device in enumerate(gpu_ids):
-            handle = invocation_lease_for_spawn()
-            process = None
-            try:
-                process = context.Process(target=_worker, kwargs=dict(plan=plan, entries=entries,
-                    resources=resources, worker_id=index, worker_count=len(gpu_ids),
-                    device=f'cuda:{device}', bind_affinity=True, invocation_lease=handle))
-                process.start()
-            except BaseException as error:
-                if process is not None and getattr(process, 'pid', None) is not None:
-                    # A start error can occur after this call's OS child exists.
-                    # It remains owned and must be joined before releasing its lease.
-                    owned.append(process)
+    from ._continuous_spawn_allocator import continuous_spawn_allocator_scope
+    with continuous_spawn_allocator_scope(
+            input_contract=plan.get('input_contract', 'mixed'),
+            families=plan.get('families', {}),
+            worker_count=len(gpu_ids)) as allocator_policy:
+        previous = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ[name] = str(resources['cpu_threads'])
+            for index, device in enumerate(gpu_ids):
+                handle = invocation_lease_for_spawn()
+                process = None
+                try:
+                    process = context.Process(target=_worker, kwargs=dict(plan=plan, entries=entries,
+                        resources=resources, worker_id=index, worker_count=len(gpu_ids),
+                        device=f'cuda:{device}', bind_affinity=True, invocation_lease=handle))
+                    process.start()
+                except BaseException as error:
+                    if process is not None and getattr(process, 'pid', None) is not None:
+                        # A start error can occur after this call's OS child exists.
+                        # It remains owned and must be joined before releasing its lease.
+                        owned.append(process)
+                    else:
+                        try:
+                            close_pending_invocation_lease(handle)
+                        except BaseException as cleanup:
+                            _note(error, f'invocation transfer cleanup also failed: {cleanup}')
+                    raise
+                owned.append(process)
+        except BaseException:
+            for process in owned:
+                if process.is_alive():
+                    process.terminate()
+            for process in owned:
+                process.join()
+            raise
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
                 else:
-                    try:
-                        close_pending_invocation_lease(handle)
-                    except BaseException as cleanup:
-                        _note(error, f'invocation transfer cleanup also failed: {cleanup}')
-                raise
-            owned.append(process)
-    except BaseException:
-        for process in owned:
-            if process.is_alive():
-                process.terminate()
-        for process in owned:
-            process.join()
-        raise
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+                    os.environ[name] = value
     while any(process.is_alive() for process in owned):
         if any(process.exitcode not in (None, 0) for process in owned):
             # These exact Process children belong solely to this invocation.
@@ -673,6 +678,7 @@ def _dispatch(plan, entries, resources, gpu_ids):
         process.join()
     if any(process.exitcode != 0 for process in owned):
         raise RuntimeError('prepared association worker failed; inspect the private attempt receipts')
+    atomic_json(Path(plan['output_directory'])/f'spawn_allocator.{resources["attempt_id"]}.private.json', allocator_policy)
     output = Path(plan['output_directory'])
     return verified([json.loads((output/f'worker_{i}.attempt_{resources["attempt_id"]}.report.private.json').read_text())
                      for i in range(len(owned))])
@@ -747,6 +753,9 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
     output = Path(output_directory).resolve()
     source = run._implementation_sha256()
     configuration = _configuration(manifest, entries, sample_keys(population), output, options, source)
+    if input_contract == 'continuous':
+        from .continuous_run import _continuous_performance_configuration
+        configuration = _continuous_performance_configuration(configuration)
     files = _source_files(root, manifest_path, manifest, entries, phenotype_csv, covariate_csv, kinship_file)
     input_binding = dict(prepared_directory=str(root), dataset_sha256=files[str(manifest_path)],
                          files=files, genotype_streams=_stream_bindings(entries))

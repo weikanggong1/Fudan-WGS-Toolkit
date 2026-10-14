@@ -149,7 +149,8 @@ class _PanelPreparation:
 
 
 def blocked_gaussian_covariance(model, host, broker, *, variant_tile_size=512,
-                                profiler=None, report=None, capacity_bytes=None):
+                                profiler=None, report=None, capacity_bytes=None,
+                                panel_cache_factory=None):
     """Reuse preparation within one model/mask; keep native pair mathematics.
 
     The default optional cache is at most 8 GiB and 15% of currently available
@@ -177,7 +178,8 @@ def blocked_gaussian_covariance(model, host, broker, *, variant_tile_size=512,
                               if callable(live) else 0)
         if type(capacity_bytes) is not int or capacity_bytes < 0:
             raise ValueError('capacity_bytes must be a nonnegative integer')
-        cache = _PanelPreparation(model, host, broker, width, capacity_bytes, profiler)
+        factory = _PanelPreparation if panel_cache_factory is None else panel_cache_factory
+        cache = factory(model, host, broker, width, capacity_bytes, profiler)
         release_scope = getattr(broker, 'optional_device_cache', None)
         scope = release_scope(cache.release_unpinned) if callable(release_scope) else nullcontext()
         with scope:

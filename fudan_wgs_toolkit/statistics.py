@@ -15,6 +15,7 @@ import torch
 
 from .tf32 import matmul, validate_mode
 from .tensor_validation import tensor_all_finite
+from ._native_tail_groups import PendingCompleteTail
 
 from ._precision_eigen import record_gpu_eigen_route, record_ordered_tail
 
@@ -1112,7 +1113,8 @@ def association_test(
     weight_batch_optimization: bool = False,
     output_batch_optimization: bool = True,
     cct_validation_optimization: bool = True,
-) -> dict[str, float | int]:
+    _defer_full_tail: bool = False,
+) -> dict[str, float | int] | PendingCompleteTail:
     """Return WGS columns from already oriented, imputed score inputs.
 
     Native tf32 uses FP32 scores, covariance and weights. The default full
@@ -1136,8 +1138,16 @@ def association_test(
     never fits or approximates a binary SPA or mixed-model null fit.
     cmac optionally supplies exact sum(G_rare), important after imputation;
     otherwise the sum of the caller's MAC values is returned.
+    _defer_full_tail is an internal, explicit native FULL preparation control.
+    It retains only detached Q, complete spectra, elementary P rows and small
+    output metadata for finish_complete_tails; ordinary calls return a dict.
     """
     validate_mode(matmul_mode)
+    if type(_defer_full_tail) is not bool:
+        raise ValueError('_defer_full_tail must be a boolean')
+    if _defer_full_tail and (matmul_mode != 'tf32' or long_mask_method != 'full'
+                            or _skat_pvalues is not None):
+        raise ValueError('deferred tails require native tf32 FULL without precomputed SKAT values')
     if type(long_mask_threshold) is not int or long_mask_threshold < 1:
         raise ValueError("long_mask_threshold must be a positive integer")
     _STATISTICS_METADATA["exact_spectrum_threshold"] = None if long_mask_method == "full" else long_mask_threshold
@@ -1181,10 +1191,15 @@ def association_test(
         if phred.ndim != 2 or phred.shape[0] != u.numel():
             raise ValueError("annotations must have one row per original variant")
         phred = phred[mask]
+    from ._complete_spectrum_scope import current_reuse_scope, register_covariance_transform
+    covariance_origin = v if native and current_reuse_scope() is not None else None
     u, v, f, m = u[mask], v[mask][:, mask], f[mask], m[mask]
     if not bool(torch.allclose(v, v.T, atol=1e-10, rtol=1e-10)):
         raise ValueError("covariance must be symmetric")
     v = (v + v.T) * 0.5
+    if covariance_origin is not None:
+        register_covariance_transform(covariance_origin, v, mask)
+    covariance_origin = None
     k = 0 if phred is None else phred.shape[1]
     labels = [f"annotation_{i + 1}" for i in range(k)] if names is None else list(names)
     if len(labels) != k or len(set(labels)) != k or any(not isinstance(s, str) or not s for s in labels):
@@ -1303,7 +1318,7 @@ def association_test(
                     pvalues[0] = _liu_hutchinson_pvalues(
                         q_values, v, skat_weights, rank=int(long_mask_rank),
                         seed=int(long_mask_seed), threshold=long_mask_threshold)
-            else:
+            elif not _defer_full_tail:
                 pvalues[0] = _saddlepoint_skat_pvalues(q_values, small_spectra)
         else:
             pvalues[0] = _skat_pvalues
@@ -1353,7 +1368,12 @@ def association_test(
             acat_w = torch.cat((acat_w, rare_weight))
         pvalues[2, i] = _cct_tensor(acat_p, acat_w, internal=True, sync_light=tail_optimization,
                                   _normal_transform=normal_transform)
-    result: dict[str, float | int] = {"num_variant": count, "cMAC": float(m.sum()) if cmac is None else float(cmac)}
+    actual_cmac = float(m.sum()) if cmac is None else float(cmac)
+    if _defer_full_tail:
+        return PendingCompleteTail(q_values, small_spectra, pvalues, labels,
+            num_variant=count, cmac=actual_cmac, tail_optimization=tail_optimization,
+            output_batch_optimization=output_batch_optimization)
+    result: dict[str, float | int] = {"num_variant": count, "cMAC": actual_cmac}
     result.update(_association_probability_fields(pvalues, labels, tail_optimization=tail_optimization,
                                            batch_copy=output_batch_optimization))
     return result

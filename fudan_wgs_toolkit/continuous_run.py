@@ -12,6 +12,31 @@ import numpy as np
 from .run import _KINDS
 
 
+def _continuous_performance_configuration(configuration):
+    """Copy execution defaults for the verified continuous-only workflow.
+
+    Scientific options and the ordered genetic schedule are borrowed without
+    mutation. All added fields belong to the returned top-level mapping, so
+    both plan builders include the actual execution choices in their existing
+    source/configuration and resume bindings. Batched spectra bound execution
+    geometry only; larger masks retain the complete sequential FULL spectrum.
+    Writer fsync keeps its existing serial default.
+    """
+    result = dict(configuration)
+    full = result.get('analysis_options', {}).get('long_mask_method', 'full') == 'full'
+    result.update(_continuous_shared_panels=True,
+                  _continuous_resident_preparation=True,
+                  _continuous_covariance_tiles=True,
+                  _continuous_live_resident=True,
+                  _continuous_tail_groups=full,
+                  _continuous_complete_spectrum_batch=full,
+                  _continuous_spectrum_reuse=full,
+                  _continuous_complete_spectrum_batch_parameters=(dict(
+                      maximum_variants=1536, weight_batch_size=32,
+                      relation_workspace_bytes=256*2**10) if full else None))
+    return result
+
+
 def validate_continuous_traits(families, quality):
     """Validate parsed traits without rereading the phenotype CSV.
 
