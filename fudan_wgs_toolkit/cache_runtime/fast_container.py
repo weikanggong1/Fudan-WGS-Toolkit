@@ -149,6 +149,7 @@ class Container(store.Container):
                 future = self._prefetch_future
                 self._prefetch_future = self._prefetch_frame = None
                 future.result()
+                del future
                 self._prefetch_metrics['discarded'] += 1
             row = self.index[frame_id]
             size = int(row['size'])+int(row['header_size'])+int(row['counts_size'])

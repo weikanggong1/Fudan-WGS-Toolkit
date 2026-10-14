@@ -14,8 +14,14 @@ import torch
 from fudan_wgs_toolkit.phewas_storage import ModelRepository, digest_file
 
 
+class _ExplicitStorageEntry(SimpleNamespace):
+    """Compatible bank owner exposing all of this fixture's retained tensors."""
+    def explicit_storage_owners(self):
+        return vars(self)
+
+
 def tensor_entry(value, *, shared=None):
-    return SimpleNamespace(x=value if shared is None else shared, residual=value)
+    return _ExplicitStorageEntry(x=value if shared is None else shared, residual=value)
 
 
 def insert(repository, namespace, index, value, *, device='cpu'):

@@ -9,6 +9,7 @@ Corrupt committed ranges fail closed; they are never mistaken for missing work.
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 import csv
@@ -256,13 +257,16 @@ class PerTraitCheckpointCSVWriter:
     continuous chromosome dispatch uses one lock per chromosome, so different
     workers may append the same traits on disjoint chromosomes safely without
     retaining a lock for every trait/chromosome pair.
+    ``parallel_fsync=True`` optionally synchronizes at most four dirty file
+    descriptors together. Every synchronization is awaited before committing
+    the tile; compression, SQLite and scientific work remain on the caller.
     """
     checkpoint_tiles = True
     output_layout = 'per_trait'
 
     def __init__(self, directory, *, binding, resume=False, worker_id='0',
                  minimum_free_bytes=0, max_open_streams=48, verification_cache_size=256,
-                 ownership_scope='trait'):
+                 ownership_scope='trait', parallel_fsync=False):
         required = {'source_implementation_sha256', 'input_manifest_sha256',
                     'configuration_sha256', 'models'}
         if (type(resume) is not bool or not isinstance(binding, dict) or not required.issubset(binding)
@@ -274,6 +278,8 @@ class PerTraitCheckpointCSVWriter:
             raise ValueError('invalid CSV reserve, stream or verification-cache bound')
         if ownership_scope not in ('trait', 'chromosome'):
             raise ValueError('CSV ownership_scope must be trait or chromosome')
+        if type(parallel_fsync) is not bool:
+            raise ValueError('parallel_fsync must be boolean')
         worker_id = str(worker_id)
         if not worker_id or Path(worker_id).name != worker_id or worker_id in ('.', '..') or '\\' in worker_id:
             raise ValueError('checkpoint worker ID must be a single safe filename component')
@@ -285,6 +291,18 @@ class PerTraitCheckpointCSVWriter:
             raise ValueError('checkpoint directory must not be a symlink')
         self.worker_id, self.resume = worker_id, resume
         self.ownership_scope = ownership_scope
+        self.parallel_fsync = parallel_fsync
+        self._fsync_executor = None
+        self._pending_fsyncs = []
+        self.io_profile = dict(gzip_members=0, gzip_flush_wall_seconds=0., raw_flush_calls=0,
+            raw_flush_wall_seconds=0., fsync_calls=0, fsync_failed_calls=0,
+            fsync_worker_seconds=0., fsync_barrier_calls=0, fsync_barrier_wall_seconds=0.,
+            fsync_future_waits=0, maximum_pending_fsyncs=0, tile_commit_calls=0,
+            tile_commit_wall_seconds=0., parallel_fsync=parallel_fsync, maximum_fsync_workers=4,
+            initialization_sqlite_commit_calls=0, initialization_sqlite_commit_wall_seconds=0.,
+            schema_sqlite_commit_calls=0, schema_sqlite_commit_wall_seconds=0.,
+            tile_sqlite_commit_calls=0, tile_sqlite_commit_wall_seconds=0.,
+            timing_contract='gzip/flush and commit wall; fsync worker durations can overlap and are not additive with barrier wall or end-to-end')
         self.binding = json.loads(_canonical(binding))
         self.binding_sha256 = _sha(self.binding)
         self.minimum_free_bytes, self.max_open = minimum_free_bytes, max_open_streams
@@ -368,7 +386,7 @@ class PerTraitCheckpointCSVWriter:
                 raise ValueError('resume checkpoint source/input/schedule/model binding differs')
             if not self.resume and self.db.execute('SELECT 1 FROM blocks WHERE writer_id=? LIMIT 1', (self.worker_id,)).fetchone():
                 raise FileExistsError('previous association checkpoints exist; choose resume=True or a new output directory')
-            self.db.execute('COMMIT')
+            self._commit_database('initialization')
         except BaseException:
             if self.db.in_transaction:
                 self.db.execute('ROLLBACK')
@@ -377,6 +395,14 @@ class PerTraitCheckpointCSVWriter:
     def _require_open(self):
         if self._closed:
             raise RuntimeError('canonical CSV writer is closed')
+
+    def _commit_database(self, phase):
+        started = time.perf_counter()
+        self.io_profile[phase+'_sqlite_commit_calls'] += 1
+        try:
+            self.db.execute('COMMIT')
+        finally:
+            self.io_profile[phase+'_sqlite_commit_wall_seconds'] += time.perf_counter()-started
 
     def _key(self, kind, chromosome, job_index, trait_indices, block_index):
         if kind not in _KINDS:
@@ -478,19 +504,120 @@ class PerTraitCheckpointCSVWriter:
             raise
 
     def _close_stream(self, file_id):
+        # No descriptor may retire while an already-submitted fsync owns it.
+        self._wait_fsyncs()
         raw = self.streams.pop(file_id, None)
         if raw is not None:
             try:
                 if file_id in self._dirty_streams:
-                    raw.flush()
+                    self._flush_raw(raw)
                     if self._batch is None:
-                        os.fsync(raw.fileno())
-                        self.durability_profile['data_fsync_calls'] += 1
+                        self._sync_one(raw.fileno())
             finally:
                 try:
                     raw.close()
                 finally:
                     self._dirty_streams.discard(file_id)
+
+    def _flush_raw(self, raw):
+        started = time.perf_counter()
+        self.io_profile['raw_flush_calls'] += 1
+        try:
+            raw.flush()
+        finally:
+            self.io_profile['raw_flush_wall_seconds'] += time.perf_counter()-started
+
+    @staticmethod
+    def _fsync_call(descriptor):
+        """The pool operates on a live FD only and never touches SQLite/state."""
+        started = time.perf_counter()
+        try:
+            os.fsync(descriptor)
+            error = None
+        except BaseException as failure:
+            error = failure
+        return time.perf_counter()-started, error
+
+    def _record_fsync(self, duration, error):
+        self.io_profile['fsync_calls'] += 1
+        self.durability_profile['data_fsync_calls'] += 1
+        self.io_profile['fsync_failed_calls'] += int(error is not None)
+        self.io_profile['fsync_worker_seconds'] += duration
+
+    def _sync_one(self, descriptor):
+        duration, error = self._fsync_call(descriptor)
+        self._record_fsync(duration, error)
+        if error is not None:
+            raise error
+
+    def _wait_fsyncs(self, error=None):
+        """Drain every submitted future before propagating the first failure."""
+        for file_id, future in self._pending_fsyncs:
+            self.io_profile['fsync_future_waits'] += 1
+            while True:
+                try:
+                    duration, failure = future.result()
+                    self._record_fsync(duration, failure)
+                    if failure is None:
+                        self._dirty_streams.discard(file_id)
+                    elif error is None:
+                        error = failure
+                    else:
+                        _note(error, f'additional CSV fsync failed: {type(failure).__name__}')
+                    break
+                except BaseException as failure:
+                    if error is None:
+                        error = failure
+                    else:
+                        _note(error, f'additional CSV fsync wait failed: {type(failure).__name__}')
+                    # A caller interrupt while waiting is not worker completion.
+                    # Retry that real wait before releasing the descriptor.
+                    if future.done():
+                        break
+        self._pending_fsyncs.clear()
+        if error is not None:
+            raise error
+
+    def _sync_dirty_streams(self):
+        """Bounded synchronous tile barrier, with at most four pending fsyncs."""
+        dirty = [file_id for file_id in self.streams if file_id in self._dirty_streams]
+        if not dirty:
+            return
+        if not self.parallel_fsync:
+            for file_id in dirty:
+                self._sync_one(self.streams[file_id].fileno())
+                self._dirty_streams.discard(file_id)
+            return
+        if self._fsync_executor is None:
+            self._fsync_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='wgs-csv-fsync')
+        started = time.perf_counter()
+        self.io_profile['fsync_barrier_calls'] += 1
+        try:
+            for begin in range(0, len(dirty), 4):
+                error = None
+                try:
+                    for file_id in dirty[begin:begin+4]:
+                        raw = self.streams[file_id]
+                        future = self._fsync_executor.submit(self._fsync_call, raw.fileno())
+                        self._pending_fsyncs.append((file_id, future))
+                        self.io_profile['maximum_pending_fsyncs'] = max(
+                            self.io_profile['maximum_pending_fsyncs'], len(self._pending_fsyncs))
+                except BaseException as failure:
+                    error = failure
+                # Includes submission failures: previous accepted work still
+                # crosses its real future.result() before recovery closes FDs.
+                self._wait_fsyncs(error)
+        except BaseException as error:
+            # Also covers a submit interrupted after accepting a work item but
+            # before returning its Future. Its FD cannot close until shutdown.
+            try:
+                self._fsync_executor.shutdown(wait=True)
+            except BaseException as cleanup:
+                _note(error, f'CSV fsync barrier shutdown also failed: {type(cleanup).__name__}')
+            self._fsync_executor = None
+            raise
+        finally:
+            self.io_profile['fsync_barrier_wall_seconds'] += time.perf_counter()-started
 
     def _recover_tail(self, info):
         self._close_stream(info['id'])
@@ -582,7 +709,7 @@ class PerTraitCheckpointCSVWriter:
                 continue
             file_id, relative = self._file_identity(trait, kind, chromosome, columns)
             if self._batch is not None:
-                files[file_id] = self._ensure_file(trait,kind,chromosome,columns)
+                files[(trait,tuple(columns[1:]))] = self._ensure_file(trait,kind,chromosome,columns)
                 continue
             row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
             if row is None:
@@ -591,7 +718,7 @@ class PerTraitCheckpointCSVWriter:
                 info = self._file(row)
                 if info['columns'] != columns:
                     raise CommittedCSVCorruption('canonical CSV schema signature collision')
-                files[file_id] = info
+                files[(trait, tuple(columns[1:]))] = info
         if missing:
             self.durability_profile['registration_transactions'] += 1
             self.db.execute('BEGIN IMMEDIATE')
@@ -602,11 +729,12 @@ class PerTraitCheckpointCSVWriter:
                     info = self._file_info(item[0])
                     if info['columns'] != json.loads(item[5]):
                         raise CommittedCSVCorruption('canonical CSV schema signature collision')
-                    files[item[0]] = info
-                self.db.execute('COMMIT')
+                    files[(info['trait'],tuple(info['columns'][1:]))] = info
+                self._commit_database('schema')
                 for item in missing:
-                    if self._actual_path(files[item[0]]).exists():
-                        self._recover_tail(files[item[0]])
+                    info=files[(item[1],tuple(json.loads(item[5])[1:]))]
+                    if self._actual_path(info).exists():
+                        self._recover_tail(info)
             except BaseException:
                 if self.db.in_transaction:
                     self.db.execute('ROLLBACK')
@@ -643,9 +771,11 @@ class PerTraitCheckpointCSVWriter:
         self._dirty_streams.add(info['id'])
         hashing = _AppendHash(raw)
         count = selected = failed = 0
+        started = time.perf_counter()
         with gzip.GzipFile(filename='',fileobj=hashing,mode='wb',compresslevel=1,mtime=0) as compressed:
             with io.TextIOWrapper(compressed,encoding='utf-8',newline='') as text:
                 if trait_index is None:
+                    # Retain the prebound-row private extension contract.
                     output = csv.DictWriter(text,fieldnames=info['columns'],extrasaction='raise')
                     if start == 0:
                         output.writeheader()
@@ -654,18 +784,23 @@ class PerTraitCheckpointCSVWriter:
                         selected += int(bool(row.get('spa_selected',False)))
                         failed += int(bool(row.get('spa_failed',False)))
                 else:
+                    # Both native Single and gene paths have an exact ordered
+                    # source schema checked below. Reuse bounded positional
+                    # writing without a copied trait-prefixed mapping or a
+                    # redundant DictWriter key-set check for every row.
                     output = csv.writer(text,lineterminator='\r\n')
                     if start == 0:
                         output.writerow(info['columns'])
                     count,selected,failed = _write_bound_trait_rows(
                         output,rows,trait_index,info['columns'][1:])
-        raw.flush()
-        if self._batch is None:
-            os.fsync(raw.fileno())
-            self.durability_profile['data_fsync_calls'] += 1
-            self._dirty_streams.discard(info['id'])
-        else:
+        self._flush_raw(raw)
+        self.io_profile['gzip_members'] += 1
+        self.io_profile['gzip_flush_wall_seconds'] += time.perf_counter()-started
+        if self._batch is not None:
             self._batch['dirty'].add(info['id'])
+        elif not self.parallel_fsync:
+            self._sync_one(raw.fileno())
+            self._dirty_streams.discard(info['id'])
         return dict(file_id=info['id'],start=start,end=start+hashing.size,rows=count,
                     header=int(start==0),sha256=hashing.digest.hexdigest()), selected, failed
 
@@ -771,6 +906,8 @@ class PerTraitCheckpointCSVWriter:
 
     def _commit_tiles(self, tiles, new_files=()):
         """Publish already-synchronized member ranges in one FULL transaction."""
+        started=time.perf_counter()
+        self.io_profile['tile_commit_calls'] += 1
         self.db.execute('BEGIN IMMEDIATE')
         try:
             for info in new_files:
@@ -798,28 +935,29 @@ class PerTraitCheckpointCSVWriter:
                 self.db.execute('INSERT INTO blocks VALUES(?,?,?,?,?,?,?)',
                     (token,self.worker_id,self.invocation,record['kind'],record['rows'],_canonical(record),record['receipt_sha256']))
                 self.db.execute('INSERT INTO visits VALUES(?,?,0)',(self.invocation,token))
-            self.db.execute('COMMIT')
+            self._commit_database('tile')
             self.durability_profile['tile_commit_transactions'] += 1
         except BaseException:
             if self.db.in_transaction:
                 self.db.execute('ROLLBACK')
             raise
+        finally:
+            self.io_profile['tile_commit_wall_seconds'] += time.perf_counter()-started
 
     def _sync_batch_files(self):
-        """One data fsync per affected file, including evicted append handles."""
+        """One data fsync per file; optional four-FD barrier stays bounded.
+
+        Evicted append handles are reopened one at a time. Existing handles
+        use the original optional pool. No descriptor retires before every
+        submitted future has really finished, including failure recovery.
+        """
         for file_id in sorted(self._batch['dirty']):
-            raw = self.streams.get(file_id)
-            if raw is not None:
-                raw.flush(); os.fsync(raw.fileno())
-            else:
-                # Dirty eviction closes/flushed the append handle without
-                # claiming durability; retain this bounded file identity until
-                # the whole batch crosses the durability barrier.
-                info = self._batch['files'][file_id]
-                with self._actual_path(info).open('rb') as source:
-                    os.fsync(source.fileno())
-            self.durability_profile['data_fsync_calls'] += 1
-            self._dirty_streams.discard(file_id)
+            if file_id in self.streams:
+                continue
+            info=self._batch['files'][file_id]
+            with self._actual_path(info).open('rb') as source:
+                self._sync_one(source.fileno())
+        self._sync_dirty_streams()
 
     def write_tiles(self, tiles):
         """Atomically commit up to 256 FIFO tiles; receipts are durable on return.
@@ -916,8 +1054,10 @@ class PerTraitCheckpointCSVWriter:
                     source_schema = tuple(pending)
                     if any(not isinstance(c,str) or not c for c in schema):
                         raise ValueError('association row requires nonempty string column names')
-                    file_id, _ = self._file_identity(trait, kind, key['chromosome'], schema)
-                    info = initial_files.get(file_id)
+                    # Initial schemas were authenticated together for this
+                    # tile. Keep this lookup local to the call; endpoints and
+                    # ownership are read afresh on every later tile/resume.
+                    info = initial_files.get((trait, source_schema))
                     if info is None:
                         info = self._ensure_file(trait,kind,key['chromosome'],schema)
                     before.setdefault(info['id'],info['committed_end'])
@@ -931,9 +1071,9 @@ class PerTraitCheckpointCSVWriter:
                                 return
                             source = pending
                             pending = next(iterator,None)
-                            yield source if kind=='individual' else dict(trait_index=trait,**source)
+                            yield source
                     item,chosen,errors = self._append_member(info,start,consecutive_rows(),
-                        trait_index=trait if kind=='individual' else None)
+                        trait_index=trait)
                     ranges.append(item); ends[info['id']] = item['end']
                     counts[str(trait)] += item['rows']; selected += chosen; failed += errors
                     for column in schema:
@@ -948,6 +1088,7 @@ class PerTraitCheckpointCSVWriter:
                 binary_spa_failed=failed if binary_counts is None else binary_counts['failed'])
             record['receipt_sha256'] = _sha(record)
             if self._batch is None:
+                self._sync_dirty_streams()
                 self._commit_tile(token,record,ranges,before)
                 self.computed_blocks += 1
             else:
@@ -1068,6 +1209,7 @@ class PerTraitCheckpointCSVWriter:
             committed_range_checksums_verified=True,uncommitted_suffixes_never_reused=True,
             maximum_open_append_streams=self.max_open,verification_cache_bound=self.verification_cache_size,
             durability_profile=dict(self.durability_profile))
+        result['writer_io_profile'] = dict(self.io_profile)
         atomic_json(self.directory/f'worker_{self.worker_id}.complete.private.json',result)
         self._finished = result
         self.close()
@@ -1077,6 +1219,21 @@ class PerTraitCheckpointCSVWriter:
         if self._closed:
             return
         error = None
+        try:
+            self._wait_fsyncs()
+        except BaseException as cleanup:
+            error = cleanup
+        if self._fsync_executor is not None:
+            # Even an interrupted submission must finish before descriptors,
+            # locks or SQLite retire. Idle workers are never kept after close.
+            try:
+                self._fsync_executor.shutdown(wait=True)
+            except BaseException as cleanup:
+                if error is None:
+                    error = cleanup
+                else:
+                    _note(error, f'CSV fsync executor cleanup also failed: {type(cleanup).__name__}')
+            self._fsync_executor = None
         for file_id in list(self.streams):
             try:
                 self._close_stream(file_id)

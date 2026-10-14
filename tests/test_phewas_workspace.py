@@ -17,6 +17,12 @@ from test_phewas_shared_state import MetadataReader, make_cache, fixture_states
 from fudan_wgs_toolkit.phewas_runtime.metadata import SharedMetadataReader
 
 
+class _ExplicitStorageEntry(SimpleNamespace):
+    """Simulated bank entry retaining the real owner's explicit storage API."""
+    def explicit_storage_owners(self):
+        return vars(self)
+
+
 def simulated_cuda(monkeypatch, repository, *, total=1000):
     """Track owned cache bytes and external allocations without GPU allocation."""
     state = dict(external=0, csr=0, emptied=0)
@@ -34,7 +40,7 @@ def simulated_cuda(monkeypatch, repository, *, total=1000):
 
 
 def entry(bytes):
-    return SimpleNamespace(bytes=bytes)
+    return _ExplicitStorageEntry(bytes=bytes)
 
 
 def test_repository_policy_uses_explicit_cap_and_restores_nested_state(monkeypatch):
@@ -145,11 +151,12 @@ def test_binary_derivation_rejects_before_allocation_and_unpins_source(monkeypat
     repository = ModelRepository([], workspace_bytes=0)
     repository._descriptors = [dict(family='binomial', spa_available=True)]
     calls = []
-    source = SimpleNamespace(_tensors=(torch.ones((4, 2), dtype=torch.float64),
+    source = _ExplicitStorageEntry(_tensors=(torch.ones((4, 2), dtype=torch.float64),
         torch.ones(4, dtype=torch.float64), torch.full((4,), .5, dtype=torch.float64),
         torch.eye(2, dtype=torch.float64), torch.ones(4, dtype=torch.float64), None, None),
         normal=lambda: pytest.fail('normal allocated before admission'),
-        spa=lambda: pytest.fail('SPA allocated before admission'))
+        spa=lambda **kwargs: pytest.fail('SPA allocated before admission'),
+        spa_projection_cached=lambda: False)
     repository.spa_sources[(0, 'cuda:0')] = source
     def admit(device, **kwargs):
         calls.append(kwargs)

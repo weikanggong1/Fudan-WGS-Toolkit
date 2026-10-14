@@ -500,6 +500,9 @@ def _thin_pipeline(gds, model, rows, options, configuration, structural=None):
     p.statistics_tail_optimization_calls = 0
     p.profiler = configuration.get('_stage_profiler') or StageProfiler(model.device, enabled=configuration.get('stage_profile', False))
     p.resident_genotypes = True
+    p._continuous_live_resident = configuration.get('_continuous_live_resident', False)
+    if type(p._continuous_live_resident) is not bool:
+        raise ValueError('_continuous_live_resident must be a boolean')
     p.single_batch_optimization = True
     p.individual_effective_block_size = configuration.get('individual_effective_block_size', 1024)
     p.host_memory_guard = configuration.get('host_memory_guard')
@@ -700,7 +703,10 @@ def _prepare_shared_gene(pipeline, indices, broker):
         variant_type=options.variant_type, number_variants=len(indices))
     # Candidate geometry bounds raw ownership before counts are known. Large
     # masks retain the old tiled host path; no eligible mask is skipped.
-    if (torch.device(broker.device).type == 'cuda' and len(indices) <= options.long_mask_threshold
+    if (torch.device(broker.device).type == 'cuda'
+            and (len(indices) <= options.long_mask_threshold
+                 or (getattr(pipeline, '_continuous_live_resident', False)
+                     and not getattr(pipeline, '_binary_burden_only', False)))
             and pipeline.resident_genotypes):
         try:
             return _prepare_shared_gene_device(pipeline, indices, broker, phred, names)
@@ -867,7 +873,8 @@ def _gene_probability_extreme(result):
 
 
 def _evaluate_gaussian_gene_score(pipeline, payload, model, genotype, broker,
-                                  *, shared_simt, report):
+                                  *, shared_simt, report, reuse_complete_spectra=False,
+                                  first_evaluation=None):
     """Retain the original full trait column when FP32 tail sensitivity is high.
 
     IEEE FP32 matrix and vector reductions can differ slightly. Above native
@@ -875,7 +882,16 @@ def _evaluate_gaussian_gene_score(pipeline, payload, model, genotype, broker,
     the original whole resident-G / 512 host-panel GEMV column with this same
     fitted residual and V. A failed first evaluation remains a real failure.
     The threshold selects an arithmetic fallback, never a mask/sample filter.
+    first_evaluation is an optional completed dictionary from the exact native
+    FULL finalizer for this payload. Normal sensitivity checks still execute;
+    a normal-score restoration discards that dictionary and evaluates the
+    original score. A sensitive completed gene tail still takes the mature
+    original-score path. The caller owns admission and payload correspondence.
     """
+    if type(reuse_complete_spectra) is not bool:
+        raise ValueError('reuse_complete_spectra must be a boolean')
+    if first_evaluation is not None and not isinstance(first_evaluation, dict):
+        raise ValueError('first_evaluation must be a completed dictionary or None')
     original = False
     def restore(reason):
         nonlocal original
@@ -895,33 +911,47 @@ def _evaluate_gaussian_gene_score(pipeline, payload, model, genotype, broker,
             report['gene_score_control_d2h_bytes'] = report.get('gene_score_control_d2h_bytes', 0)+1
         if _gene_normal_score_extreme(payload['score'], payload['covariance']):
             restore('normal_tail')
-    report['gene_score_tail_evaluations'] = report.get('gene_score_tail_evaluations', 0)+1
-    result = pipeline._evaluate_prepared(payload, model)
-    if shared_simt and not original and _gene_probability_extreme(result):
-        # First-tail dictionaries may contain native CUDA values. Release them
-        # before the original-score tail, while keeping this same V resident.
-        del result
-        restore('gene_tail')
-        report['gene_score_additional_tail_evaluations'] = report.get('gene_score_additional_tail_evaluations', 0)+1
-        report['gene_score_tail_evaluations'] += 1
-        started = time.perf_counter()
-        result = pipeline._evaluate_prepared(payload, model)
-        report['gene_score_additional_tail_submission_seconds'] = report.get('gene_score_additional_tail_submission_seconds', 0.)+time.perf_counter()-started
+    from .._complete_spectrum_scope import same_covariance_spectrum_scope
+    # Only score changes between these evaluations. The fitted covariance is
+    # the same immutable object; reconstructed weights must still match bits.
+    # This candidate stays explicit until real-data end-to-end acceptance.
+    with same_covariance_spectrum_scope(enabled=(reuse_complete_spectra and shared_simt and not original)):
+        report['gene_score_tail_evaluations'] = report.get('gene_score_tail_evaluations', 0)+1
+        if first_evaluation is not None and not original:
+            result = first_evaluation
+            report['gene_score_completed_first_evaluations'] = report.get('gene_score_completed_first_evaluations', 0)+1
+        else:
+            if first_evaluation is not None:
+                report['gene_score_completed_first_evaluations_discarded'] = report.get('gene_score_completed_first_evaluations_discarded', 0)+1
+            result = pipeline._evaluate_prepared(payload, model)
+        first_evaluation = None
+        if shared_simt and not original and _gene_probability_extreme(result):
+            # First-tail dictionaries may contain native CUDA values. Release
+            # them before the original score; same-scope spectra remain bounded.
+            del result
+            restore('gene_tail')
+            report['gene_score_additional_tail_evaluations'] = report.get('gene_score_additional_tail_evaluations', 0)+1
+            report['gene_score_tail_evaluations'] += 1
+            started = time.perf_counter()
+            result = pipeline._evaluate_prepared(payload, model)
+            report['gene_score_additional_tail_submission_seconds'] = report.get('gene_score_additional_tail_submission_seconds', 0.)+time.perf_counter()-started
     return result
 
 
-def _gaussian_covariance(model, genotype):
+def _gaussian_covariance(model, genotype, *, rotated=None, cross=None):
     """Original fitted covariance formula, with the shared score supplied separately."""
     from ..tf32 import matmul
-    rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
-    cross = matmul(model.precision_x.T, genotype, mode='tf32')
+    if rotated is None:
+        rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
+    if cross is None:
+        cross = matmul(model.precision_x.T, genotype, mode='tf32')
     covariance = (matmul(rotated.T, model.inverse_variance[:, None]*rotated, mode='tf32')
                   - matmul(matmul(cross.T, model.fixed_effect_covariance, mode='tf32'), cross, mode='tf32'))
     return (covariance+covariance.T)/2
 
 
 def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512,
-                                *, profiler=None, report=None):
+                                *, profiler=None, report=None, panel_cache_factory=None):
     """Bounded exact fitted kinship-block formula for a host genotype mask.
 
     Each panel uses the model's original spectral rotation and inverse weights,
@@ -934,7 +964,8 @@ def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512,
     if torch.device(model.device).type == 'cuda':
         from .._blocked_covariance import blocked_gaussian_covariance
         return blocked_gaussian_covariance(model, host, broker,
-            variant_tile_size=variant_tile_size, profiler=profiler, report=report)
+            variant_tile_size=variant_tile_size, profiler=profiler, report=report,
+            panel_cache_factory=panel_cache_factory)
     from ..tf32 import matmul
     n, m = host.shape
     width = min(m, variant_tile_size)
@@ -1397,12 +1428,21 @@ def _execute_batched_job(attempt, *, configuration, host_memory_lease_factory,
                         report[key] = deepcopy(value)
                 staged.pending.clear()
             if deferred is None:
-                profiler = configuration.get('_stage_profiler')
-                if profiler is None:
+                # Producer publication is enqueue-only for the bounded writer;
+                # its actual IO and final durability barrier are recorded separately.
+                publication_start = time.perf_counter()
+                asynchronous = (callable(getattr(writer, 'defer_completion', None))
+                                and getattr(writer, 'asynchronous', True))
+                with ExitStack() as publication_scope:
+                    profiler = configuration.get('_stage_profiler')
+                    if profiler is not None:
+                        publication_scope.enter_context(profiler.measure(
+                            'gene_output_publish_enqueue' if asynchronous else 'gene_csv_publish'))
                     staged.publish(writer)
-                else:
-                    with profiler.measure('gene_output_publish_enqueue'):
-                        staged.publish(writer)
+                report['gene_csv_publish_seconds'] = report.get('gene_csv_publish_seconds', 0.)+time.perf_counter()-publication_start
+                report['gene_csv_publish_timing_contract'] = (
+                    'producer enqueue wall; consumer IO overlaps computation' if asynchronous
+                    else 'synchronous CSV publication wall including durability')
                 return
             # This point is outside the except block and the lease context.
             # Release partial arrays first, then optional cache owners. Keep
@@ -1468,6 +1508,12 @@ def _gene_preparation_geometry(repository, descriptor, broker, metadata, verifie
 
 def _batched_gene(groups, repository, broker, metadata, options, configuration, arguments,
                   writer, report, verified, chromosome, job_index, trait_batch_size, structural, kind):
+    complete_tail_groups = configuration.get('_continuous_tail_groups', False)
+    if type(complete_tail_groups) is not bool:
+        raise ValueError('_continuous_tail_groups must be a boolean')
+    covariance_tiles = configuration.get('_continuous_covariance_tiles', False)
+    if type(covariance_tiles) is not bool:
+        raise ValueError('_continuous_covariance_tiles must be a boolean')
     descriptors = [descriptor for group in groups for descriptor in group['descriptors']]
     positions = {descriptor['trait_index']: i for i, descriptor in enumerate(descriptors)}
     binary_counts = {d['trait_index']: dict(selected=0, failed=0) for d in descriptors}
@@ -1486,7 +1532,11 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                     group['descriptors'][0], broker, metadata, verified)
                 for mi, indices in enumerate(masks):
                     prepared, prototype, host, genotype, burdens, exact_burdens = None, None, None, None, None, None
-                    covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
+                    covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = panel_bank = resident_prep = rotated = None
+                    tail_window = []
+                    covariance_tile = None
+                    covariance_tile_end = 0
+                    pending_tail = flush_complete_tail_window = admit_gene_phase = None
                     try:
                         prototype = _thin_pipeline(axis, preparation_model, axis._axis.samples,
                                                    options, configuration, structural)
@@ -1532,18 +1582,91 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         # resident workspace inside the host-fallback handler.
                         # Host inputs retain their mandatory bounded workspace.
                         initial_peak = 0 if resident_input else host_peak
-                        with _gene_workspace_scope(repository, broker, initial_peak) as workspace:
+                        with _gene_workspace_scope(repository, broker, initial_peak) as workspace, ExitStack() as panel_scope:
+                            def flush_complete_tail_window():
+                                """Finish at most four leased models, retaining original V for sensitive tails."""
+                                if not tail_window:
+                                    return
+                                from .._native_tail_groups import finish_complete_tails, execution_metadata
+                                from .._fastskat_lobpcg_tiles import lobpcg_workspace_scope
+                                entries = tail_window[:]
+                                tail_window.clear()
+                                finalized = entry = completed = pending = None
+                                try:
+                                    if len(entries) > 4:
+                                        raise RuntimeError('complete-tail window exceeds four models')
+                                    # Every queued C and spectrum is already live and counted
+                                    # by allocator admission. Reserve NEW tail scratch only;
+                                    # never credit retained/cached bytes against this budget.
+                                    workspace.set_required(max(tail_new, 64*2**20), phase='gene_complete_tail_batch')
+                                    before = execution_metadata()
+                                    with prototype.profiler.measure('gene_complete_tail_batch', gpu=True):
+                                        finalized = finish_complete_tails([entry[0] for entry in entries],
+                                            maximum_workspace_bytes=64*2**20, maximum_rows=256)
+                                    after = execution_metadata()
+                                    report['gene_complete_tail_windows'] = report.get('gene_complete_tail_windows', 0)+1
+                                    for key in ('requested_groups', 'requested_rows', 'actual_tail_calls',
+                                                'merged_tail_calls', 'merged_groups', 'original_group_fallbacks',
+                                                'live_budget_declines', 'explicit_budget_declines'):
+                                        target = 'gene_complete_tail_'+key
+                                        report[target] = report.get(target, 0)+after[key]-before[key]
+                                    report['gene_complete_tail_native_execution'] = after
+                                    for entry, completed in zip(entries, finalized):
+                                        pending, pipeline, original_payload, original_model, position = entry
+                                        def tail_future(additional, *, phase):
+                                            workspace.set_required(tail_new+additional, phase=phase)
+                                            return True
+                                        with lobpcg_workspace_scope(callback=tail_future):
+                                            completed = _evaluate_gaussian_gene_score(pipeline, original_payload,
+                                                original_model, genotype, broker, shared_simt=shared_simt,
+                                                report=report, first_evaluation=completed,
+                                                reuse_complete_spectra=configuration.get('_continuous_spectrum_reuse', False))
+                                        result[mi][position] = _phewas_result_fields(completed)
+                                except BaseException as error:
+                                    _clear_inactive_exception_frames(error)
+                                    raise
+                                finally:
+                                    for entry in entries:
+                                        entry[0].close()
+                                        entry[1].models = []
+                                        entry[2].clear()
+                                    entries.clear()
+                                    finalized = entry = completed = pending = pipeline = original_payload = original_model = tail_future = None
+
+                            def admit_gene_phase(required, *, phase, broker_guard=False):
+                                """Retry NEW-byte admission only after releasing a queued window."""
+                                def admit():
+                                    if broker_guard:
+                                        broker._guard(required)
+                                    else:
+                                        workspace.set_required(required, phase=phase)
+                                try:
+                                    admit()
+                                except MemoryError:
+                                    if not tail_window:
+                                        raise
+                                    report['gene_complete_tail_admission_flushes'] = report.get('gene_complete_tail_admission_flushes', 0)+1
+                                    flush_complete_tail_window()
+                                    admit()
                             # Materialize only if the live device can admit original
                             # fitted ordinary covariance products plus this one G.
                             from ..binary import _BinaryPanelSource
                             if resident_input or (not isinstance(host, _BinaryPanelSource)
-                                    and m <= options.long_mask_threshold and torch.device(broker.device).type == 'cuda'):
+                                    and (m <= options.long_mask_threshold
+                                         or (configuration.get('_continuous_live_resident', False)
+                                             and has_gaussian))
+                                    and torch.device(broker.device).type == 'cuda'):
                                 # Relatedness may vary between traits in one cohort;
                                 # two genotype copies cover the original block path.
                                 try:
                                     workspace.set_required(device_peak + (0 if isinstance(host, torch.Tensor) else 4*genotype_elements),
                                                            phase='gene_genotype_upload')
-                                except MemoryError:
+                                    uploaded = torch.as_tensor(host, device=broker.device)
+                                    workspace.set_required(device_peak, phase='gene_genotype_resident')
+                                except (MemoryError, torch.cuda.OutOfMemoryError) as error:
+                                    _clear_inactive_exception_frames(error)
+                                    uploaded = None
+                                    report['gene_resident_upload_fallbacks'] = report.get('gene_resident_upload_fallbacks', 0)+1
                                     # A resident preparation must release its CUDA
                                     # owner before genuinely selecting the host path.
                                     # Admit NEW host storage before that transfer.
@@ -1557,8 +1680,8 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                             set_future(0, phase='gene_host_fallback_materialized')
                                     workspace.set_required(host_peak, phase='gene_host_fallback')
                                 else:
-                                    genotype = torch.as_tensor(host, device=broker.device)
-                                    workspace.set_required(device_peak, phase='gene_genotype_resident')
+                                    genotype = uploaded
+                                    uploaded = None
                             tile_peak = (device_peak if isinstance(genotype, torch.Tensor) and genotype.is_cuda
                                          else host_peak)
                             for begin in range(0, len(group['descriptors']), trait_batch_size):
@@ -1570,6 +1693,24 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                     for model, descriptor in zip(models, tile):
                                         _check_model(model, descriptor, metadata, verified)
                                     gaussian_indices = [i for i, model in enumerate(models) if model.family == 'gaussian']
+                                    resident_crosses = None
+                                    if (gaussian_indices and configuration.get('_continuous_resident_preparation', False)
+                                            and isinstance(genotype, torch.Tensor) and genotype.is_cuda):
+                                        if resident_prep is None:
+                                            from .._gaussian_resident_shared import shared_gaussian_resident
+                                            resident_prep = panel_scope.enter_context(shared_gaussian_resident(
+                                                models[gaussian_indices[0]], genotype, broker,
+                                                profiler=prototype.profiler, report=report))
+                                        resident_crosses = resident_prep.batched_cross([models[i] for i in gaussian_indices])
+                                    if (panel_bank is None and gaussian_indices
+                                            and configuration.get('_continuous_shared_panels', False)
+                                            and not covariance_tiles
+                                            and not (isinstance(genotype, torch.Tensor) and genotype.is_cuda)):
+                                        from .._gaussian_covariance_shared import shared_gaussian_panels
+                                        panel_bank = panel_scope.enter_context(shared_gaussian_panels(
+                                            models[gaussian_indices[0]], host, broker,
+                                            variant_tile_size=options.variant_tile_size or 512,
+                                            report=report))
                                     from .scores import execution_metadata as score_metadata
                                     before_simt = score_metadata()['fp32_simt_products']
                                     with prototype.profiler.measure('gene_shared_score', gpu=True):
@@ -1637,9 +1778,12 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                     profiler=prototype.profiler)
                                             binary_outputs = dict(zip(binary_indices, outputs))
                                             del outputs, execution, factories
+                                    covariance_tile_end = 0
+                                    covariance_tile = None
                                     for ti, (descriptor, model) in enumerate(zip(tile, models)):
                                         p = _thin_pipeline(axis, model, axis._axis.samples, options, configuration, structural)
                                         if model.family == 'binomial':
+                                            flush_complete_tail_window()
                                             from ..binary import prepare_binary_burdens, staar_binary_phewas
                                             if binary_outputs is not None:
                                                 value, selected, failed = binary_outputs[ti]
@@ -1666,31 +1810,131 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                        +32*m*m+256*2**20
                                                        if isinstance(genotype, torch.Tensor) and genotype.is_cuda
                                                        else _gene_host_covariance_new_bytes(n, m, model.x.shape[1], options))
-                                            workspace.set_required(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
+                                            if resident_prep is None or not (isinstance(genotype, torch.Tensor) and genotype.is_cuda):
+                                                admit_gene_phase(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
                                             if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
                                                 copies = 2 if model.spectrum.blocks else 1
-                                                broker._guard(4*genotype_elements*copies + 32*m*m + 256*2**20)
                                                 with p.profiler.measure('gene_covariance', gpu=True):
-                                                    covariance = _gaussian_covariance(model, genotype)
+                                                    if resident_prep is None:
+                                                        admit_gene_phase(4*genotype_elements*copies + 32*m*m + 256*2**20,
+                                                            phase='gene_covariance', broker_guard=True)
+                                                        covariance = _gaussian_covariance(model, genotype)
+                                                    else:
+                                                        with resident_prep.pin():
+                                                            rotated = resident_prep.rotated_for(model)
+                                                            # A borrowed shared rotation is already allocated.
+                                                            # Its pin prevents pressure recovery from releasing
+                                                            # it between this NEW-byte check and consumption.
+                                                            copies = 1 if rotated is not None else copies
+                                                            required = 4*genotype_elements*copies+32*m*m+256*2**20
+                                                            admit_gene_phase(max(required,4*m*m+tail_new),phase='gene_covariance')
+                                                            admit_gene_phase(required, phase='gene_covariance', broker_guard=True)
+                                                            covariance = _gaussian_covariance(model, genotype,
+                                                                rotated=rotated,
+                                                                cross=resident_crosses[gauss_columns[ti]])
+                                                            rotated = None
                                             else:
                                                 # Cached/tiled covariance is fitted-model specific;
                                                 # only G IO and phenotype-score GEMM are shared.
                                                 with p.profiler.measure('gene_covariance', gpu=True):
-                                                    if p._supports_long_tf32_products(model):
+                                                    if (covariance_tiles and len(gaussian_indices) == len(models)
+                                                            and not p._supports_long_tf32_products(model)):
+                                                        if ti >= covariance_tile_end:
+                                                            # Retire the prior wave's tails before allocating
+                                                            # another four independent outputs. No N*M*trait
+                                                            # tensor or persistent covariance cache exists.
+                                                            flush_complete_tail_window()
+                                                            covariance_tile = None
+                                                            covariance_tile_end = min(ti+4, len(models))
+                                                            from .._gaussian_covariance_tile import (
+                                                                blocked_gaussian_covariance_tile,
+                                                                gaussian_covariance_tile_workspace_bytes)
+                                                            tile_models = models[ti:covariance_tile_end]
+                                                            required = gaussian_covariance_tile_workspace_bytes(
+                                                                tile_models, host,
+                                                                variant_tile_size=options.variant_tile_size or 512)
+                                                            admitted = True
+                                                            try:
+                                                                admit_gene_phase(required, phase='gene_covariance_tile')
+                                                            except MemoryError as error:
+                                                                _clear_inactive_exception_frames(error)
+                                                                admitted = False
+                                                                report['gene_covariance_tile_admission_declines'] = report.get('gene_covariance_tile_admission_declines', 0)+1
+                                                            if admitted:
+                                                                computed = blocked_gaussian_covariance_tile(
+                                                                    tile_models, host, broker,
+                                                                    variant_tile_size=options.variant_tile_size or 512,
+                                                                    profiler=p.profiler, report=report)
+                                                                covariance_tile = list(computed) if computed is not None else None
+                                                                computed = None
+                                                            tile_models = None
+                                                        if covariance_tile is not None:
+                                                            position = ti-(covariance_tile_end-len(covariance_tile))
+                                                            covariance = covariance_tile[position]
+                                                            covariance_tile[position] = None
+                                                        else:
+                                                            admit_gene_phase(max(cov_new, 4*m*m+tail_new), phase='gene_covariance_sequential_fallback')
+                                                            covariance = _blocked_gaussian_covariance(model, host, broker,
+                                                                variant_tile_size=options.variant_tile_size or 512,
+                                                                profiler=p.profiler, report=report)
+                                                    elif p._supports_long_tf32_products(model):
                                                         redundant_score, covariance = p._long_mask_products(model, host, compute_score=False)
                                                         del redundant_score
                                                     else:
                                                         covariance = _blocked_gaussian_covariance(model, host, broker,
                                                             variant_tile_size=options.variant_tile_size or 512,
-                                                            profiler=p.profiler, report=report)
+                                                            profiler=p.profiler, report=report,
+                                                            panel_cache_factory=(panel_bank.panel_cache_factory
+                                                                if panel_bank is not None else None))
                                             if callable(memory_sample):
                                                 memory_sample('gene_covariance_ready', genotype=genotype, covariance=covariance, score=scores)
                                             # Its input covariance is now allocated.
                                             # Reserve only NEW STAAR/tail bytes here.
-                                            workspace.set_required(tail_new, phase='gene_tail')
+                                            admit_gene_phase(tail_new, phase='gene_tail')
                                             payload = {key: value for key, value in prepared.items() if not key.startswith('_')}
                                             payload.update(score=scores[:, gauss_columns[ti]], covariance=covariance,
                                                            cmac=prepared['cmac'])
+                                            defer_tail = (complete_tail_groups
+                                                and getattr(options, 'long_mask_method', 'full') == 'full'
+                                                and getattr(model, 'matmul_mode', 'fp64') == 'tf32'
+                                                and getattr(model, 'n_pheno', 1) == 1 and not model.use_spa)
+                                            if defer_tail:
+                                                report['gene_complete_tail_normal_prechecks'] = report.get('gene_complete_tail_normal_prechecks', 0)+1
+                                                if payload['score'].is_cuda:
+                                                    report['gene_complete_tail_normal_precheck_d2h_batches'] = report.get('gene_complete_tail_normal_precheck_d2h_batches', 0)+1
+                                                if _gene_normal_score_extreme(payload['score'], payload['covariance']):
+                                                    defer_tail = False
+                                                    flush_complete_tail_window()
+                                                    report['gene_complete_tail_normal_immediate_evaluations'] = report.get('gene_complete_tail_normal_immediate_evaluations', 0)+1
+                                            if defer_tail:
+                                                from .._native_tail_groups import PendingCompleteTail
+                                                try:
+                                                    # The original payload stays flag-free for
+                                                    # the mature extreme-score reevaluation.
+                                                    pending_tail = p._evaluate_prepared(dict(payload, _defer_full_tail=True), model)
+                                                except MemoryError as error:
+                                                    if not tail_window:
+                                                        raise
+                                                    _clear_inactive_exception_frames(error)
+                                                    report['gene_complete_tail_prepare_flushes'] = report.get('gene_complete_tail_prepare_flushes', 0)+1
+                                                    flush_complete_tail_window()
+                                                    admit_gene_phase(tail_new, phase='gene_tail_prepare_retry')
+                                                    pending_tail = p._evaluate_prepared(dict(payload, _defer_full_tail=True), model)
+                                                if not isinstance(pending_tail, PendingCompleteTail):
+                                                    pending_tail = None
+                                                    raise TypeError('native FULL preparation must return PendingCompleteTail')
+                                                tail_window.append((pending_tail, p, payload, model,
+                                                                    positions[descriptor['trait_index']]))
+                                                report['gene_complete_tail_deferred_models'] = report.get('gene_complete_tail_deferred_models', 0)+1
+                                                report['gene_complete_tail_max_models'] = max(report.get('gene_complete_tail_max_models', 0), len(tail_window))
+                                                report['gene_complete_tail_max_retained_bytes'] = max(
+                                                    report.get('gene_complete_tail_max_retained_bytes', 0),
+                                                    sum(entry[0].retained_bytes+entry[2]['covariance'].numel()*entry[2]['covariance'].element_size()
+                                                        for entry in tail_window))
+                                                pending_tail = p = payload = covariance = model = value = None
+                                                if len(tail_window) == 4:
+                                                    flush_complete_tail_window()
+                                                continue
                                             from .._fastskat_lobpcg_tiles import lobpcg_workspace_scope
                                             def lobpcg_future(additional, *, phase):
                                                 # V and prepared G are already resident. Preserve
@@ -1700,12 +1944,15 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                 return True
                                             with lobpcg_workspace_scope(callback=lobpcg_future):
                                                 value = _evaluate_gaussian_gene_score(p, payload, model, genotype, broker,
-                                                    shared_simt=shared_simt, report=report)
+                                                    shared_simt=shared_simt, report=report,
+                                                    reuse_complete_spectra=configuration.get('_continuous_spectrum_reuse', False))
                                             lobpcg_future = None
                                             del covariance, payload
                                         result[mi][positions[descriptor['trait_index']]] = _phewas_result_fields(value)
                                         del p, model, value
-                                    del scores, models, binary_outputs
+                                    flush_complete_tail_window()
+                                    covariance_tile = None
+                                    del scores, models, binary_outputs, resident_crosses
                         del prepared, host, genotype, burdens, exact_burdens
                     except BaseException as error:
                         # Completed leaf frames can otherwise retain a model,
@@ -1713,12 +1960,21 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                         _clear_inactive_exception_frames(error)
                         raise
                     finally:
+                        for entry in tail_window:
+                            entry[0].close()
+                            entry[1].models = []
+                            entry[2].clear()
+                        tail_window.clear()
+                        if pending_tail is not None:
+                            pending_tail.close()
+                        pending_tail = tail_window = entry = flush_complete_tail_window = admit_gene_phase = None
+                        covariance_tile = tile_models = computed = uploaded = None
                         if prototype is not None:
                             prototype.models = []
                         prepared, prototype, host, genotype, burdens, exact_burdens = None, None, None, None, None, None
                         # A retained caller exception must not extend the last
                         # model lease or keep a completed covariance alive.
-                        covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = None
+                        covariance = payload = scores = diagnostic = p = value = model = models = lobpcg_future = panel_bank = resident_prep = resident_crosses = rotated = None
                         set_future = configuration.get('_host_memory_set_future')
                         if callable(set_future):
                             set_future(0, phase='gene_mask_released')
@@ -1881,6 +2137,24 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             catalog = json.loads(Path(catalog).read_text())
         configuration['_resolved_annotation_catalog'] = catalog
         descriptors, groups = _descriptor_groups(model_repository)
+        batch_complete = configuration.get('_continuous_complete_spectrum_batch', False)
+        if type(batch_complete) is not bool:
+            raise ValueError('_continuous_complete_spectrum_batch must be a boolean')
+        if batch_complete:
+            if any(descriptor['family'] != 'gaussian' for descriptor in descriptors):
+                raise ValueError('continuous complete-spectrum batching requires Gaussian models only')
+            if options.long_mask_method != 'full':
+                raise ValueError('continuous complete-spectrum batching requires the full spectrum policy')
+            from .._complete_spectrum_scope import complete_spectrum_batch_scope
+            parameters = configuration.get('_continuous_complete_spectrum_batch_parameters', dict(
+                maximum_variants=1536, weight_batch_size=32, relation_workspace_bytes=256*2**10))
+            if not isinstance(parameters, dict) or set(parameters) != {
+                    'maximum_variants', 'weight_batch_size', 'relation_workspace_bytes'}:
+                raise ValueError('complete-spectrum execution parameters require the exact bounded policy')
+            # This scopes the actual complete eigensolve and its retries.
+            # The matrix-size preference selects a batch kernel only;
+            # larger masks retain their original complete sequential spectrum.
+            repository_policy.enter_context(complete_spectrum_batch_scope(**parameters))
         _bind_trait_tiles(groups, configuration.get('_association_trait_tiles'), trait_batch_size)
         for descriptor in descriptors:
             if descriptor['family'] == 'binomial' and not callable(getattr(model_repository, 'acquire_spa', None)):

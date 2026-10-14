@@ -23,6 +23,10 @@ _METRICS=dict(calls=0,batch_sizes=[],batch_size_counts={},eigen_api_calls=0,comp
               max_estimated_batch_workspace_bytes=0,max_weighted_tensor_bytes=0,
               full_sequential_calls=0,full_sequential_spectra=0,max_full_new_workspace_bytes=0,
               full_requested_weights=0,full_fp32_solver_calls=0,full_exact_duplicate_reused_spectra=0,
+              full_fp32_solver_matrices=0,full_batch_api_calls=0,full_batch_matrices=0,
+              full_batch_convergence_failures=0,full_batch_sequential_fallbacks=0,
+              full_selected_solver_calls=0,full_selected_solver_matrices=0,full_selected_solver_failures=0,
+              max_full_batch_new_workspace_bytes=0,full_scope_reused_spectra=0,
               full_fp32_convergence_failures=0,full_retry_attempts=0,full_retry_solver_calls=0,
               full_retry_successes=0,full_retry_failures=0,
               full_retry_workspace_rejections=0,full_retry_allocation_failures=0,
@@ -304,6 +308,178 @@ def _retry_complete_spectrum(matrix, *, workspace_limit_bytes, zero_modes):
         matrix = matrix64 = spectrum = None
 
 
+def _record_full_solve(route, count=1, *, record_backend=True):
+    original = _pinned_statistics()
+    _METRICS['eigen_api_calls'] += 1
+    _METRICS['complete_representative_spectra'] += count
+    _METRICS['full_sequential_spectra'] += count
+    if record_backend:
+        _METRICS['actual_backend_calls'][route] = _METRICS['actual_backend_calls'].get(route, 0)+1
+        _METRICS['actual_backend_matrices'][route] = _METRICS['actual_backend_matrices'].get(route, 0)+count
+    original._STATISTICS_METADATA['native_complete_spectra'] += count
+
+
+def _solve_full_weight(covariance, weight, fallback_workspace_limit_bytes):
+    weighted = spectrum = converted = None
+    try:
+        with _profile('weighted_matrix_build'):
+            weighted = (covariance*weight[:, None])*weight[None, :]
+        with _profile('eigvalsh'):
+            try:
+                _METRICS['full_fp32_solver_calls'] += 1
+                _METRICS['full_fp32_solver_matrices'] += 1
+                spectrum = torch.linalg.eigvalsh(weighted, UPLO='U')
+            except torch.linalg.LinAlgError as error:
+                if not _is_convergence_error(error):
+                    raise
+                _METRICS['full_fp32_convergence_failures'] += 1
+                if not bool(torch.isfinite(weighted).all()):
+                    _METRICS['full_nonfinite_rejections'] += 1
+                    raise _mark_full_failure(ValueError('weighted H32 is non-finite; retry rejected'),
+                                             'nonfinite_weighted_matrix_rejected') from error
+                from ._lobpcg_stream_pool import clear_exception_frames
+                clear_exception_frames(error)
+                spectrum = _retry_complete_spectrum(weighted,
+                    workspace_limit_bytes=fallback_workspace_limit_bytes,
+                    zero_modes=int((weight == 0).sum()))
+                route = 'torch.linalg.eigvalsh:fp64_convergence_retry'
+            else:
+                _pinned_statistics().record_gpu_eigen_route(weighted)
+                route = 'torch.linalg.eigvalsh'
+        if spectrum.ndim != 1 or spectrum.shape[0] != covariance.shape[0] or not bool(torch.isfinite(spectrum).all()):
+            raise _mark_full_failure(ArithmeticError('complete eigensolver returned an invalid full spectrum'),
+                                     'invalid_complete_spectrum')
+        converted = spectrum.to(dtype=torch.float64)
+        _record_batch_size(1)
+        _record_full_solve(route)
+        return converted
+    finally:
+        covariance = weight = weighted = spectrum = converted = None
+
+
+def _full_batch_capacity(covariance, remaining, maximum):
+    """Fresh whole-process admission, including gathered FP32 D rows."""
+    m = covariance.shape[0]
+    unit = full_workspace_unit_bytes(m)+4*m
+    capacity = min(remaining, maximum)
+    if covariance.is_cuda:
+        from . import tf32
+        start = time.perf_counter()
+        allocated = torch.cuda.memory_allocated(covariance.device)
+        reserved = torch.cuda.memory_reserved(covariance.device)
+        with torch.cuda.device(covariance.device):
+            free, _ = torch.cuda.mem_get_info()
+        available = tf32._product_workspace_availability(allocated=allocated,
+            reserved=reserved, free=free, limit=tf32._memory_limit_bytes,
+            reserve=tf32._memory_reserve_bytes)['available_bytes']
+        _METRICS['workspace_query_host_seconds'] += time.perf_counter()-start
+        _METRICS['live_workspace_queries'] += 1
+        capacity = max(1, min(capacity, available//unit))
+    required = (unit*capacity if capacity > 1 else full_workspace_unit_bytes(m))
+    if covariance.is_cuda:
+        from ._fit_structure_cache import guard_cuda_workspace
+        guard_cuda_workspace(required, covariance.device, context='complete STAAR weight batch workspace')
+    _METRICS['max_full_batch_new_workspace_bytes'] = max(
+        _METRICS['max_full_batch_new_workspace_bytes'], required)
+    return capacity
+
+
+def _fill_complete_batches(result, covariance, weights, policy, fallback_workspace_limit_bytes):
+    """Complete H32 batches; an uncertain convergence batch falls back in order."""
+    from ._complete_spectrum_scope import exact_weight_mapping
+    rows = weighted = spectra = converted = None
+    try:
+        relation = exact_weight_mapping(weights, policy['relation_workspace_bytes'])
+        if relation is None:
+            return False
+        representatives, mapping = relation
+        m = covariance.shape[0]
+        begin = 0
+        with torch.no_grad():
+            while begin < len(representatives):
+                capacity = _full_batch_capacity(covariance, len(representatives)-begin,
+                                                policy['weight_batch_size'])
+                indices = representatives[begin:begin+capacity]
+                if capacity == 1:
+                    result[indices[0]].copy_(_solve_full_weight(covariance, weights[:, indices[0]],
+                                                               fallback_workspace_limit_bytes))
+                    begin += 1
+                    continue
+                rows = weights[:, indices].T
+                with _profile('weighted_matrix_build'):
+                    weighted = (covariance[None, :, :]*rows[:, :, None])*rows[:, None, :]
+                failed = False
+                selected = bool(weighted.is_cuda and 33 <= m <= 128 and _SOLVER is not None)
+                backend = 'torch.linalg.eigvalsh:complete_weight_batch'
+                with _profile('eigvalsh'):
+                    try:
+                        _METRICS['full_fp32_solver_calls'] += 1
+                        _METRICS['full_fp32_solver_matrices'] += capacity
+                        _METRICS['full_batch_api_calls'] += 1
+                        _METRICS['full_batch_matrices'] += capacity
+                        if selected:
+                            _METRICS['full_selected_solver_calls'] += 1
+                            _METRICS['full_selected_solver_matrices'] += capacity
+                            # The established selector owns the same complete
+                            # FP32 H32/UPLO=U solve and its fresh workspace checks.
+                            # Only this explicit batch policy enters the route.
+                            spectra, backend = _complete_eigvalsh(weighted)
+                        else:
+                            spectra = torch.linalg.eigvalsh(weighted, UPLO='U')
+                    except torch.linalg.LinAlgError as error:
+                        _METRICS['full_selected_solver_failures'] += int(selected)
+                        if not _is_convergence_error(error):
+                            raise
+                        _METRICS['full_fp32_convergence_failures'] += 1
+                        _METRICS['full_batch_convergence_failures'] += 1
+                        if not bool(torch.isfinite(weighted).all()):
+                            _METRICS['full_nonfinite_rejections'] += 1
+                            raise _mark_full_failure(ValueError('weighted H32 is non-finite; retry rejected'),
+                                                     'nonfinite_weighted_matrix_rejected') from error
+                        from ._lobpcg_stream_pool import clear_exception_frames
+                        clear_exception_frames(error)
+                        failed = True
+                    except BaseException as error:
+                        if selected:
+                            _METRICS['full_selected_solver_failures'] += 1
+                            _mark_full_failure(error, 'selected_complete_fp32_solve_failed')
+                        # Budget/API/info/nonfinite failures are not proof of a
+                        # pure convergence failure and cannot select a retry.
+                        raise
+                if failed:
+                    rows = weighted = spectra = None
+                    _METRICS['full_batch_sequential_fallbacks'] += capacity
+                    for index in indices:
+                        if covariance.is_cuda:
+                            from ._fit_structure_cache import guard_cuda_workspace
+                            guard_cuda_workspace(full_workspace_unit_bytes(m), covariance.device,
+                                                 context='complete STAAR weight workspace')
+                        result[index].copy_(_solve_full_weight(covariance, weights[:, index],
+                                                               fallback_workspace_limit_bytes))
+                else:
+                    if spectra.shape != (capacity, m) or not bool(torch.isfinite(spectra).all()):
+                        raise _mark_full_failure(ArithmeticError('complete eigensolver returned an invalid full spectrum'),
+                                                 'invalid_complete_spectrum')
+                    if backend.startswith('torch.linalg.eigvalsh'):
+                        _pinned_statistics().record_gpu_eigen_route(weighted)
+                    converted = spectra.to(dtype=torch.float64)
+                    for position, index in enumerate(indices):
+                        result[index].copy_(converted[position])
+                    _record_batch_size(capacity)
+                    _record_full_solve(backend, capacity, record_backend=not selected)
+                rows = weighted = spectra = converted = None
+                begin += capacity
+            for index, representative in enumerate(mapping):
+                if index != representative:
+                    result[index].copy_(result[representative])
+                    _METRICS['full_exact_duplicate_reused_spectra'] += 1
+                    _METRICS['full_sequential_spectra'] += 1
+                    _pinned_statistics()._STATISTICS_METADATA['native_spectra_reused'] += 1
+        return True
+    finally:
+        result = covariance = weights = rows = weighted = spectra = converted = None
+
+
 def sequential_complete_spectra(covariance, weights, *, fallback_workspace_limit_bytes=None):
     """Independent complete H32 spectra, admitted against the whole GPU.
 
@@ -335,7 +511,18 @@ def sequential_complete_spectra(covariance, weights, *, fallback_workspace_limit
             raise RuntimeError('weighted spectra belong to another active pipeline thread')
         _SOLVER_LOCK.release()
         from ._fit_structure_cache import guard_cuda_workspace
+        from ._complete_spectrum_scope import current_reuse_scope, batch_policy
         m, j = weights.shape
+        scope = current_reuse_scope()
+        if scope is not None:
+            cached = scope.lookup(covariance, weights)
+            if cached is not None:
+                _METRICS['full_sequential_calls'] += 1
+                _METRICS['full_requested_weights'] += j
+                _METRICS['full_sequential_spectra'] += j
+                _METRICS['full_scope_reused_spectra'] += j
+                _pinned_statistics()._STATISTICS_METADATA['native_spectra_reused'] += j
+                return cached
         unit = full_workspace_unit_bytes(m)
         output_bytes = 8*j*m
         if covariance.is_cuda:
@@ -351,6 +538,12 @@ def sequential_complete_spectra(covariance, weights, *, fallback_workspace_limit
         original = _pinned_statistics()
         with torch.no_grad():
             result = torch.empty((j, m), dtype=torch.float64, device=covariance.device)
+            policy = batch_policy(m)
+            if policy is not None and _fill_complete_batches(result, covariance, weights,
+                                                             policy, fallback_workspace_limit_bytes):
+                if scope is not None:
+                    scope.capture(covariance, weights, result)
+                return result
             # Reinterpretation owns no additional tensor storage. Comparisons
             # return scalar booleans, not an M-by-J-by-J broadcast allocation.
             # Comparing bits also distinguishes signed zeros and 1-ULP changes.
@@ -367,45 +560,12 @@ def sequential_complete_spectra(covariance, weights, *, fallback_workspace_limit
                 if covariance.is_cuda:
                     guard_cuda_workspace(unit, covariance.device, context='complete STAAR weight workspace')
                 weight = weights[:, index]
-                with _profile('weighted_matrix_build'):
-                    weighted = (covariance*weight[:, None])*weight[None, :]
-                with _profile('eigvalsh'):
-                    try:
-                        _METRICS['full_fp32_solver_calls'] += 1
-                        spectrum = torch.linalg.eigvalsh(weighted, UPLO='U')
-                    except torch.linalg.LinAlgError as error:
-                        if not _is_convergence_error(error):
-                            raise
-                        _METRICS['full_fp32_convergence_failures'] += 1
-                        # Finite source tensors can still overflow while
-                        # weighting. Such a matrix must never reach FP64 retry.
-                        if not bool(torch.isfinite(weighted).all()):
-                            _METRICS['full_nonfinite_rejections'] += 1
-                            raise _mark_full_failure(ValueError('weighted H32 is non-finite; retry rejected'),
-                                                     'nonfinite_weighted_matrix_rejected') from error
-                        from ._lobpcg_stream_pool import clear_exception_frames
-                        clear_exception_frames(error)
-                        spectrum = _retry_complete_spectrum(weighted,
-                            workspace_limit_bytes=fallback_workspace_limit_bytes,
-                            zero_modes=int((weight == 0).sum()))
-                        route = 'torch.linalg.eigvalsh:fp64_convergence_retry'
-                    else:
-                        original.record_gpu_eigen_route(weighted)
-                        route = 'torch.linalg.eigvalsh'
-                if spectrum.ndim != 1 or spectrum.shape[0] != m or not bool(torch.isfinite(spectrum).all()):
-                    raise _mark_full_failure(ArithmeticError('complete eigensolver returned an invalid full spectrum'),
-                                             'invalid_complete_spectrum')
-                converted = spectrum.to(dtype=torch.float64)
+                converted = _solve_full_weight(covariance, weight, fallback_workspace_limit_bytes)
                 result[index].copy_(converted)
-                _record_batch_size(1)
-                _METRICS['eigen_api_calls'] += 1
-                _METRICS['complete_representative_spectra'] += 1
-                _METRICS['full_sequential_spectra'] += 1
-                _METRICS['actual_backend_calls'][route] = _METRICS['actual_backend_calls'].get(route, 0)+1
-                _METRICS['actual_backend_matrices'][route] = _METRICS['actual_backend_matrices'].get(route, 0)+1
-                original._STATISTICS_METADATA['native_complete_spectra'] += 1
                 representatives.append(index)
                 weight = weighted = spectrum = converted = None
+        if scope is not None:
+            scope.capture(covariance, weights, result)
         return result
     except BaseException as error:
         # A retained Torch/context traceback must not pin complete H tensors.
@@ -414,7 +574,7 @@ def sequential_complete_spectra(covariance, weights, *, fallback_workspace_limit
         raise
     finally:
         representatives.clear()
-        covariance = weights = result = weight = weighted = spectrum = converted = weight_bits = None
+        covariance = weights = result = weight = weighted = spectrum = converted = weight_bits = cached = scope = None
 
 
 def native_weighted_spectra(covariance, weights):
@@ -481,14 +641,17 @@ def native_weighted_spectra(covariance, weights):
 
 def execution_metadata(*,reset=False):
     global _LAST_SOLVER_CONTEXT
+    from ._complete_spectrum_scope import execution_metadata as scope_metadata
     report=dict(copy.deepcopy(_METRICS),
         batch_sizes_scope=f'last {_BATCH_SAMPLE_LIMIT} weighted-matrix batches; exact lifetime counts in batch_size_counts',
         batch_limit_bytes=WEIGHTED_BATCH_LIMIT_BYTES,
         batch_limit_scope='legacy proportional weighted batching preference; full sequential uses live/process GPU cap',
-        full_sequential_policy='complete H32/eigvalsh per bit-distinct D column; call-local bit-identical reuse; bounded convergence-only FP64 retry; no scaling or M threshold',
+        full_sequential_policy='complete H32/eigvalsh per bit-distinct D; explicit bounded weight batch and immutable covariance scope candidates; ordinary default sequential; bounded convergence-only FP64 retry; no scaling or mask skip',
         full_duplicate_reuse_scope='same covariance and call; FP32 weight bits exactly equal; no proportional scaling, fingerprints or persistent spectrum cache',
         full_spectrum_coverage_scope='full_requested_weights counts all requested D columns; full_sequential_spectra counts solved or copied complete rows',
         full_solver_call_scope='full_fp32_solver_calls includes failed FP32 API attempts; full_retry_solver_calls counts actual FP64 API attempts',
+        full_solver_matrix_scope='full_fp32_solver_matrices counts actual complete H32 inputs, including failed batch inputs; requested/spectrum rows include exact copies',
+        full_selected_solver_scope='explicit FULL weight batch only, CUDA FP32 M33..128 with owned selector; above128/CPU/no selector retain Torch; backend counters count successful actual API routes once',
         full_retry_default_limit='active process allocation limit; no independent matrix-size ceiling',
         full_retry_reports_scope=f'last {_BATCH_SAMPLE_LIMIT} failed FP32 convergence solves; exact lifetime counters retained',
         full_retry_precision_scope='same represented H32 upper triangle converted to FP64 only after convergence failure; ordinary products/solves stay FP32',
@@ -502,6 +665,7 @@ def execution_metadata(*,reset=False):
         workspace_policy='three matrix buffers + full spectrum; fresh live/process cap before each batch',
         workspace_limitation='estimate is not CUDA reservation or measured solver scratch bound; OOM propagates',
         GPU_batch_equivalence='external original-software real-data run report; not implied by API success')
+    report['complete_spectrum_optimization'] = scope_metadata(reset=reset)
     if reset:
         for key,value in _METRICS.items():_METRICS[key]=[] if isinstance(value,list) else {} if isinstance(value,dict) else 0. if isinstance(value,float) else 0
         _LAST_SOLVER_CONTEXT=None

@@ -369,3 +369,77 @@ def test_consumer_observer_admission_failure_propagates_before_false_ack(tmp_pat
     with pytest.raises(OSError,match='descriptor admission'):w.finish()
     w._thread.join(5)
     assert not w._backend._owners and not (tmp_path/'worker_0.complete.private.json').exists()
+
+@pytest.mark.parametrize('bound',[1,2,48])
+@pytest.mark.parametrize('kind',['coding','individual'])
+def test_merged_parallel_batch_preserves_positional_bytes_and_single_transaction(tmp_path,bound,kind):
+    """Cross the upstream optional fsync path with actual multi-tile batches."""
+    values=[]
+    for job in range(4):
+        item=dict(kind=kind,chromosome='21',job_index=job,
+            trait_results=[(i,[row(.1*job,flag=False,label='comma,quote"\nα'),row(np.float32(.2),flag=True)]) for i in range(6)])
+        if kind=='individual':item.update(ordinal_before=job*2,ordinal_after=(job+1)*2)
+        values.append(item)
+    sync=PerTraitCheckpointCSVWriter(tmp_path/'sync',binding=BINDING,max_open_streams=bound)
+    expected=[sync.write_tile(**item) for item in values];a=sync.finish()
+    batch=PerTraitCheckpointCSVWriter(tmp_path/'batch',binding=BINDING,max_open_streams=bound,parallel_fsync=True)
+    actual=batch.write_tiles(values)
+    assert actual==expected
+    result=batch.finish();profile=result['writer_io_profile']
+    assert csv_bytes(tmp_path/'sync',a)==csv_bytes(tmp_path/'batch',result)
+    assert a['receipts']==result['receipts']
+    # Two different ordered schemas per trait produce twelve actual files.
+    assert result['files']==12
+    assert profile['fsync_calls']==12 and result['durability_profile']['data_fsync_calls']==12
+    assert profile['tile_commit_calls']==profile['tile_sqlite_commit_calls']==1
+    assert profile['schema_sqlite_commit_calls']==0 and profile['gzip_members']==48
+    assert profile['maximum_pending_fsyncs']<=4
+    assert not batch._pending_fsyncs and batch._fsync_executor is None
+
+
+def test_merged_async_native_positional_serialization_and_pool_remain_consumer_owned(tmp_path):
+    class AlteredGet(dict):
+        def get(self,key,default=None):return 'not_plain_dict_semantics'
+    raw=[AlteredGet(row(.2,spa_selected=False,spa_failed=False,label='quote"\nα')),
+         row(np.float32(1e-20),spa_selected=True,spa_failed=False,label=None)]
+    direct=PerTraitCheckpointCSVWriter(tmp_path/'direct',binding=BINDING,parallel_fsync=True)
+    expected=[direct.write_tile('noncoding','21',[(0,raw),(1,raw)],job_index=i) for i in range(3)]
+    a=direct.finish();producer=threading.get_ident();calls=[]
+    class Observed(PerTraitCheckpointCSVWriter):
+        def _commit_tiles(self,*args,**kwargs):
+            calls.append(threading.get_ident())
+            assert threading.get_ident()!=producer
+            assert not self._pending_fsyncs and not self._dirty_streams
+            return super()._commit_tiles(*args,**kwargs)
+    async_writer=AsyncPerTraitCheckpointCSVWriter(tmp_path/'async',binding=BINDING,parallel_fsync=True,
+        _writer_factory=Observed,batch_tiles=3,flush_interval_seconds=60)
+    tickets=[async_writer.write_tile('noncoding','21',[(0,raw),(1,raw)],job_index=i) for i in range(3)]
+    b=async_writer.finish()
+    assert [t.result() for t in tickets]==expected
+    assert csv_bytes(tmp_path/'direct',a)==csv_bytes(tmp_path/'async',b)
+    assert a['receipts']==b['receipts']
+    assert all(t['binary_spa_selected']==2 and t['binary_spa_failed']==0 for t in expected)
+    assert len(calls)==1 and b['writer_io_profile']['parallel_fsync'] is True
+    assert b['durability_profile']['tile_commit_transactions']==1
+
+
+def test_merged_parallel_batch_failure_rolls_back_all_tiles_after_futures_drain(tmp_path,monkeypatch):
+    writer=PerTraitCheckpointCSVWriter(tmp_path,binding=BINDING,parallel_fsync=True)
+    original=writer._fsync_call;main=threading.get_ident();workers=[];failed=False
+    def failure(fd):
+        nonlocal failed
+        assert threading.get_ident()!=main
+        workers.append(threading.get_ident())
+        if not failed:
+            failed=True;return 0.,OSError('injected merged parallel batch fsync failure')
+        return original(fd)
+    monkeypatch.setattr(writer,'_fsync_call',failure)
+    with pytest.raises(OSError,match='merged parallel batch'):
+        writer.write_tiles([tile(0),tile(1),tile(2)])
+    assert workers and not writer._pending_fsyncs and writer._fsync_executor is None
+    assert writer.db.execute('SELECT COUNT(*) FROM blocks').fetchone()[0]==0
+    assert writer.db.execute('SELECT COUNT(*) FROM files').fetchone()[0]==0
+    assert all(path.stat().st_size==0 for path in tmp_path.rglob('*.partial'))
+    monkeypatch.setattr(writer,'_fsync_call',original)
+    writer.write_tiles([tile(0),tile(1),tile(2)])
+    assert writer.finish()['rows']['coding']==6
