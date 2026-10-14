@@ -1,0 +1,3880 @@
+{
+  "benchmark": {
+    "baseline_measurement": "verified_prior_run_reused",
+    "baseline_time_is_new_measurement": false,
+    "by_kind": {
+      "coding": {
+        "actual_output_num_variant_max": 2690,
+        "actual_output_num_variant_min": 8,
+        "baseline_seconds": 180.25267787836492,
+        "candidate_seconds": 154.4544639987871,
+        "csv_files": 128,
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 2368,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0,
+          "nan_pairs": 0,
+          "p_pairs": 2368,
+          "significant_errors": 0,
+          "significant_finite_pairs": 70,
+          "significant_max_delta_log10p": 0,
+          "zero_p_pairs": 0
+        },
+        "repeats": 4,
+        "rows": 448,
+        "speedup": 1.167027958996254
+      },
+      "individual": {
+        "actual_output_num_variant_max": null,
+        "actual_output_num_variant_min": null,
+        "baseline_seconds": 23.56685058027506,
+        "candidate_seconds": 20.270375638268888,
+        "csv_files": 32,
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 1440,
+          "finite_p_pairs": 960,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 1440,
+          "max_delta_log10p": 0,
+          "nan_pairs": 0,
+          "p_pairs": 960,
+          "significant_errors": 0,
+          "significant_finite_pairs": 150,
+          "significant_max_delta_log10p": 0,
+          "zero_p_pairs": 0
+        },
+        "repeats": 2,
+        "rows": 480,
+        "speedup": 1.1626252517877707
+      },
+      "ncrna": {
+        "actual_output_num_variant_max": 9950,
+        "actual_output_num_variant_min": 9950,
+        "baseline_seconds": 151.10939684603363,
+        "candidate_seconds": 27.591378152370453,
+        "csv_files": 32,
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 160,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0,
+          "nan_pairs": 0,
+          "p_pairs": 160,
+          "significant_errors": 0,
+          "significant_finite_pairs": 0,
+          "significant_max_delta_log10p": 0,
+          "zero_p_pairs": 0
+        },
+        "repeats": 2,
+        "rows": 32,
+        "speedup": 5.476688986376399
+      },
+      "noncoding": {
+        "actual_output_num_variant_max": 15351,
+        "actual_output_num_variant_min": 27,
+        "baseline_seconds": 1067.2817049929872,
+        "candidate_seconds": 340.47917541954666,
+        "csv_files": 160,
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 5280,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0,
+          "nan_pairs": 0,
+          "p_pairs": 5280,
+          "significant_errors": 0,
+          "significant_finite_pairs": 180,
+          "significant_max_delta_log10p": 0,
+          "zero_p_pairs": 0
+        },
+        "repeats": 10,
+        "rows": 1056,
+        "speedup": 3.1346460578032618
+      }
+    },
+    "driver_speedup": 2.6157839220088444,
+    "historical_baseline_evidence": {
+      "authenticated_artifact_count": 947,
+      "baseline_elapsed_not_remeasured": true,
+      "baseline_manifest_sha256": "9cd09562d86712cae694da737167e0c679a11f6c00961082659e7d8317b5599c",
+      "baseline_reused": true,
+      "baseline_source_closure_files": 91,
+      "csv_files": 352,
+      "csv_rows": 2016,
+      "model_array_contents_rehashed": false,
+      "model_metadata_records": 16,
+      "reference_sha256": "3083310f58c51b2be39f1d60debb0809f9554fcd2b6e272dc61e971e166a5c2d",
+      "validated_job_repeats": 18
+    },
+    "jobs": [
+      {
+        "actual_num_variant_values": [
+          8,
+          10,
+          22,
+          30,
+          32,
+          98,
+          158
+        ],
+        "anonymous_job_index": 1,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 67.64131507277489,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.009023006074130535,
+          "formal_job_seconds": [
+            30.459975622594357
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 2.294281490325928,
+            "binary_scalar": 0.06570028787851334,
+            "binary_tile": 0.09447977590560916,
+            "gene_prepare_inclusive": 10.864452093124392,
+            "shared_burdens": 0.15474941158294675
+          },
+          "output_write_seconds": 0.16627678461372852,
+          "peak_gpu_allocated_bytes": 1143947776,
+          "peak_gpu_reserved_bytes": 1491075072,
+          "preparation_inclusive_host_seconds": 10.8646330377087,
+          "runtime_and_writer_seconds": 67.75268102996051,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.22525122833251954,
+              "host_wall_seconds": 0.22499512881040573
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.2969134483337403,
+              "host_wall_seconds": 2.296654543839395
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.10176134395599365,
+              "host_wall_seconds": 0.10146837402135134
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02982364773750305,
+              "host_wall_seconds": 0.02957960683852434
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.006002143979072571,
+              "host_wall_seconds": 0.005874510854482651
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.1277072635889054,
+              "host_wall_seconds": 0.12442884314805269
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.1575723533630371,
+              "host_wall_seconds": 0.1572465505450964
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.08307952189445496,
+              "host_wall_seconds": 0.08283494599163532
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 9.830109775066376e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 10.87959426498413,
+              "host_wall_seconds": 10.879279074259102
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013664000108838082,
+              "host_wall_seconds": 8.47596675157547e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 5442766848,
+          "writer_initialization_seconds": 0.11136595718562603
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 53.78670157492161,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00016892887651920319,
+            "consumer_batch_seconds": 0.0705548245459795,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 168130,
+            "snapshot_seconds": 0.0019059516489505768,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.008240239694714546,
+          "formal_job_seconds": [
+            22.12237106729299
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 1.5226424446105955,
+            "binary_scalar": 0.06422809582948685,
+            "binary_tile": 0.09253408008813858,
+            "gene_prepare_inclusive": 9.263542991638184,
+            "shared_burdens": 0.12926934337615967
+          },
+          "output_write_seconds": 0.07049328275024891,
+          "peak_gpu_allocated_bytes": 1232028160,
+          "peak_gpu_reserved_bytes": 1533018112,
+          "preparation_inclusive_host_seconds": 9.263730959035456,
+          "runtime_and_writer_seconds": 53.92879141587764,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.2347364845275879,
+              "host_wall_seconds": 0.23449695017188787
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.525350051879883,
+              "host_wall_seconds": 1.5251006614416838
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.05829228830337524,
+              "host_wall_seconds": 0.058015803806483746
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0293755841255188,
+              "host_wall_seconds": 0.029142431914806366
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.0045090880095958715,
+              "host_wall_seconds": 0.004383374005556107
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.1286220161914826,
+              "host_wall_seconds": 0.1254861894994974
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.1320656614303589,
+              "host_wall_seconds": 0.13176471553742886
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0546129902601242,
+              "host_wall_seconds": 0.05437781382352114
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0020006494596600533
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 9.27199712371826,
+              "host_wall_seconds": 9.271716989576817
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 9.867362678050995e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.000130688002333045,
+              "host_wall_seconds": 7.781200110912323e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.07067061867564917
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0796486921608448
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 5301927936,
+          "writer_initialization_seconds": 0.14208984095603228
+        },
+        "csv_files": 32,
+        "kind": "coding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 592,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 592,
+          "significant_errors": 0,
+          "significant_finite_pairs": 25,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 1.256335980301848
+      },
+      {
+        "actual_num_variant_values": [
+          8,
+          10,
+          22,
+          30,
+          32,
+          98,
+          158
+        ],
+        "anonymous_job_index": 1,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 36.49078362155706,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.008599629625678062,
+          "formal_job_seconds": [
+            3.739499853923917
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.5048359069824219,
+            "binary_scalar": 0.0650742082595825,
+            "binary_tile": 0.0952575038075447,
+            "gene_prepare_inclusive": 0.4829825706481934,
+            "shared_burdens": 0.07711062335968016
+          },
+          "output_write_seconds": 0.3812106307595968,
+          "peak_gpu_allocated_bytes": 1160074240,
+          "peak_gpu_reserved_bytes": 1491075072,
+          "preparation_inclusive_host_seconds": 0.483157423324883,
+          "runtime_and_writer_seconds": 36.593284610658884,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.14412850761413573,
+              "host_wall_seconds": 0.14392719231545925
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.5074741783142089,
+              "host_wall_seconds": 0.5072257025167346
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0440412483215332,
+              "host_wall_seconds": 0.04369399882853031
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.025907744169235233,
+              "host_wall_seconds": 0.025662179104983807
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.006936896115541457,
+              "host_wall_seconds": 0.006809369660913944
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.12491580808162682,
+              "host_wall_seconds": 0.12170521914958954
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.08008512020111083,
+              "host_wall_seconds": 0.07976316753774881
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.04867968028783798,
+              "host_wall_seconds": 0.04843317437916994
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 9.484589099884033e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.48856690597534175,
+              "host_wall_seconds": 0.4882634961977601
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013209600187838078,
+              "host_wall_seconds": 7.81472772359848e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 5585089536,
+          "writer_initialization_seconds": 0.10250098910182714
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 32.790404384955764,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.0001663537696003914,
+            "consumer_batch_seconds": 0.07346301712095737,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 168130,
+            "snapshot_seconds": 0.0018690889701247215,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.008739998564124107,
+          "formal_job_seconds": [
+            3.1182875214144588
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.4521350440979004,
+            "binary_scalar": 0.06529276782274246,
+            "binary_tile": 0.09521388792991638,
+            "gene_prepare_inclusive": 0.9735362644195557,
+            "shared_burdens": 0.06579094409942626
+          },
+          "output_write_seconds": 0.0734013244509697,
+          "peak_gpu_allocated_bytes": 1423920640,
+          "peak_gpu_reserved_bytes": 1803550720,
+          "preparation_inclusive_host_seconds": 0.9737205244600773,
+          "runtime_and_writer_seconds": 32.85436514299363,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.14232041549682617,
+              "host_wall_seconds": 0.1421165792271495
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.4547036781311036,
+              "host_wall_seconds": 0.4544505123049021
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03316118478775024,
+              "host_wall_seconds": 0.032867331989109516
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026221663951873777,
+              "host_wall_seconds": 0.02598120179027319
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.003220895975828171,
+              "host_wall_seconds": 0.003092009574174881
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.12460102367401124,
+              "host_wall_seconds": 0.12135262135416269
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0684344310760498,
+              "host_wall_seconds": 0.06812235340476036
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.019690015971660615,
+              "host_wall_seconds": 0.019447756931185722
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019709132611751556
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.9789713172912597,
+              "host_wall_seconds": 0.978677237406373
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 1.0048039257526398e-05
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012451199814677238,
+              "host_wall_seconds": 7.248483598232269e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.07356025651097298
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.07339655049145222
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4494089216,
+          "writer_initialization_seconds": 0.06396075803786516
+        },
+        "csv_files": 32,
+        "kind": "coding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 592,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 592,
+          "significant_errors": 0,
+          "significant_finite_pairs": 25,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 1.1138028219809506
+      },
+      {
+        "actual_num_variant_values": [
+          27,
+          46,
+          60,
+          98,
+          426
+        ],
+        "anonymous_job_index": 2,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 49.182846289128065,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004271389916539192,
+          "formal_job_seconds": [
+            16.359528278931975
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 2.2090741462707517,
+            "binary_scalar": 0.04655753588676453,
+            "binary_tile": 0.06551065582036973,
+            "gene_prepare_inclusive": 0.7723931102752686,
+            "shared_burdens": 0.05289516830444336
+          },
+          "output_write_seconds": 0.040458046831190586,
+          "peak_gpu_allocated_bytes": 2656122880,
+          "peak_gpu_reserved_bytes": 3246391296,
+          "preparation_inclusive_host_seconds": 0.7725235465914011,
+          "runtime_and_writer_seconds": 49.2992151491344,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.07079295921325683,
+              "host_wall_seconds": 0.07065934129059315
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 2.210538734436035,
+              "host_wall_seconds": 2.210366189479828
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.025956063747406007,
+              "host_wall_seconds": 0.025754474103450775
+            },
+            "gene_binary_packed_output": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.018260768175125123,
+              "host_wall_seconds": 0.018096460960805416
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.0033044480979442597,
+              "host_wall_seconds": 0.0032301265746355057
+            },
+            "gene_binary_selective_spa": {
+              "calls": 75,
+              "cuda_stream_seconds": 0.08960671997070313,
+              "host_wall_seconds": 0.08739978540688753
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.054797503471374506,
+              "host_wall_seconds": 0.05457303300499916
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.019591392457485198,
+              "host_wall_seconds": 0.019414720125496387
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.89109617471695e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.7787089233398437,
+              "host_wall_seconds": 0.7784929666668177
+            },
+            "gene_shared_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 9.583999775350093e-05,
+              "host_wall_seconds": 5.689449608325958e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4586195968,
+          "writer_initialization_seconds": 0.1163688600063324
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 40.61014509294182,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00013154279440641403,
+            "consumer_batch_seconds": 0.049570669420063496,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 119816,
+            "snapshot_seconds": 0.0013798829168081284,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.00434646662324667,
+          "formal_job_seconds": [
+            10.998900525271893
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 1.4763885688781737,
+            "binary_scalar": 0.044762207925319666,
+            "binary_tile": 0.0633940480351448,
+            "gene_prepare_inclusive": 0.3969203929901123,
+            "shared_burdens": 0.05449859237670898
+          },
+          "output_write_seconds": 0.04952854849398136,
+          "peak_gpu_allocated_bytes": 2832486912,
+          "peak_gpu_reserved_bytes": 3558866944,
+          "preparation_inclusive_host_seconds": 0.39704801235347986,
+          "runtime_and_writer_seconds": 40.720698778517544,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.07078214454650879,
+              "host_wall_seconds": 0.07064382638782263
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 1.4778953399658203,
+              "host_wall_seconds": 1.4776630587875843
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.04160003232955932,
+              "host_wall_seconds": 0.04140173923224211
+            },
+            "gene_binary_packed_output": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.018334751844406128,
+              "host_wall_seconds": 0.018171695061028004
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.011365535974502563,
+              "host_wall_seconds": 0.011282352730631828
+            },
+            "gene_binary_selective_spa": {
+              "calls": 75,
+              "cuda_stream_seconds": 0.08610585594177245,
+              "host_wall_seconds": 0.08393710851669312
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.05646838474273681,
+              "host_wall_seconds": 0.056249224580824375
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.021379263579845428,
+              "host_wall_seconds": 0.02120328973978758
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0014642896130681038
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.40468633270263665,
+              "host_wall_seconds": 0.40448177698999643
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.101334631443024e-06
+            },
+            "gene_shared_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 9.439999982714653e-05,
+              "host_wall_seconds": 5.348585546016693e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04965012986212969
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.07945557683706284
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4639562752,
+          "writer_initialization_seconds": 0.11055368557572365
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 400,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 400,
+          "significant_errors": 0,
+          "significant_finite_pairs": 23,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 80,
+        "runtime_speedup": 1.2106672190788264
+      },
+      {
+        "actual_num_variant_values": [
+          27,
+          46,
+          60,
+          98,
+          426
+        ],
+        "anonymous_job_index": 2,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 34.00516847893596,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004587475210428238,
+          "formal_job_seconds": [
+            1.9157073944807053
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.33958595275878906,
+            "binary_scalar": 0.04520057600736619,
+            "binary_tile": 0.06496620815992353,
+            "gene_prepare_inclusive": 0.42707520675659183,
+            "shared_burdens": 0.05477545547485352
+          },
+          "output_write_seconds": 0.048114338889718056,
+          "peak_gpu_allocated_bytes": 2672166912,
+          "peak_gpu_reserved_bytes": 3246391296,
+          "preparation_inclusive_host_seconds": 0.42720378190279007,
+          "runtime_and_writer_seconds": 34.092873436398804,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.07858931350708008,
+              "host_wall_seconds": 0.07845424395054579
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.34170198059082035,
+              "host_wall_seconds": 0.3415284752845764
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.0261528639793396,
+              "host_wall_seconds": 0.02595189493149519
+            },
+            "gene_binary_packed_output": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.01856083202362061,
+              "host_wall_seconds": 0.018394858576357365
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.008670080065727235,
+              "host_wall_seconds": 0.008594915270805359
+            },
+            "gene_binary_selective_spa": {
+              "calls": 75,
+              "cuda_stream_seconds": 0.08817673647403713,
+              "host_wall_seconds": 0.08597639575600624
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.056719423294067386,
+              "host_wall_seconds": 0.05650192219763994
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.01920902419090271,
+              "host_wall_seconds": 0.018223055638372898
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.238239049911499e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.4354739265441894,
+              "host_wall_seconds": 0.43526629731059074
+            },
+            "gene_shared_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 9.737600199878215e-05,
+              "host_wall_seconds": 5.579553544521332e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4566897664,
+          "writer_initialization_seconds": 0.08770495746284723
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 30.668570581823587,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.0001304401084780693,
+            "consumer_batch_seconds": 0.039819393306970596,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 119816,
+            "snapshot_seconds": 0.0013724295422434807,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.00470640417188406,
+          "formal_job_seconds": [
+            1.3879067851230502
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.3077719383239746,
+            "binary_scalar": 0.045333951890468606,
+            "binary_tile": 0.06514041620492934,
+            "gene_prepare_inclusive": 0.2914256286621094,
+            "shared_burdens": 0.05240112018585205
+          },
+          "output_write_seconds": 0.03977791592478752,
+          "peak_gpu_allocated_bytes": 3025310208,
+          "peak_gpu_reserved_bytes": 3558866944,
+          "preparation_inclusive_host_seconds": 0.29155345540493727,
+          "runtime_and_writer_seconds": 30.71499682497233,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.0709005126953125,
+              "host_wall_seconds": 0.07076024916023016
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.3098729667663574,
+              "host_wall_seconds": 0.3096937919035554
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.02420591974258423,
+              "host_wall_seconds": 0.024002219550311565
+            },
+            "gene_binary_packed_output": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.018695135831832885,
+              "host_wall_seconds": 0.01851788628846407
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.0018287680149078368,
+              "host_wall_seconds": 0.0017536915838718414
+            },
+            "gene_binary_selective_spa": {
+              "calls": 75,
+              "cuda_stream_seconds": 0.08856620836257934,
+              "host_wall_seconds": 0.08630874939262867
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.05434463882446289,
+              "host_wall_seconds": 0.05411739367991686
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.0145793280005455,
+              "host_wall_seconds": 0.013012576848268509
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0014554653316736221
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 5,
+              "cuda_stream_seconds": 0.2963101787567139,
+              "host_wall_seconds": 0.2961023151874542
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.0866739153862e-06
+            },
+            "gene_shared_score": {
+              "calls": 5,
+              "cuda_stream_seconds": 9.529599919915198e-05,
+              "host_wall_seconds": 5.626119673252106e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.03990376368165016
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.12171361222863197
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4439408640,
+          "writer_initialization_seconds": 0.046426243148744106
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 400,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 400,
+          "significant_errors": 0,
+          "significant_finite_pairs": 23,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 80,
+        "runtime_speedup": 1.1099748318606415
+      },
+      {
+        "actual_num_variant_values": [
+          204,
+          225,
+          229,
+          624,
+          735,
+          4297
+        ],
+        "anonymous_job_index": 3,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 60.22875052411109,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.005060386843979359,
+          "formal_job_seconds": [
+            49.10765501484275
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.7202003364562989,
+            "binary_scalar": 0.0684950719475746,
+            "binary_tile": 0.09861408001184466,
+            "gene_prepare_inclusive": 12.094818084716795,
+            "shared_burdens": 26.010098280906675
+          },
+          "output_write_seconds": 0.04839747678488493,
+          "peak_gpu_allocated_bytes": 3456149504,
+          "peak_gpu_reserved_bytes": 4659871744,
+          "preparation_inclusive_host_seconds": 12.09506741259247,
+          "runtime_and_writer_seconds": 60.32611051481217,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.024223936080932616,
+              "host_wall_seconds": 0.024172671139240265
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.7227603225708009,
+              "host_wall_seconds": 0.7225191975012422
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.04013791942596436,
+              "host_wall_seconds": 0.0398447597399354
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026335232019424438,
+              "host_wall_seconds": 0.026078347116708755
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0008694080114364624,
+              "host_wall_seconds": 0.0008389223366975784
+            },
+            "gene_binary_selective_spa": {
+              "calls": 111,
+              "cuda_stream_seconds": 0.13068591928482054,
+              "host_wall_seconds": 0.12736370973289013
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 26.01287770652771,
+              "host_wall_seconds": 26.01255699712783
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00966371202468872,
+              "host_wall_seconds": 0.009073971770703793
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.8461522459983826e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 12.103798858642579,
+              "host_wall_seconds": 12.103459897451103
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013500799983739853,
+              "host_wall_seconds": 7.83335417509079e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2885553152,
+          "writer_initialization_seconds": 0.09735999070107937
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 24.238072701729834,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.0001689605414867401,
+            "consumer_batch_seconds": 0.0435071038082242,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161427,
+            "snapshot_seconds": 0.0018679974600672722,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.005004776641726494,
+          "formal_job_seconds": [
+            14.806754678487778
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.5254634819030762,
+            "binary_scalar": 0.06821731144189834,
+            "binary_tile": 0.09846457594633107,
+            "gene_prepare_inclusive": 7.884114810943604,
+            "shared_burdens": 0.7779016427993775
+          },
+          "output_write_seconds": 0.04346678592264652,
+          "peak_gpu_allocated_bytes": 3541513216,
+          "peak_gpu_reserved_bytes": 4972347392,
+          "preparation_inclusive_host_seconds": 7.884301484562457,
+          "runtime_and_writer_seconds": 24.28942416794598,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.021796735763549804,
+              "host_wall_seconds": 0.021748781204223633
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.5281116752624512,
+              "host_wall_seconds": 0.5278634382411838
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.034717440128326414,
+              "host_wall_seconds": 0.03442808147519827
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026084800004959108,
+              "host_wall_seconds": 0.025851283222436905
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0018392640352249145,
+              "host_wall_seconds": 0.0018131239339709282
+            },
+            "gene_binary_selective_spa": {
+              "calls": 111,
+              "cuda_stream_seconds": 0.13225471985340112,
+              "host_wall_seconds": 0.12894840631633997
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.7807311344146729,
+              "host_wall_seconds": 0.7804230749607086
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00900531190633774,
+              "host_wall_seconds": 0.00856616161763668
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019561583176255226
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 7.910571826934814,
+              "host_wall_seconds": 7.910254443064332
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.327646017074585e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001277120001614094,
+              "host_wall_seconds": 7.1963295340538025e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04359202366322279
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.13031086698174477
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2091654144,
+          "writer_initialization_seconds": 0.051351466216146946
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 5,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 2.48363691529677
+      },
+      {
+        "actual_num_variant_values": [
+          204,
+          225,
+          229,
+          624,
+          735,
+          4297
+        ],
+        "anonymous_job_index": 3,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 39.1913281949237,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.00506743136793375,
+          "formal_job_seconds": [
+            29.983979750424623
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.3049591979980469,
+            "binary_scalar": 0.06904476827383041,
+            "binary_tile": 0.0996977280974388,
+            "gene_prepare_inclusive": 3.123086524963379,
+            "shared_burdens": 25.847681019783018
+          },
+          "output_write_seconds": 0.057528543286025524,
+          "peak_gpu_allocated_bytes": 3456149504,
+          "peak_gpu_reserved_bytes": 4659871744,
+          "preparation_inclusive_host_seconds": 3.1232631588354707,
+          "runtime_and_writer_seconds": 39.276388564147055,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.02132169532775879,
+              "host_wall_seconds": 0.02128332108259201
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.3075203247070313,
+              "host_wall_seconds": 0.3072732063010335
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03606726408004761,
+              "host_wall_seconds": 0.03577851224690676
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026375743865966795,
+              "host_wall_seconds": 0.026139619760215282
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00042271998524665835,
+              "host_wall_seconds": 0.00039909034967422485
+            },
+            "gene_binary_selective_spa": {
+              "calls": 111,
+              "cuda_stream_seconds": 0.13297680008411408,
+              "host_wall_seconds": 0.12967481929808855
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 25.85050475025177,
+              "host_wall_seconds": 25.850175767205656
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.008771360099315643,
+              "host_wall_seconds": 0.008133113384246826
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 9.826384484767914e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.130208599090576,
+              "host_wall_seconds": 3.129880408756435
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001318720020353794,
+              "host_wall_seconds": 7.855705916881561e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2911377408,
+          "writer_initialization_seconds": 0.08506036922335625
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 12.286151092499495,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00017107371240854263,
+            "consumer_batch_seconds": 0.044434261508286,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161427,
+            "snapshot_seconds": 0.001852414570748806,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.0048917075619101524,
+          "formal_job_seconds": [
+            4.178736213594675
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.3276114616394043,
+            "binary_scalar": 0.0684671039581299,
+            "binary_tile": 0.10273542404174801,
+            "gene_prepare_inclusive": 2.6870921936035157,
+            "shared_burdens": 0.7615984992980956
+          },
+          "output_write_seconds": 0.04438249208033085,
+          "peak_gpu_allocated_bytes": 3542924800,
+          "peak_gpu_reserved_bytes": 4972347392,
+          "preparation_inclusive_host_seconds": 2.6872682459652424,
+          "runtime_and_writer_seconds": 12.3503762409091,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.021446239471435546,
+              "host_wall_seconds": 0.021406005136668682
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.33032012939453126,
+              "host_wall_seconds": 0.33006865438073874
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.04040867137908935,
+              "host_wall_seconds": 0.04011605121195316
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026587583541870116,
+              "host_wall_seconds": 0.026355295442044735
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0014318720102310181,
+              "host_wall_seconds": 0.0014074118807911873
+            },
+            "gene_binary_selective_spa": {
+              "calls": 111,
+              "cuda_stream_seconds": 0.13598544001579285,
+              "host_wall_seconds": 0.13266340736299753
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.7644390048980713,
+              "host_wall_seconds": 0.7641222132369876
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.011394879758358002,
+              "host_wall_seconds": 0.011148740537464619
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019437232986092567
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.695061584472656,
+              "host_wall_seconds": 2.6947276182472706
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.091330528259277e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012694399803876878,
+              "host_wall_seconds": 7.4375420808792114e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.044538550078868866
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.09789896756410599
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2019725312,
+          "writer_initialization_seconds": 0.06422514840960503
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 5,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 3.180177494030413
+      },
+      {
+        "actual_num_variant_values": [
+          208,
+          291,
+          334,
+          360,
+          484,
+          1053,
+          3218
+        ],
+        "anonymous_job_index": 4,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 42.11682277172804,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.00489095039665699,
+          "formal_job_seconds": [
+            9.504575761035085
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 1.8239979171752927,
+            "binary_scalar": 0.06786928004026417,
+            "binary_tile": 0.09857007998228073,
+            "gene_prepare_inclusive": 3.6364960479736332,
+            "shared_burdens": 0.14617855834960938
+          },
+          "output_write_seconds": 0.037714979611337185,
+          "peak_gpu_allocated_bytes": 7322561024,
+          "peak_gpu_reserved_bytes": 10521411584,
+          "preparation_inclusive_host_seconds": 3.6366869285702705,
+          "runtime_and_writer_seconds": 42.17898938897997,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.06707049560546875,
+              "host_wall_seconds": 0.06692121922969818
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.826679256439209,
+              "host_wall_seconds": 1.82642468996346
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.033999711990356445,
+              "host_wall_seconds": 0.03370359446853399
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026265023946762084,
+              "host_wall_seconds": 0.026025199331343174
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.0013185920119285583,
+              "host_wall_seconds": 0.0012450721114873886
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13240729594230655,
+              "host_wall_seconds": 0.12906502187252045
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.14891372776031492,
+              "host_wall_seconds": 0.14860385097563267
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.023410239875316617,
+              "host_wall_seconds": 0.01988876983523369
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.8694353103637695e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.6448394012451173,
+              "host_wall_seconds": 3.6445258585736156
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013715199939906596,
+              "host_wall_seconds": 8.95187258720398e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4645678080,
+          "writer_initialization_seconds": 0.06216661725193262
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 34.96941575128585,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00017196685075759888,
+            "consumer_batch_seconds": 0.04306623246520758,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161569,
+            "snapshot_seconds": 0.0018605319783091545,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.01010820735245943,
+          "formal_job_seconds": [
+            5.480957610532641
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 1.1419804229736326,
+            "binary_scalar": 0.06534207993745807,
+            "binary_tile": 0.09504863989353181,
+            "gene_prepare_inclusive": 2.8307907638549805,
+            "shared_burdens": 0.1432880620956421
+          },
+          "output_write_seconds": 0.043026791885495186,
+          "peak_gpu_allocated_bytes": 7587155456,
+          "peak_gpu_reserved_bytes": 10833887232,
+          "preparation_inclusive_host_seconds": 2.830978460609913,
+          "runtime_and_writer_seconds": 35.04466996341944,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.06442419242858886,
+              "host_wall_seconds": 0.06428314838558435
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.1447484626770021,
+              "host_wall_seconds": 1.1445026537403464
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.039151296138763426,
+              "host_wall_seconds": 0.038868481293320656
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.025913344144821167,
+              "host_wall_seconds": 0.02568537648767233
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.0027088639736175535,
+              "host_wall_seconds": 0.002620740793645382
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.12857929587364197,
+              "host_wall_seconds": 0.1253979280591011
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.14613680171966553,
+              "host_wall_seconds": 0.14582164119929075
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.021220351457595828,
+              "host_wall_seconds": 0.015435184352099895
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019423598423600197
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.8390151748657226,
+              "host_wall_seconds": 2.8387131253257394
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.558614015579224e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013171199895441532,
+              "host_wall_seconds": 7.609836757183075e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.043155547231435776
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.06695154774934053
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4672980992,
+          "writer_initialization_seconds": 0.0752542121335864
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 15,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 1.203577874552893
+      },
+      {
+        "actual_num_variant_values": [
+          208,
+          291,
+          334,
+          360,
+          484,
+          1053,
+          3218
+        ],
+        "anonymous_job_index": 4,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 35.87018817849457,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.010359135456383228,
+          "formal_job_seconds": [
+            3.6753650046885014
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.38490915679931637,
+            "binary_scalar": 0.06732377600669864,
+            "binary_tile": 0.09826470440626148,
+            "gene_prepare_inclusive": 2.0985961380004885,
+            "shared_burdens": 0.14725612640380858
+          },
+          "output_write_seconds": 0.04222285468131304,
+          "peak_gpu_allocated_bytes": 7321910784,
+          "peak_gpu_reserved_bytes": 10521411584,
+          "preparation_inclusive_host_seconds": 2.098785936832428,
+          "runtime_and_writer_seconds": 35.93585580214858,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.06299363136291504,
+              "host_wall_seconds": 0.06287826038897038
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.3875779762268066,
+              "host_wall_seconds": 0.3873252859339118
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03868095970153808,
+              "host_wall_seconds": 0.03837968688458204
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026309247970581057,
+              "host_wall_seconds": 0.026066678576171398
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.001362559974193573,
+              "host_wall_seconds": 0.001287698745727539
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13198377633094788,
+              "host_wall_seconds": 0.12864424008876085
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.15009084796905517,
+              "host_wall_seconds": 0.14976257923990488
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02263340824842453,
+              "host_wall_seconds": 0.017037122510373592
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.81169331073761e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.106117218017578,
+              "host_wall_seconds": 2.1057846136391163
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013305599987506868,
+              "host_wall_seconds": 8.960254490375519e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4495841280,
+          "writer_initialization_seconds": 0.06566762365400791
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 33.164063047617674,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00017710309475660324,
+            "consumer_batch_seconds": 0.049907381646335125,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161569,
+            "snapshot_seconds": 0.0018848562613129616,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.0050849998369812965,
+          "formal_job_seconds": [
+            3.9405044447630644
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.3946654014587402,
+            "binary_scalar": 0.06558095985651019,
+            "binary_tile": 0.09625596797466274,
+            "gene_prepare_inclusive": 2.5292547302246096,
+            "shared_burdens": 0.14658486461639406
+          },
+          "output_write_seconds": 0.04986897483468056,
+          "peak_gpu_allocated_bytes": 7585871360,
+          "peak_gpu_reserved_bytes": 10833887232,
+          "preparation_inclusive_host_seconds": 2.5294303921982646,
+          "runtime_and_writer_seconds": 33.24802707321942,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.06411510276794434,
+              "host_wall_seconds": 0.0639955885708332
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.3974833564758301,
+              "host_wall_seconds": 0.3972336445003748
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.04422646379470825,
+              "host_wall_seconds": 0.043937074951827526
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02590460801124573,
+              "host_wall_seconds": 0.025669283233582973
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 3,
+              "cuda_stream_seconds": 0.004928255945444107,
+              "host_wall_seconds": 0.0048485128208994865
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.12954172837734224,
+              "host_wall_seconds": 0.12630912102758884
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.14949686527252198,
+              "host_wall_seconds": 0.14917028043419123
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.024392096400260927,
+              "host_wall_seconds": 0.020614643581211567
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.001972174271941185
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.539796325683594,
+              "host_wall_seconds": 2.5394938737154007
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.66012817621231e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012956799939274787,
+              "host_wall_seconds": 7.655471563339233e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0500829853117466
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.06117804907262325
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4561090560,
+          "writer_initialization_seconds": 0.08396402560174465
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 15,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 1.0808417510912744
+      },
+      {
+        "actual_num_variant_values": [
+          203,
+          238,
+          383,
+          421,
+          1195,
+          1230,
+          9075
+        ],
+        "anonymous_job_index": 5,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 162.78318579494953,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004953842610120773,
+          "formal_job_seconds": [
+            130.2430753428489
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 66.70214361953735,
+            "binary_scalar": 0.06602329581975937,
+            "binary_tile": 0.09606048005819318,
+            "gene_prepare_inclusive": 5.683191703796387,
+            "shared_burdens": 54.98203290462494
+          },
+          "output_write_seconds": 0.0520623791962862,
+          "peak_gpu_allocated_bytes": 4263638016,
+          "peak_gpu_reserved_bytes": 10529800192,
+          "preparation_inclusive_host_seconds": 5.683380462229252,
+          "runtime_and_writer_seconds": 162.941760876216,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08719043350219727,
+              "host_wall_seconds": 0.08699077554047108
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 66.70485436630248,
+              "host_wall_seconds": 66.70459588523954
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.035503104209899904,
+              "host_wall_seconds": 0.03520878218114376
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026294976234436034,
+              "host_wall_seconds": 0.02605073992162943
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.0023289920389652254,
+              "host_wall_seconds": 0.0022051753476262093
+            },
+            "gene_binary_selective_spa": {
+              "calls": 106,
+              "cuda_stream_seconds": 0.13007504010200494,
+              "host_wall_seconds": 0.12676186580210924
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 54.984907352447514,
+              "host_wall_seconds": 54.98458774201572
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 64.03886536228657,
+              "host_wall_seconds": 64.02902275417
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.943941116333008e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 5.692852714538574,
+              "host_wall_seconds": 5.692517071962357
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013465599901974203,
+              "host_wall_seconds": 7.8640878200531e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 7923716096,
+          "writer_initialization_seconds": 0.1585750812664628
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 41.1407141443342,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00017966888844966888,
+            "consumer_batch_seconds": 0.04150068014860153,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161349,
+            "snapshot_seconds": 0.0019078291952610016,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.004952186718583107,
+          "formal_job_seconds": [
+            12.008411856368184
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 3.5229683914184573,
+            "binary_scalar": 0.06457753628492359,
+            "binary_tile": 0.09561129605770116,
+            "gene_prepare_inclusive": 4.819174331665039,
+            "shared_burdens": 2.2283596172332762
+          },
+          "output_write_seconds": 0.041459848172962666,
+          "peak_gpu_allocated_bytes": 4526022656,
+          "peak_gpu_reserved_bytes": 10842275840,
+          "preparation_inclusive_host_seconds": 4.819359029643238,
+          "runtime_and_writer_seconds": 41.21959255822003,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08367865753173828,
+              "host_wall_seconds": 0.08348721358925104
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.525752338409424,
+              "host_wall_seconds": 3.525509181432426
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0363375039100647,
+              "host_wall_seconds": 0.036056808196008205
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02570457625389099,
+              "host_wall_seconds": 0.025472667068243027
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.013427359730005264,
+              "host_wall_seconds": 0.013310093432664871
+            },
+            "gene_binary_selective_spa": {
+              "calls": 106,
+              "cuda_stream_seconds": 0.12817507195472713,
+              "host_wall_seconds": 0.12501189578324556
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.2311032762527465,
+              "host_wall_seconds": 2.2307905489578843
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.540019791662693,
+              "host_wall_seconds": 1.5268878461793065
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019946126267313957
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 4.830212600708007,
+              "host_wall_seconds": 4.829881509765983
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.956048309803009e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012972799874842167,
+              "host_wall_seconds": 7.82310962677002e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04159262217581272
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.06149066984653473
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4710090752,
+          "writer_initialization_seconds": 0.07887841388583183
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 28,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 3.9530172610530103
+      },
+      {
+        "actual_num_variant_values": [
+          203,
+          238,
+          383,
+          421,
+          1195,
+          1230,
+          9075
+        ],
+        "anonymous_job_index": 5,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 157.95212317351252,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004922534339129925,
+          "formal_job_seconds": [
+            125.50331252254546
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 64.29808655166626,
+            "binary_scalar": 0.066086336016655,
+            "binary_tile": 0.09657120007276539,
+            "gene_prepare_inclusive": 4.315107025146484,
+            "shared_burdens": 55.929876759529115
+          },
+          "output_write_seconds": 0.038585370406508446,
+          "peak_gpu_allocated_bytes": 4288609280,
+          "peak_gpu_reserved_bytes": 10529800192,
+          "preparation_inclusive_host_seconds": 4.315352903679013,
+          "runtime_and_writer_seconds": 158.21534068323672,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08489129447937012,
+              "host_wall_seconds": 0.08472624327987432
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 64.30081327056884,
+              "host_wall_seconds": 64.30055289063603
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.032297215938568116,
+              "host_wall_seconds": 0.03200395591557026
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02616185569763184,
+              "host_wall_seconds": 0.025919944047927856
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.003868191957473755,
+              "host_wall_seconds": 0.0037504779174923897
+            },
+            "gene_binary_selective_spa": {
+              "calls": 106,
+              "cuda_stream_seconds": 0.13094035184383396,
+              "host_wall_seconds": 0.12763523310422897
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 55.93278823566436,
+              "host_wall_seconds": 55.9324240507558
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 63.907067862331864,
+              "host_wall_seconds": 63.89609418436885
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.1730464696884155e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 4.321759918212891,
+              "host_wall_seconds": 4.321417497470975
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013615999929606916,
+              "host_wall_seconds": 8.429400622844696e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 7512949760,
+          "writer_initialization_seconds": 0.26321750972419977
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 37.33451097086072,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00016313977539539337,
+            "consumer_batch_seconds": 0.04319894686341286,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161349,
+            "snapshot_seconds": 0.0018359273672103882,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.004989970475435257,
+          "formal_job_seconds": [
+            8.13965271320194
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 2.183942710876465,
+            "binary_scalar": 0.06566611212491988,
+            "binary_tile": 0.10111689615249637,
+            "gene_prepare_inclusive": 3.331938926696777,
+            "shared_burdens": 1.8281319103240965
+          },
+          "output_write_seconds": 0.04315217770636082,
+          "peak_gpu_allocated_bytes": 4818360832,
+          "peak_gpu_reserved_bytes": 10842275840,
+          "preparation_inclusive_host_seconds": 3.332121846266091,
+          "runtime_and_writer_seconds": 37.398744862526655,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08238822364807129,
+              "host_wall_seconds": 0.08222309686243534
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.1867390022277835,
+              "host_wall_seconds": 2.1864826921373606
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03980195188522339,
+              "host_wall_seconds": 0.03952209651470184
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.025814528465271,
+              "host_wall_seconds": 0.025573909282684326
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.003056832045316696,
+              "host_wall_seconds": 0.0029456494376063347
+            },
+            "gene_binary_selective_spa": {
+              "calls": 106,
+              "cuda_stream_seconds": 0.13542118382453922,
+              "host_wall_seconds": 0.1322480570524931
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.8309383516311646,
+              "host_wall_seconds": 1.8306154878810048
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.7836992365717887,
+              "host_wall_seconds": 1.7694797152653337
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.001921461895108223
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.3391626586914063,
+              "host_wall_seconds": 3.338835290633142
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.926245987415314e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001363840028643608,
+              "host_wall_seconds": 7.670372724533081e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04330236464738846
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.14035748038440943
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4691425280,
+          "writer_initialization_seconds": 0.06423389166593552
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 28,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 4.230498677557697
+      },
+      {
+        "actual_num_variant_values": [
+          222,
+          472,
+          772,
+          957,
+          1373,
+          2424,
+          15351
+        ],
+        "anonymous_job_index": 6,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 244.19364186003804,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.0053941067308187485,
+          "formal_job_seconds": [
+            211.26921355351806
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 108.786868183136,
+            "binary_scalar": 0.06775868785381316,
+            "binary_tile": 0.09764031994342805,
+            "gene_prepare_inclusive": 6.982062362670899,
+            "shared_burdens": 93.45759102153778
+          },
+          "output_write_seconds": 0.04773938748985529,
+          "peak_gpu_allocated_bytes": 6059625984,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 6.982257256284356,
+          "runtime_and_writer_seconds": 244.2633770769462,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08468400001525879,
+              "host_wall_seconds": 0.08449579030275345
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 108.79041930770873,
+              "host_wall_seconds": 108.79018686711788
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.034653984069824215,
+              "host_wall_seconds": 0.03435913845896721
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02653980779647827,
+              "host_wall_seconds": 0.0262977983802557
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.006426719963550568,
+              "host_wall_seconds": 0.0063221994787454605
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.13222409594058995,
+              "host_wall_seconds": 0.12895070668309927
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 93.46047487735748,
+              "host_wall_seconds": 93.46014757174999
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 106.88785381239653,
+              "host_wall_seconds": 106.86974025145173
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.646158337593079e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 6.9971957244873035,
+              "host_wall_seconds": 6.996850016526878
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001343680005520582,
+              "host_wall_seconds": 7.832422852516174e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 7920617472,
+          "writer_initialization_seconds": 0.06973521690815687
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 43.76154461596161,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00018086005002260208,
+            "consumer_batch_seconds": 0.04087047278881073,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161407,
+            "snapshot_seconds": 0.001897416077554226,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.005041946657001972,
+          "formal_job_seconds": [
+            14.053368085063994
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 3.7804769668579103,
+            "binary_scalar": 0.06680640023946764,
+            "binary_tile": 0.0961678401231766,
+            "gene_prepare_inclusive": 5.665971809387207,
+            "shared_burdens": 3.3742362775802612
+          },
+          "output_write_seconds": 0.040828075259923935,
+          "peak_gpu_allocated_bytes": 6231958528,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 5.6661571925506,
+          "runtime_and_writer_seconds": 43.83064056094736,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08302848243713379,
+              "host_wall_seconds": 0.08284414559602737
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.783984485626221,
+              "host_wall_seconds": 3.783732467330992
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03895673608779907,
+              "host_wall_seconds": 0.038666765205562115
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026109728097915647,
+              "host_wall_seconds": 0.025866420939564705
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.004607968002557755,
+              "host_wall_seconds": 0.004490083083510399
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.1299454084634781,
+              "host_wall_seconds": 0.12665772065520287
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 3.459756019592285,
+              "host_wall_seconds": 3.459384254179895
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.489314352691174,
+              "host_wall_seconds": 2.4664776949211955
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0019854148849844933
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 5.678558853149414,
+              "host_wall_seconds": 5.678217468783259
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.0212408900260925e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001300159990787506,
+              "host_wall_seconds": 7.8640878200531e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04095733445137739
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.13074420019984245
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4785901568,
+          "writer_initialization_seconds": 0.06909594498574734
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 19,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 5.572890880690945
+      },
+      {
+        "actual_num_variant_values": [
+          222,
+          472,
+          772,
+          957,
+          1373,
+          2424,
+          15351
+        ],
+        "anonymous_job_index": 6,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 240.67206953279674,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.005892675369977951,
+          "formal_job_seconds": [
+            208.30671035218984
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 106.9330631866455,
+            "binary_scalar": 0.06600105607509614,
+            "binary_tile": 0.09534524792432787,
+            "gene_prepare_inclusive": 6.527022964477538,
+            "shared_burdens": 93.90738733482361
+          },
+          "output_write_seconds": 0.038913827389478683,
+          "peak_gpu_allocated_bytes": 6075268608,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 6.527197343297303,
+          "runtime_and_writer_seconds": 240.75179350096732,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.08272275161743164,
+              "host_wall_seconds": 0.08256072551012039
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 106.93690813064575,
+              "host_wall_seconds": 106.93666248302907
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03398947191238403,
+              "host_wall_seconds": 0.03368599992245436
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026327296018600465,
+              "host_wall_seconds": 0.02607735525816679
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.0036209279894828797,
+              "host_wall_seconds": 0.0034950915724039078
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.12934790396690368,
+              "host_wall_seconds": 0.12610166426748037
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 93.91032398223876,
+              "host_wall_seconds": 93.90994087141007
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 106.54586578965187,
+              "host_wall_seconds": 106.52509545534849
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.5248459577560425e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 6.534169815063477,
+              "host_wall_seconds": 6.533827250823379
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013328000158071518,
+              "host_wall_seconds": 7.671304047107697e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 8064818176,
+          "writer_initialization_seconds": 0.07972396817058325
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 41.55033842660487,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00016758497804403305,
+            "consumer_batch_seconds": 0.043748365715146065,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 161407,
+            "snapshot_seconds": 0.001870851032435894,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.004928250797092915,
+          "formal_job_seconds": [
+            12.626933177933097
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 2.898452808380127,
+            "binary_scalar": 0.0656607362627983,
+            "binary_tile": 0.09506518399715418,
+            "gene_prepare_inclusive": 5.971121299743652,
+            "shared_burdens": 2.9149805393218995
+          },
+          "output_write_seconds": 0.04370446316897869,
+          "peak_gpu_allocated_bytes": 6427161088,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 5.971302604302764,
+          "runtime_and_writer_seconds": 41.66200438886881,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.0813169937133789,
+              "host_wall_seconds": 0.08115148730576038
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.9023226013183594,
+              "host_wall_seconds": 2.9020638316869736
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03278828811645508,
+              "host_wall_seconds": 0.032502127811312675
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026841824054718022,
+              "host_wall_seconds": 0.0266072740778327
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 4,
+              "cuda_stream_seconds": 0.003497088044881821,
+              "host_wall_seconds": 0.0033868392929434776
+            },
+            "gene_binary_selective_spa": {
+              "calls": 107,
+              "cuda_stream_seconds": 0.12912415993213655,
+              "host_wall_seconds": 0.12585910968482494
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.917903082847595,
+              "host_wall_seconds": 2.917583677917719
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.504458644866943,
+              "host_wall_seconds": 2.4785515051335096
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.001960824243724346
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 5.98205158996582,
+              "host_wall_seconds": 5.981723697856069
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.735324859619141e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012892800197005272,
+              "host_wall_seconds": 7.75512307882309e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04385011177510023
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.06945059821009636
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4773232640,
+          "writer_initialization_seconds": 0.11166596226394176
+        },
+        "csv_files": 16,
+        "kind": "noncoding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 560,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 560,
+          "significant_errors": 0,
+          "significant_finite_pairs": 19,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 5.778689648577998
+      },
+      {
+        "actual_num_variant_values": [
+          39,
+          48,
+          740,
+          779,
+          788,
+          1282,
+          2690
+        ],
+        "anonymous_job_index": 7,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 39.13712838012725,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.008818165399134159,
+          "formal_job_seconds": [
+            6.68114613648504
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 1.6671613578796383,
+            "binary_scalar": 0.06647552019357679,
+            "binary_tile": 0.09856895989179613,
+            "gene_prepare_inclusive": 2.2706500740051268,
+            "shared_burdens": 0.15048355197906496
+          },
+          "output_write_seconds": 0.10276755038648844,
+          "peak_gpu_allocated_bytes": 6087264256,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 2.2708346359431744,
+          "runtime_and_writer_seconds": 39.20731085166335,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.06011884880065918,
+              "host_wall_seconds": 0.06001665908843279
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.6701546936035156,
+              "host_wall_seconds": 1.6699013244360685
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03258995246887207,
+              "host_wall_seconds": 0.03230559732764959
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026331487894058224,
+              "host_wall_seconds": 0.026093128137290478
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.0028203519582748414,
+              "host_wall_seconds": 0.002761196345090866
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13299446392059328,
+              "host_wall_seconds": 0.1296541439369321
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.15320393657684325,
+              "host_wall_seconds": 0.15289102774113417
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02400742334127426,
+              "host_wall_seconds": 0.018789954483509064
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.180737495422363e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.2868687133789063,
+              "host_wall_seconds": 2.2865617787465453
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00013459199853241443,
+              "host_wall_seconds": 7.78399407863617e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 5762743296,
+          "writer_initialization_seconds": 0.07018247153609991
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 34.806966349482536,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00016766507178544998,
+            "consumer_batch_seconds": 0.0779487993568182,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 168252,
+            "snapshot_seconds": 0.001875714398920536,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.008887693285942078,
+          "formal_job_seconds": [
+            5.175237154588103
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.9874894371032715,
+            "binary_scalar": 0.06608745604753494,
+            "binary_tile": 0.09794467216730124,
+            "gene_prepare_inclusive": 2.437840400695801,
+            "shared_burdens": 0.1494420166015625
+          },
+          "output_write_seconds": 0.07788649760186672,
+          "peak_gpu_allocated_bytes": 6263273984,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 2.438023499213159,
+          "runtime_and_writer_seconds": 34.86248588655144,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.05854908752441407,
+              "host_wall_seconds": 0.05843863356858492
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.9905162315368653,
+              "host_wall_seconds": 0.9902566550299525
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03969574451446533,
+              "host_wall_seconds": 0.03941580653190613
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.025950144052505494,
+              "host_wall_seconds": 0.02572052925825119
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.0024889920055866242,
+              "host_wall_seconds": 0.0024377433583140373
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13142294430732723,
+              "host_wall_seconds": 0.12812538631260395
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.15229715251922607,
+              "host_wall_seconds": 0.15198000613600016
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.020811360239982608,
+              "host_wall_seconds": 0.016621368937194347
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.001967768184840679
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.4477225646972656,
+              "host_wall_seconds": 2.4474214585497975
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.3213672041893e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012934399954974652,
+              "host_wall_seconds": 7.5874850153923035e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0780771104618907
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.1474873311817646
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 5759172608,
+          "writer_initialization_seconds": 0.055519537068903446
+        },
+        "csv_files": 32,
+        "kind": "coding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 592,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 592,
+          "significant_errors": 0,
+          "significant_finite_pairs": 10,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 112,
+        "runtime_speedup": 1.1246275144936801
+      },
+      {
+        "actual_num_variant_values": [
+          39,
+          48,
+          740,
+          779,
+          788,
+          1282,
+          2690
+        ],
+        "anonymous_job_index": 7,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 36.61297773104161,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.008767354302108288,
+          "formal_job_seconds": [
+            4.498606222681701
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.3545890579223633,
+            "binary_scalar": 0.06656252807378772,
+            "binary_tile": 0.0973996160030364,
+            "gene_prepare_inclusive": 2.480631645202637,
+            "shared_burdens": 0.14819791984558106
+          },
+          "output_write_seconds": 0.09719550423324108,
+          "peak_gpu_allocated_bytes": 6097588224,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 2.480813621543348,
+          "runtime_and_writer_seconds": 36.69940138608217,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.053353790283203126,
+              "host_wall_seconds": 0.053272237069904804
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.35703359603881835,
+              "host_wall_seconds": 0.3567825062200427
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03550521564483643,
+              "host_wall_seconds": 0.035213044844567776
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.02614678406715393,
+              "host_wall_seconds": 0.025908646173775196
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.0008763520121574401,
+              "host_wall_seconds": 0.0008263830095529556
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13067747199535368,
+              "host_wall_seconds": 0.12732014153152704
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.30346857643127445,
+              "host_wall_seconds": 0.30312134698033333
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.01745657616853714,
+              "host_wall_seconds": 0.012013436295092106
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.083879947662354e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 2.4876676902771,
+              "host_wall_seconds": 2.487350848503411
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.0001343040019273758,
+              "host_wall_seconds": 8.49645584821701e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4734274560,
+          "writer_initialization_seconds": 0.08642365504056215
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 32.73712172359228,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.000171012245118618,
+            "consumer_batch_seconds": 0.07862072624266148,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 168252,
+            "snapshot_seconds": 0.0019078915938735008,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.008766954764723778,
+          "formal_job_seconds": [
+            3.375668994151056
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.35672483825683593,
+            "binary_scalar": 0.06638655990362165,
+            "binary_tile": 0.09788703972101206,
+            "gene_prepare_inclusive": 1.7035722236633302,
+            "shared_burdens": 0.14882425308227537
+          },
+          "output_write_seconds": 0.07856643479317427,
+          "peak_gpu_allocated_bytes": 6361402368,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 1.7037630090489984,
+          "runtime_and_writer_seconds": 32.808821553364396,
+          "stages": {
+            "gene_binary_batched_selective_spa": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.053420064926147454,
+              "host_wall_seconds": 0.05333550088107586
+            },
+            "gene_binary_nominal_and_spa": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.3592015037536621,
+              "host_wall_seconds": 0.3589513720944524
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.03376412773132324,
+              "host_wall_seconds": 0.03347494453191757
+            },
+            "gene_binary_packed_output": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.026166944026947022,
+              "host_wall_seconds": 0.025929104536771774
+            },
+            "gene_binary_selected_spa_batch_admission": {
+              "calls": 2,
+              "cuda_stream_seconds": 0.002348383963108063,
+              "host_wall_seconds": 0.0022901101037859917
+            },
+            "gene_binary_selective_spa": {
+              "calls": 109,
+              "cuda_stream_seconds": 0.13106851208209994,
+              "host_wall_seconds": 0.12769126798957586
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.15167404747009278,
+              "host_wall_seconds": 0.1513587236404419
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.017475840091705323,
+              "host_wall_seconds": 0.012390193529427052
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.001996120437979698
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 7,
+              "cuda_stream_seconds": 1.7100591888427734,
+              "host_wall_seconds": 1.7097504818812013
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 8.320435881614685e-06
+            },
+            "gene_shared_score": {
+              "calls": 7,
+              "cuda_stream_seconds": 0.00012844800017774104,
+              "host_wall_seconds": 8.002854883670807e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0787063967436552
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.11170233134180307
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 4605934592,
+          "writer_initialization_seconds": 0.07169982977211475
+        },
+        "csv_files": 32,
+        "kind": "coding",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 592,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 592,
+          "significant_errors": 0,
+          "significant_finite_pairs": 10,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 112,
+        "runtime_speedup": 1.1185833458354988
+      },
+      {
+        "actual_num_variant_values": [
+          9950
+        ],
+        "anonymous_job_index": 8,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 78.22394560277462,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004189679399132729,
+          "formal_job_seconds": [
+            69.29786753747612
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.04111964797973633,
+            "binary_scalar": 0.011056864082813265,
+            "binary_tile": 0.015153920114040376,
+            "gene_prepare_inclusive": 7.80720703125,
+            "shared_burdens": 60.65007421875
+          },
+          "output_write_seconds": 0.0362530006095767,
+          "peak_gpu_allocated_bytes": 3328398336,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 7.807238982990384,
+          "runtime_and_writer_seconds": 78.4757844703272,
+          "stages": {
+            "gene_binary_nominal_and_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.04182611083984375,
+              "host_wall_seconds": 0.041789027862250805
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0051006398200988765,
+              "host_wall_seconds": 0.005054200999438763
+            },
+            "gene_binary_packed_output": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.003956255912780762,
+              "host_wall_seconds": 0.003921132534742355
+            },
+            "gene_binary_selective_spa": {
+              "calls": 16,
+              "cuda_stream_seconds": 0.020218208074569703,
+              "host_wall_seconds": 0.019722468219697475
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 60.65055859375,
+              "host_wall_seconds": 60.650507933460176
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0008926079869270325,
+              "host_wall_seconds": 0.0008472809568047523
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.89295881986618e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 7.80816357421875,
+              "host_wall_seconds": 7.808098276145756
+            },
+            "gene_shared_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 2.1376000717282296e-05,
+              "host_wall_seconds": 1.3597309589385986e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2903921664,
+          "writer_initialization_seconds": 0.25183886755257845
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 14.323083011433482,
+          "asynchronous_output": {
+            "backpressure_seconds": 4.6214088797569275e-05,
+            "consumer_batch_seconds": 0.03910847753286362,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 35823,
+            "snapshot_seconds": 0.0003837272524833679,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.0037159351631999016,
+          "formal_job_seconds": [
+            6.234512170776725
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.03937696075439453,
+            "binary_scalar": 0.010691456079483031,
+            "binary_tile": 0.014479712069034577,
+            "gene_prepare_inclusive": 4.059164306640625,
+            "shared_burdens": 1.5343447265625
+          },
+          "output_write_seconds": 0.03906326647847891,
+          "peak_gpu_allocated_bytes": 3328571392,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 4.0591987846419215,
+          "runtime_and_writer_seconds": 14.407081295736134,
+          "stages": {
+            "gene_binary_nominal_and_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.04028950500488281,
+              "host_wall_seconds": 0.040253520011901855
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.005283520221710205,
+              "host_wall_seconds": 0.0052416203543543816
+            },
+            "gene_binary_packed_output": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0038059840202331542,
+              "host_wall_seconds": 0.0037727709859609604
+            },
+            "gene_binary_selective_spa": {
+              "calls": 16,
+              "cuda_stream_seconds": 0.019052991986274716,
+              "host_wall_seconds": 0.018582898192107677
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 1.53476806640625,
+              "host_wall_seconds": 1.5347228879109025
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0008147199749946594,
+              "host_wall_seconds": 0.0007796464487910271
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.000456090085208416
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 4.0605546875,
+              "host_wall_seconds": 4.0604923609644175
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 7.193535566329956e-06
+            },
+            "gene_shared_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 2.2911999374628067e-05,
+              "host_wall_seconds": 2.2193416953086853e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.03916369192302227
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.12944294419139624
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2174076928,
+          "writer_initialization_seconds": 0.08399828430265188
+        },
+        "csv_files": 16,
+        "kind": "ncrna",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 80,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 80,
+          "significant_errors": 0,
+          "significant_finite_pairs": 0,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 16,
+        "runtime_speedup": 5.447028642335252
+      },
+      {
+        "actual_num_variant_values": [
+          9950
+        ],
+        "anonymous_job_index": 8,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 72.55471561010927,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.004112266935408115,
+          "formal_job_seconds": [
+            63.70709253754467
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.04324678421020508,
+            "binary_scalar": 0.010967584073543549,
+            "binary_tile": 0.015551104009151457,
+            "gene_prepare_inclusive": 3.110785888671875,
+            "shared_burdens": 60.2329375
+          },
+          "output_write_seconds": 0.04137826897203922,
+          "peak_gpu_allocated_bytes": 3326982656,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 3.1108143823221326,
+          "runtime_and_writer_seconds": 72.63361237570643,
+          "stages": {
+            "gene_binary_nominal_and_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.04355923080444336,
+              "host_wall_seconds": 0.043522692285478115
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00767248010635376,
+              "host_wall_seconds": 0.007628418505191803
+            },
+            "gene_binary_packed_output": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0038669760227203367,
+              "host_wall_seconds": 0.0038332343101501465
+            },
+            "gene_binary_selective_spa": {
+              "calls": 16,
+              "cuda_stream_seconds": 0.020147264003753662,
+              "host_wall_seconds": 0.019642679952085018
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 60.2334140625,
+              "host_wall_seconds": 60.233356764540076
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.000864192008972168,
+              "host_wall_seconds": 0.0008274028077721596
+            },
+            "gene_checkpoint_write": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.631016731262207e-06
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 3.111986083984375,
+              "host_wall_seconds": 3.1119194449856877
+            },
+            "gene_shared_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 2.115200087428093e-05,
+              "host_wall_seconds": 1.2638047337532043e-06
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 3357012992,
+          "writer_initialization_seconds": 0.07889676559716463
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 13.10176466871053,
+          "asynchronous_output": {
+            "backpressure_seconds": 4.535354673862457e-05,
+            "consumer_batch_seconds": 0.041815546341240406,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 35823,
+            "snapshot_seconds": 0.0003962526097893715,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.004061708226799965,
+          "formal_job_seconds": [
+            4.983935649506748
+          ],
+          "measured_cuda_stream_inclusive_seconds": {
+            "binary_burden_tile": 0.04024655914306641,
+            "binary_scalar": 0.01080067193508148,
+            "binary_tile": 0.015814527988433837,
+            "gene_prepare_inclusive": 3.155931640625,
+            "shared_burdens": 1.5394464111328126
+          },
+          "output_write_seconds": 0.04177270736545324,
+          "peak_gpu_allocated_bytes": 3325641216,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 3.15596145670861,
+          "runtime_and_writer_seconds": 13.184296856634319,
+          "stages": {
+            "gene_binary_nominal_and_spa": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0405557746887207,
+              "host_wall_seconds": 0.04051996394991875
+            },
+            "gene_binary_normal_projection_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0043589439392089846,
+              "host_wall_seconds": 0.004317304119467735
+            },
+            "gene_binary_packed_output": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.003792543888092041,
+              "host_wall_seconds": 0.003758390434086323
+            },
+            "gene_binary_selective_spa": {
+              "calls": 16,
+              "cuda_stream_seconds": 0.02025609588623047,
+              "host_wall_seconds": 0.019763103686273098
+            },
+            "gene_binary_shared_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 1.53984765625,
+              "host_wall_seconds": 1.5398030001670122
+            },
+            "gene_binary_shared_exact_burdens": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0008024320006370545,
+              "host_wall_seconds": 0.0007678968831896782
+            },
+            "gene_output_publish_enqueue": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0004804003983736038
+            },
+            "gene_read_decode_cohort_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 3.18327392578125,
+              "host_wall_seconds": 3.1831959476694465
+            },
+            "gene_result_stage": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 6.727874279022217e-06
+            },
+            "gene_shared_score": {
+              "calls": 1,
+              "cuda_stream_seconds": 2.0959999412298203e-05,
+              "host_wall_seconds": 1.383945345878601e-06
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.04187694098800421
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.16051780991256237
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2174621696,
+          "writer_initialization_seconds": 0.08253218792378902
+        },
+        "csv_files": 16,
+        "kind": "ncrna",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 0,
+          "finite_p_pairs": 80,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 0,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 80,
+          "significant_errors": 0,
+          "significant_finite_pairs": 0,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 16,
+        "runtime_speedup": 5.509100194384451
+      },
+      {
+        "actual_num_variant_values": [],
+        "anonymous_job_index": 9,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 13.714263755828142,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.005352823995053768,
+          "formal_job_seconds": [
+            4.8746307939291
+          ],
+          "measured_cuda_stream_inclusive_seconds": {},
+          "output_write_seconds": 0.044213175773620605,
+          "peak_gpu_allocated_bytes": 830731776,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 0,
+          "runtime_and_writer_seconds": 13.91192595846951,
+          "stages": {
+            "genotype_trait_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.009881183624267579,
+              "host_wall_seconds": 0.009824342094361782
+            },
+            "phewas_individual_tail": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0007009919881820678,
+              "host_wall_seconds": 0.0006586508825421333
+            },
+            "phewas_individual_variance": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.03299414443969727,
+              "host_wall_seconds": 0.03296039346605539
+            },
+            "phewas_phenotype_score_fp32": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.003424191951751709,
+              "host_wall_seconds": 0.003379635512828827
+            },
+            "phewas_result_d2h": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0001408960074186325,
+              "host_wall_seconds": 0.00011685304343700409
+            },
+            "phewas_score_sensitivity": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0015914239883422852,
+              "host_wall_seconds": 0.001557573676109314
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2144680960,
+          "writer_initialization_seconds": 0.1976622026413679
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 11.314796934835613,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00032424647361040115,
+            "consumer_batch_seconds": 0.042516679503023624,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 824564,
+            "snapshot_seconds": 0.0071090636774897575,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.004900477826595306,
+          "formal_job_seconds": [
+            3.2344846045598388
+          ],
+          "measured_cuda_stream_inclusive_seconds": {},
+          "output_write_seconds": 0.04246887098997831,
+          "peak_gpu_allocated_bytes": 1382339584,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 0,
+          "runtime_and_writer_seconds": 11.427914204075933,
+          "stages": {
+            "genotype_trait_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.01091481590270996,
+              "host_wall_seconds": 0.010852916166186333
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.042654793709516525
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.0829473352059722
+            },
+            "phewas_individual_tail": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0007403839826583863,
+              "host_wall_seconds": 0.0006932495161890984
+            },
+            "phewas_individual_variance": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.036186912536621096,
+              "host_wall_seconds": 0.03615254256874323
+            },
+            "phewas_phenotype_score_fp32": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0034360640048980715,
+              "host_wall_seconds": 0.0033905096352100372
+            },
+            "phewas_result_d2h": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00014780800044536592,
+              "host_wall_seconds": 0.00012218300253152847
+            },
+            "phewas_score_sensitivity": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.001664512038230896,
+              "host_wall_seconds": 0.0016300072893500328
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2171326464,
+          "writer_initialization_seconds": 0.11311726924031973
+        },
+        "csv_files": 16,
+        "kind": "individual",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 720,
+          "finite_p_pairs": 480,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 720,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 480,
+          "significant_errors": 0,
+          "significant_finite_pairs": 75,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 0,
+        "rows": 240,
+        "runtime_speedup": 1.21736352846503
+      },
+      {
+        "actual_num_variant_values": [],
+        "anonymous_job_index": 9,
+        "baseline": {
+          "association_runtime_and_writer_seconds": 9.593109833076596,
+          "asynchronous_output": null,
+          "csv_additional_readback_seconds": 0.005311125889420509,
+          "formal_job_seconds": [
+            0.8475502086803317
+          ],
+          "measured_cuda_stream_inclusive_seconds": {},
+          "output_write_seconds": 0.04702840372920036,
+          "peak_gpu_allocated_bytes": 838967808,
+          "peak_gpu_reserved_bytes": 10546577408,
+          "preparation_inclusive_host_seconds": 0,
+          "runtime_and_writer_seconds": 9.654924621805549,
+          "stages": {
+            "genotype_trait_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.010003487586975097,
+              "host_wall_seconds": 0.009940605610609055
+            },
+            "phewas_individual_tail": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0016506880521774292,
+              "host_wall_seconds": 0.0016034794971346855
+            },
+            "phewas_individual_variance": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.020849216461181642,
+              "host_wall_seconds": 0.011112387292087078
+            },
+            "phewas_phenotype_score_fp32": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0006588159799575806,
+              "host_wall_seconds": 0.0005224775522947311
+            },
+            "phewas_result_d2h": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.000301503986120224,
+              "host_wall_seconds": 0.00021973438560962677
+            },
+            "phewas_score_sensitivity": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00016870400309562683,
+              "host_wall_seconds": 0.009692726656794548
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 2136263680,
+          "writer_initialization_seconds": 0.06181478872895241
+        },
+        "candidate": {
+          "association_runtime_and_writer_seconds": 8.747502448037267,
+          "asynchronous_output": {
+            "backpressure_seconds": 0.00032939016819000244,
+            "consumer_batch_seconds": 0.039732614532113075,
+            "durable_batches": 1,
+            "durable_tiles": 1,
+            "pending_bytes_limit": 67108864,
+            "pending_owned_bytes_peak": 824564,
+            "snapshot_seconds": 0.0071511343121528625,
+            "submitted_tiles": 1
+          },
+          "csv_additional_readback_seconds": 0.005341675132513046,
+          "formal_job_seconds": [
+            0.7840229831635952
+          ],
+          "measured_cuda_stream_inclusive_seconds": {},
+          "output_write_seconds": 0.03969492297619581,
+          "peak_gpu_allocated_bytes": 1453688832,
+          "peak_gpu_reserved_bytes": 10859053056,
+          "preparation_inclusive_host_seconds": 0,
+          "runtime_and_writer_seconds": 8.842461434192955,
+          "stages": {
+            "genotype_trait_prepare": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00990822410583496,
+              "host_wall_seconds": 0.00985307339578867
+            },
+            "output_durability_barrier": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.03987354412674904
+            },
+            "output_finish_durability_and_readback": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0,
+              "host_wall_seconds": 0.07285621389746666
+            },
+            "phewas_individual_tail": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0007074559926986694,
+              "host_wall_seconds": 0.0006625214591622353
+            },
+            "phewas_individual_variance": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.020832639694213867,
+              "host_wall_seconds": 0.010639579966664314
+            },
+            "phewas_phenotype_score_fp32": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.0006433920264244079,
+              "host_wall_seconds": 0.0005120215937495232
+            },
+            "phewas_result_d2h": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00014582400023937226,
+              "host_wall_seconds": 0.00011951662600040436
+            },
+            "phewas_score_sensitivity": {
+              "calls": 1,
+              "cuda_stream_seconds": 0.00015459200739860536,
+              "host_wall_seconds": 0.010131682269275188
+            }
+          },
+          "task_pss_sampled_highwater_bytes": 1842225152,
+          "writer_initialization_seconds": 0.09495898615568876
+        },
+        "csv_files": 16,
+        "kind": "individual",
+        "probability_metrics": {
+          "classification_errors": 0,
+          "errors_above_tolerance": 0,
+          "finite_logp_pairs": 720,
+          "finite_p_pairs": 480,
+          "infinite_logp_pairs": 0,
+          "logp_pairs": 720,
+          "max_delta_log10p": 0.0,
+          "nan_pairs": 0,
+          "p_pairs": 480,
+          "significant_errors": 0,
+          "significant_finite_pairs": 75,
+          "significant_max_delta_log10p": 0.0,
+          "zero_p_pairs": 0
+        },
+        "repetition": 1,
+        "rows": 240,
+        "runtime_speedup": 1.0918820165243668
+      }
+    ],
+    "memory_contract": "PSS is an identity-verified sampled/endpoint highwater, not an exact peak; allocated/reserved are process CUDA allocator counters, not board memory",
+    "storage_contract": "existing prepared data; operating-system storage caches were not dropped; no cold-storage claim",
+    "timing_contract": "driver wall differs from sum of job wall; stage and asynchronous IO timers are nested/overlapping and must not be summed; enqueue is not durable final CSV time",
+    "timings": {
+      "baseline": {
+        "driver_elapsed_seconds": 1425.2295438004658,
+        "jobs_runtime_and_writer_seconds": 1422.2106302976608,
+        "logical_io_delta": {
+          "rchar": 21653436126,
+          "read_bytes": 0,
+          "syscr": 245715,
+          "syscw": 9637,
+          "wchar": 12779517,
+          "write_bytes": 1007616
+        },
+        "peak_gpu_allocated_bytes": 7322561024,
+        "peak_gpu_reserved_bytes": 10546577408,
+        "sample_count": 120,
+        "sampled_task_pss_highwater_bytes": 8064818176,
+        "sampling_interval_seconds": 5.0
+      },
+      "candidate": {
+        "driver_elapsed_seconds": 544.8575212229043,
+        "jobs_runtime_and_writer_seconds": 542.7953932089731,
+        "logical_io_delta": {
+          "rchar": 21785022080,
+          "read_bytes": 0,
+          "syscr": 170087,
+          "syscw": 7439,
+          "wchar": 10600541,
+          "write_bytes": 1007616
+        },
+        "peak_gpu_allocated_bytes": 7587155456,
+        "peak_gpu_reserved_bytes": 10859053056,
+        "sample_count": 120,
+        "sampled_task_pss_highwater_bytes": 5759172608,
+        "sampling_interval_seconds": 5.0
+      }
+    }
+  },
+  "boundaries": {
+    "no_new_R_equivalence_claim": true,
+    "no_participant_trait_gene_variant_identifiers": true,
+    "not_all_disease_traits": true,
+    "not_full_genome_timing": true,
+    "prior_official_comparison_remains_separate_evidence": true
+  },
+  "date": "2026-10-14",
+  "evidence_sha256": {
+    "collected_receipt": "9fd9116a6162fd7b76d1536583c6528d3de8a1de6750bbfb202b1f01413a1982",
+    "cpu_regression_receipt": "120514ff51fa7c524d798c97e6cec975dbd68aa26950f91434c84515cd28cd42",
+    "frozen_benchmark_manifest": "24cd75914c0e3984b317decd3a87f10b496e2817f3daa85711658caf415f5714",
+    "generator": "d10b43875f6f46dcc15bfffe541932c5302a105bf3b9250e80affb0a2f084711"
+  },
+  "regressions": {
+    "cpu": {
+      "passed": 3306,
+      "seconds": 493.54,
+      "skipped": 220,
+      "subtests_passed": 204,
+      "warnings": 2
+    },
+    "cuda": {
+      "passed": 17,
+      "seconds": 4.95,
+      "skipped": 0,
+      "stdout_sha256": "1ef8cfd75b41cbb9e9ceb88a1dba0b7c718786ec03ff9e1eeaae53e657422201",
+      "subtests_passed": 0,
+      "warnings": 1
+    }
+  },
+  "schema": "binary_pipeline_io_validation_anonymous_v1",
+  "scope": {
+    "binary_traits": 16,
+    "bounded_single_job_groups": 1,
+    "full_genome_benchmark": false,
+    "gene_job_groups": 8,
+    "job_repeats_per_source": 18,
+    "maximum_actual_output_num_variant": 15351,
+    "model_refits": 0,
+    "new_genetic_cache": false,
+    "original_job_groups": 9,
+    "repetitions": 2,
+    "single_traits_with_nonempty_finite_output": 16
+  },
+  "source_sha256": {
+    "baseline": "cacef6df8e1a5ca933eb6be841273a3d217fd0461586337c50bc497e37dbb6cd",
+    "candidate": "0f863e9c4f1a59c42567315293b6e79656d86bc7e8433da36527be0ee73691cb"
+  },
+  "status": "passed",
+  "validation": {
+    "CSV_hashes_CRC_schema_rows_authenticated": true,
+    "literal_all_field_equality": true,
+    "metadata_and_NaN_infinity_classes_verified": true,
+    "new_official_R_comparison": false,
+    "probability_metrics": {
+      "classification_errors": 0,
+      "errors_above_tolerance": 0,
+      "finite_logp_pairs": 1440,
+      "finite_p_pairs": 8768,
+      "infinite_logp_pairs": 0,
+      "logp_pairs": 1440,
+      "max_delta_log10p": 0.0,
+      "nan_pairs": 0,
+      "p_pairs": 8768,
+      "significant_errors": 0,
+      "significant_finite_pairs": 400,
+      "significant_max_delta_log10p": 0.0,
+      "zero_p_pairs": 0
+    },
+    "tolerance_delta_log10p": 0.001,
+    "zero_probability_policy": "equal zero P and matching NaN/infinity are classified separately; finite log10 tolerance is not asserted for censored zero P"
+  }
+}
