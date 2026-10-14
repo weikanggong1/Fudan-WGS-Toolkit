@@ -247,3 +247,50 @@ def test_utf8_views_keep_payload_and_index_checksum_validation(portable, compone
     with PortableMetadataReader(metadata, cache) as fresh:
         with pytest.raises(ValueError, match="checksum"):
             fresh.read_field("annotation/info/Category")
+
+
+@pytest.mark.parametrize("field", ["annotation/info/Category", "annotation/info/bytes",
+                                 "annotation/info/unicode", "allele"])
+def test_utf8_ordered_requests_preserve_scalar_and_wide_fields_without_sort(portable, monkeypatch, field):
+    native, cache, metadata, _, _, _ = portable
+    axes = (np.asarray([], dtype=np.int64), np.asarray([1], dtype=np.int64),
+            np.asarray([0, 2, 5], dtype=np.int64), np.arange(6, dtype=np.int64)[::2])
+    with PortableMetadataReader(metadata, cache) as reader:
+        monkeypatch.setattr(np, "argsort", lambda *_args, **_kwargs:
+            pytest.fail("ordered UTF8 metadata request allocated an argsort"))
+        for rows in axes:
+            observed = reader.read_field(field, rows)
+            expected = native.fields[field][rows]
+            assert observed.shape == expected.shape and observed.dtype == expected.dtype
+            np.testing.assert_array_equal(observed, expected)
+            if not expected.dtype.hasobject:
+                assert observed.tobytes() == expected.tobytes()
+        counters = reader.reader_metadata["metadata_utf8_index_requests"]
+        assert counters["ordered_requests"] == len(axes)
+        assert counters["reordered_requests"] == 0
+        assert counters["reused_index_requests"] == (0 if native.fields[field].ndim > 1 else len(axes))
+
+
+@pytest.mark.parametrize("field", ["annotation/info/Category", "annotation/info/bytes",
+                                 "annotation/info/unicode", "allele"])
+def test_utf8_unordered_requests_keep_original_text_and_row_order(portable, field):
+    native, cache, metadata, _, _, _ = portable
+    with PortableMetadataReader(metadata, cache) as reader:
+        for rows in (np.asarray([5, 3, 1], dtype=np.int64), np.asarray([3, 0, 5, 1], dtype=np.int64)):
+            observed = reader.read_field(field, rows)
+            expected = native.fields[field][rows]
+            assert observed.shape == expected.shape and observed.dtype == expected.dtype
+            np.testing.assert_array_equal(observed, expected)
+            if not expected.dtype.hasobject:
+                assert observed.tobytes() == expected.tobytes()
+        assert reader.reader_metadata["metadata_utf8_index_requests"] == dict(
+            ordered_requests=0, reordered_requests=2, reused_index_requests=0)
+
+
+def test_utf8_sorted_or_unsorted_duplicate_requests_cannot_use_fast_path(portable):
+    _, cache, metadata, _, _, _ = portable
+    with PortableMetadataReader(metadata, cache) as reader:
+        for rows in ([0, 0, 2], [2, 0, 2]):
+            with pytest.raises(ValueError, match="duplicate indices"):
+                reader.read_field("annotation/info/unicode", rows)
+        assert not any(reader.reader_metadata["metadata_utf8_index_requests"].values())

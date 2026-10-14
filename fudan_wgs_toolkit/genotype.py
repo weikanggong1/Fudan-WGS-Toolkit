@@ -33,7 +33,11 @@ def _indices(values, size: int, label: str) -> np.ndarray:
     result = result.astype(np.int64, copy=False)
     if np.any(result < 0) or np.any(result >= size):
         raise IndexError(f"{label} is outside the genotype dimension")
-    if len(np.unique(result)) != len(result):
+    # Physical variant requests are usually already strictly ordered. Adjacent
+    # comparison proves uniqueness without np.unique's copied sort workspace;
+    # arbitrary request order retains the original duplicate check and order.
+    if (len(result) > 1 and not np.all(result[1:] > result[:-1])
+            and len(np.unique(result)) != len(result)):
         raise ValueError(f"{label} contains duplicate indices")
     return result
 

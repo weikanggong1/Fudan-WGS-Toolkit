@@ -171,7 +171,8 @@ class _CudaBranchMarker(torch.Tensor):
 
 
 @pytest.mark.parametrize('route', ['flag_false', 'live_admitted', 'live_refused',
-                                   'upload_oom', 'post_upload_refused'])
+                                   'upload_oom', 'post_upload_refused',
+                                   'covariance_oom', 'covariance_refused'])
 def test_real_gene_dispatch_upload_branch_reserves_new_bytes_and_keeps_complete_output(
         tmp_path, monkeypatch, cpu_product_oracle, route):
     phases, copies, future, writes, tensor_refs, covariances = [], [], [], [], [], []
@@ -215,7 +216,12 @@ def test_real_gene_dispatch_upload_branch_reserves_new_bytes_and_keeps_complete_
         def scores(genotype, models, current):
             return torch.stack(tuple(real_tensor(genotype).T@model.scaled_residuals for model in models), 1)
         def covariance(model, genotype, **kwargs):
-            assert route == 'live_admitted' and genotype.is_cuda
+            assert route in ('live_admitted','covariance_oom','covariance_refused') and genotype.is_cuda
+            if route in ('covariance_oom','covariance_refused'):
+                temporary=torch.ones(16)
+                tensor_refs.append(weakref.ref(temporary))
+                error_type=(torch.cuda.OutOfMemoryError if route=='covariance_oom' else MemoryError)
+                raise error_type('actual resident covariance fixture failure')
             result = real_covariance(model, genotype, **kwargs)
             covariances.append(result.detach().clone())
             return result
@@ -251,6 +257,11 @@ def test_real_gene_dispatch_upload_branch_reserves_new_bytes_and_keeps_complete_
         assert future[-1] == (0, 'gene_mask_released') and repository.active == 0
         if route == 'flag_false':
             assert not copies and all(phase != 'gene_genotype_upload' for _, phase in phases)
+        elif route in ('covariance_oom','covariance_refused'):
+            assert len(copies)==1 and report['gene_resident_covariance_host_fallbacks']==1
+            assert report['gene_resident_covariance_fallback_mask_retained'] is True
+            assert any(phase=='gene_resident_covariance_host_fallback' for _,phase in phases)
+            assert report['gene_resident_covariance_last_fallback_geometry']['m']==copies[0][1]
         elif route != 'live_admitted':
             assert len(copies) == (0 if route == 'live_refused' else 1)
             assert any(phase == 'gene_host_fallback' for _, phase in phases)
@@ -258,7 +269,9 @@ def test_real_gene_dispatch_upload_branch_reserves_new_bytes_and_keeps_complete_
         else:
             assert len(copies) == 1 and copies[0][1] > options.long_mask_threshold
             n, m = copies[0]
-            covariance_new = 8*n*m+32*m*m+256*2**20
+            covariance_new = runtime._gene_resident_covariance_new_bytes(n,m,p.models[0].x.shape[1],
+                has_blocks=bool(p.models[0].spectrum.blocks),
+                maximum_family_rows=max((len(rows) for rows,_ in p.models[0].spectrum.blocks),default=0))
             assert next(required for required, phase in phases if phase == 'gene_genotype_upload') >= covariance_new+4*n*m
             assert next(required for required, phase in phases if phase == 'gene_genotype_resident') >= covariance_new
 

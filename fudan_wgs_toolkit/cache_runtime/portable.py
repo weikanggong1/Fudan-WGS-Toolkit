@@ -312,6 +312,8 @@ class PortableMetadataReader:
         self._arrays, self._identities, self._validated_offsets = {}, {}, set()
         self._verify_checksums = bool(verify_checksums)
         self._metadata_reads = self._checked_files = 0
+        self._utf8_index_metrics = dict(ordered_requests=0, reordered_requests=0,
+                                       reused_index_requests=0)
         self._metadata_seconds = self._verification_seconds = 0.0
         self._sha_baseline = dict(_SHA_METRICS)
         self._sample_lookup = None
@@ -439,9 +441,22 @@ class PortableMetadataReader:
                 order = sorted_indices = None
                 request_count = flat_count
             else:
-                flat_indices = (indices[:, None] * width + np.arange(width)).reshape(-1)
-                order = np.argsort(flat_indices, kind="stable")
-                sorted_indices = flat_indices[order]
+                ordered = len(indices) < 2 or np.all(indices[1:] > indices[:-1])
+                if ordered:
+                    # Single blocks and gene masks already use physical order.
+                    # Scalar fields reuse their exact axis without expanded,
+                    # sorting or gather arrays. Wider fields retain row-major
+                    # expansion; only the redundant stable sort is omitted.
+                    order = None
+                    sorted_indices = (indices if width == 1 else
+                        (indices[:, None] * width + np.arange(width)).reshape(-1))
+                    self._utf8_index_metrics["ordered_requests"] += 1
+                    self._utf8_index_metrics["reused_index_requests"] += int(width == 1)
+                else:
+                    flat_indices = (indices[:, None] * width + np.arange(width)).reshape(-1)
+                    order = np.argsort(flat_indices, kind="stable")
+                    sorted_indices = flat_indices[order]
+                    self._utf8_index_metrics["reordered_requests"] += 1
                 request_count = len(sorted_indices)
             flat_target = target.reshape(-1)
             with path.open("rb", buffering=0) as stream:
@@ -572,6 +587,7 @@ class PortableMetadataReader:
         return dict(backend="portable_metadata_mmap", original_genotype_required=False,
             original_genotype_sdk_imported=False, genotype_sdk_fallback_count=0,
             metadata_reads=self._metadata_reads, metadata_read_seconds=self._metadata_seconds,
+            metadata_utf8_index_requests=dict(self._utf8_index_metrics),
             metadata_checked_files=self._checked_files,
             metadata_checksum_verification_seconds=self._verification_seconds,
             metadata_checksums_enabled=self._verify_checksums,

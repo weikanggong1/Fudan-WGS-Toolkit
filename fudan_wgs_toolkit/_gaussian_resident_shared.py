@@ -108,6 +108,11 @@ class SharedGaussianResidentPreparation(AbstractContextManager):
             rotated = None  # A diagonal spectrum borrows the existing G.
         return _storage_bytes((rotated, self._cross_output))
 
+    @property
+    def rotation_ready(self):
+        """A live optional rotation, not a promise a later model can borrow it."""
+        return self._rotated is not None and self._source_unchanged()
+
     def _peak(self):
         self._metrics['peak_storage_bytes'] = max(self._metrics['peak_storage_bytes'], self.storage_bytes)
 

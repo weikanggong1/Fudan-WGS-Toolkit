@@ -938,16 +938,30 @@ def _evaluate_gaussian_gene_score(pipeline, payload, model, genotype, broker,
     return result
 
 
-def _gaussian_covariance(model, genotype, *, rotated=None, cross=None):
+def _gaussian_covariance(model, genotype, *, rotated=None, cross=None,
+                         allocation_guard=None, report=None):
     """Original fitted covariance formula, with the shared score supplied separately."""
     from ..tf32 import matmul
-    if rotated is None:
-        rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
-    if cross is None:
-        cross = matmul(model.precision_x.T, genotype, mode='tf32')
-    covariance = (matmul(rotated.T, model.inverse_variance[:, None]*rotated, mode='tf32')
-                  - matmul(matmul(cross.T, model.fixed_effect_covariance, mode='tf32'), cross, mode='tf32'))
-    return (covariance+covariance.T)/2
+    from .._gaussian_covariance_resident import (MAXIMUM_WEIGHTED_BYTES, panel_width,
+                                               resident_gaussian_covariance)
+    n,m=map(int,genotype.shape)
+    try:
+        if (allocation_guard is not None and 4*n*m > MAXIMUM_WEIGHTED_BYTES
+                and panel_width(n,m) is not None):
+            return resident_gaussian_covariance(model,genotype,rotated=rotated,cross=cross,
+                allocation_guard=allocation_guard,report=report)
+        if allocation_guard is not None:
+            copies=1+int(rotated is None and bool(model.spectrum.blocks))
+            allocation_guard(4*n*m*copies+32*m*m+256*2**20,phase='gene_covariance')
+        if rotated is None:
+            rotated = model.spectrum.rotate(genotype, matmul_mode='tf32')
+        if cross is None:
+            cross = matmul(model.precision_x.T, genotype, mode='tf32')
+        covariance = (matmul(rotated.T, model.inverse_variance[:, None]*rotated, mode='tf32')
+                      - matmul(matmul(cross.T, model.fixed_effect_covariance, mode='tf32'), cross, mode='tf32'))
+        return (covariance+covariance.T)/2
+    finally:
+        rotated=cross=covariance=model=genotype=allocation_guard=report=None
 
 
 def _blocked_gaussian_covariance(model, host, broker, variant_tile_size=512,
@@ -1023,6 +1037,23 @@ def _gene_host_covariance_new_bytes(n, m, q, options):
     cached = cached_workspace_estimate(n, m, q, variant_tile_size=512,
                                       panel_variant_size=512)['new_storage_bytes']
     return max(blocked, cached)
+
+
+def _gene_resident_covariance_new_bytes(n,m,q,*,has_blocks=True,maximum_family_rows=0,
+                                       rotation_ready=False):
+    """Use the actual bounded weighted route, never credit cached input bytes.
+
+    A cached rotation is already in allocated memory. Individual fitted models
+    still run their fresh admission before allocating a different rotation.
+    ``maximum_family_rows`` is a geometry estimate for initial G upload; the
+    actual model replaces it before any rotated/weighted output is allocated.
+    """
+    from .._gaussian_covariance_resident import (MAXIMUM_WEIGHTED_BYTES,
+                                               panel_width,covariance_new_bytes)
+    if 4*n*m>MAXIMUM_WEIGHTED_BYTES and panel_width(n,m) is not None:
+        rotation_new=(4*n*m+16*maximum_family_rows*m if has_blocks and not rotation_ready else 0)
+        return covariance_new_bytes(n,m,q,rotation_new_bytes=rotation_new)
+    return 4*n*m*(1+int(has_blocks and not rotation_ready))+32*m*m+256*2**20
 
 
 class _DirectWorkspace:
@@ -1498,7 +1529,12 @@ def _gene_preparation_geometry(repository, descriptor, broker, metadata, verifie
                 raise ValueError('repository acquire must retain requested model count')
             model = models[0]
             _check_model(model, descriptor, metadata, verified)
-            return SimpleNamespace(n=model.n, device=model.device, use_spa=False), int(model.x.shape[1])
+            spectrum=getattr(model,'spectrum',None)
+            blocks=getattr(spectrum,'blocks',())
+            return SimpleNamespace(n=model.n, device=model.device, use_spa=False,
+                gaussian_rotation_geometry_known=model.family=='gaussian' and spectrum is not None,
+                gaussian_has_blocks=bool(blocks),
+                gaussian_maximum_family_rows=max((len(rows) for rows,_ in blocks),default=0)), int(model.x.shape[1])
     except BaseException as error:
         _clear_inactive_exception_frames(error)
         raise
@@ -1574,7 +1610,12 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                          4*m*m+tail_new, host_score_new) if has_gaussian else
                             _binary_gene_workspace_new_bytes(n, m, q, len(prepared['names']),
                                                              resident_genotype=False))
-                        device_peak = (max(8*genotype_elements+32*m*m+256*2**20,
+                        resident_covariance_new=(_gene_resident_covariance_new_bytes(n,m,q,
+                            has_blocks=preparation_model.gaussian_has_blocks,
+                            maximum_family_rows=preparation_model.gaussian_maximum_family_rows)
+                            if getattr(preparation_model,'gaussian_rotation_geometry_known',False)
+                            else 8*genotype_elements+32*m*m+256*2**20)
+                        device_peak = (max(resident_covariance_new,
                                            4*m*m+tail_new, device_score_new) if has_gaussian else
                             _binary_gene_workspace_new_bytes(n, m, q, len(prepared['names'])))
                         # Existing device G is already counted by live admission.
@@ -1685,6 +1726,14 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                             tile_peak = (device_peak if isinstance(genotype, torch.Tensor) and genotype.is_cuda
                                          else host_peak)
                             for begin in range(0, len(group['descriptors']), trait_batch_size):
+                                if (isinstance(genotype,torch.Tensor) and genotype.is_cuda
+                                        and getattr(preparation_model,'gaussian_rotation_geometry_known',False)):
+                                    tile_peak=max(_gene_resident_covariance_new_bytes(n,m,q,
+                                        has_blocks=preparation_model.gaussian_has_blocks,
+                                        maximum_family_rows=preparation_model.gaussian_maximum_family_rows,
+                                        rotation_ready=bool(resident_prep is not None
+                                            and getattr(resident_prep,'rotation_ready',False))),
+                                        4*m*m+tail_new,device_score_new)
                                 workspace.set_required(tile_peak, phase='gene_trait_tile')
                                 tile = group['descriptors'][begin:begin+trait_batch_size]
                                 with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
@@ -1810,29 +1859,67 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                                                        +32*m*m+256*2**20
                                                        if isinstance(genotype, torch.Tensor) and genotype.is_cuda
                                                        else _gene_host_covariance_new_bytes(n, m, model.x.shape[1], options))
-                                            if resident_prep is None or not (isinstance(genotype, torch.Tensor) and genotype.is_cuda):
+                                            if not (isinstance(genotype, torch.Tensor) and genotype.is_cuda):
                                                 admit_gene_phase(max(cov_new, 4*m*m+tail_new), phase='gene_covariance')
                                             if isinstance(genotype, torch.Tensor) and genotype.is_cuda:
                                                 copies = 2 if model.spectrum.blocks else 1
-                                                with p.profiler.measure('gene_covariance', gpu=True):
-                                                    if resident_prep is None:
-                                                        admit_gene_phase(4*genotype_elements*copies + 32*m*m + 256*2**20,
-                                                            phase='gene_covariance', broker_guard=True)
-                                                        covariance = _gaussian_covariance(model, genotype)
-                                                    else:
-                                                        with resident_prep.pin():
-                                                            rotated = resident_prep.rotated_for(model)
-                                                            # A borrowed shared rotation is already allocated.
-                                                            # Its pin prevents pressure recovery from releasing
-                                                            # it between this NEW-byte check and consumption.
-                                                            copies = 1 if rotated is not None else copies
-                                                            required = 4*genotype_elements*copies+32*m*m+256*2**20
-                                                            admit_gene_phase(max(required,4*m*m+tail_new),phase='gene_covariance')
-                                                            admit_gene_phase(required, phase='gene_covariance', broker_guard=True)
+                                                def resident_covariance_admission(required, *, phase):
+                                                    # Inputs already allocated (G/R/C and any queued tails)
+                                                    # stay in the allocator count. Replace only NEW storage.
+                                                    admit_gene_phase(max(required, tail_new), phase=phase)
+                                                    broker._guard(required)
+                                                try:
+                                                    with p.profiler.measure('gene_covariance', gpu=True):
+                                                        if resident_prep is None:
                                                             covariance = _gaussian_covariance(model, genotype,
-                                                                rotated=rotated,
-                                                                cross=resident_crosses[gauss_columns[ti]])
-                                                            rotated = None
+                                                                allocation_guard=resident_covariance_admission,
+                                                                report=report)
+                                                        else:
+                                                            with resident_prep.pin():
+                                                                rotated = resident_prep.rotated_for(model)
+                                                                # A borrowed rotation is already live and pinned.
+                                                                covariance = _gaussian_covariance(model, genotype,
+                                                                    rotated=rotated,
+                                                                    cross=resident_crosses[gauss_columns[ti]],
+                                                                    allocation_guard=resident_covariance_admission,
+                                                                    report=report)
+                                                                rotated = None
+                                                except (MemoryError, torch.cuda.OutOfMemoryError) as error:
+                                                    # Total available bytes cannot promise one large allocator
+                                                    # block. Retire the failed NEW tensors before the original
+                                                    # full mask is retried through bounded host panels.
+                                                    _clear_inactive_exception_frames(error)
+                                                    rotated = covariance = resident_crosses = None
+                                                    if resident_prep is not None:
+                                                        resident_prep.release_unpinned()
+                                                    flush_complete_tail_window()
+                                                    if resident_prep is not None:
+                                                        resident_prep.close()
+                                                        resident_prep = None
+                                                    if isinstance(host, torch.Tensor):
+                                                        _prepare_host_guard(prototype, SimpleNamespace(n=n), m)
+                                                        host = host.detach().cpu().numpy()
+                                                        prepared.pop('_genotype_device')
+                                                        prepared['_genotype_host'] = host
+                                                        if callable(set_future):
+                                                            set_future(0, phase='gene_covariance_host_materialized')
+                                                    genotype = host
+                                                    tile_peak = host_peak
+                                                    admit_gene_phase(max(host_peak,4*m*m+tail_new),
+                                                        phase='gene_resident_covariance_host_fallback')
+                                                    report['gene_resident_covariance_host_fallbacks'] = report.get(
+                                                        'gene_resident_covariance_host_fallbacks',0)+1
+                                                    report['gene_resident_covariance_fallback_mask_retained'] = True
+                                                    report['gene_resident_covariance_last_fallback_geometry'] = dict(
+                                                        n=n,m=m,panel_columns=options.variant_tile_size or 512,
+                                                        route='original_complete_host_panels',
+                                                        retry_reason=type(error).__name__,variants_removed=False)
+                                                    with p.profiler.measure('gene_covariance_host_fallback', gpu=True):
+                                                        covariance = _blocked_gaussian_covariance(model,host,broker,
+                                                            variant_tile_size=options.variant_tile_size or 512,
+                                                            profiler=p.profiler,report=report)
+                                                finally:
+                                                    rotated = resident_covariance_admission = None
                                             else:
                                                 # Cached/tiled covariance is fitted-model specific;
                                                 # only G IO and phenotype-score GEMM are shared.

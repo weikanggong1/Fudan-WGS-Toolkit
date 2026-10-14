@@ -137,13 +137,13 @@ def test_mask_scope_closes_models_preparations_and_reader_after_real_runtime_dis
         return output
     monkeypatch.setattr(runtime, '_blocked_gaussian_covariance', blocked_covariance)
     real_covariance = runtime._gaussian_covariance
-    def covariance(model, genotype, *, rotated=None, cross=None):
+    def covariance(model, genotype, *, rotated=None, cross=None, **kwargs):
         if rotated is not None:
             tensor_refs.append(weakref.ref(rotated))
         observed.append((model, rotated is not None, cross is not None))
         # Retain only a weak model marker in the external observation.
         observed[-1] = (weakref.ref(model), rotated is not None, cross is not None)
-        output = real_covariance(model, genotype, rotated=rotated, cross=cross)
+        output = real_covariance(model, genotype, rotated=rotated, cross=cross, **kwargs)
         tensor_refs.append(weakref.ref(output))
         if failure == 'covariance': raise ValueError('injected covariance failure')
         return output
