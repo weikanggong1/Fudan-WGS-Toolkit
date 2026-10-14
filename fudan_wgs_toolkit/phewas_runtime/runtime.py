@@ -1322,6 +1322,31 @@ class _StagedGeneWriter:
         self.pending.clear()
 
 
+def _durable_event_emitter(writer, callback):
+    """Publish progress on the producer thread only after durable output ACK."""
+    poll = getattr(writer, 'poll_durable_events', None)
+    defer = getattr(writer, 'defer_completion', None)
+    asynchronous = callable(poll) and callable(defer)
+    def drain():
+        if asynchronous:
+            for item in poll():
+                if callback is not None:
+                    callback(item)
+    def emit(item):
+        drain()
+        if asynchronous and item.get('event') == 'finished':
+            try:
+                defer(item)
+            except BufferError:
+                writer.flush()
+                drain()
+                defer(item)
+            drain()
+        elif callback is not None:
+            callback(item)
+    return emit if callback is not None or asynchronous else None, drain
+
+
 def _scientific_counter_snapshot(report, trait_indices=None):
     snapshot = {key: deepcopy(report[key]) for key in
                 ('association_rows', 'binary_spa_selected', 'binary_spa_failed', 'job_groups') if key in report}
@@ -1372,7 +1397,12 @@ def _execute_batched_job(attempt, *, configuration, host_memory_lease_factory,
                         report[key] = deepcopy(value)
                 staged.pending.clear()
             if deferred is None:
-                staged.publish(writer)
+                profiler = configuration.get('_stage_profiler')
+                if profiler is None:
+                    staged.publish(writer)
+                else:
+                    with profiler.measure('gene_output_publish_enqueue'):
+                        staged.publish(writer)
                 return
             # This point is outside the except block and the lease context.
             # Release partial arrays first, then optional cache owners. Keep
@@ -1716,7 +1746,7 @@ def _batched_gene(groups, repository, broker, metadata, options, configuration, 
                     result = ({category: rows[number] for category, rows in outputs.items()}
                               if isinstance(outputs, dict) else outputs[number])
                     values.append((descriptor['trait_index'], result))
-                with selector.profiler.measure('gene_checkpoint_write'):
+                with selector.profiler.measure('gene_result_stage'):
                     writer.write_tile(kind, chromosome, values, job_index=job_index,
                         binary_counts={name: sum(binary_counts[d['trait_index']][name] for d in tile)
                                        for name in ('selected', 'failed')})
@@ -1778,6 +1808,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         torch.cuda.reset_peak_memory_stats(device)
         budget = _resolved_budget(memory_limit_gib, device)
         configuration = dict(configuration)
+        emit, drain_durable_events = _durable_event_emitter(writer, emit)
         from .._fastskat_lobpcg_tiles import lobpcg_pool_scope
         lobpcg_owner = repository_policy.enter_context(lobpcg_pool_scope(
             max_workers=2, owner=configuration.get('_association_lobpcg_owner')))
@@ -1975,6 +2006,14 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
                 report['dense_product_audit'] = audit.report()
         if report['job_groups'] == 0:
             raise ValueError('batched PheWAS requires a nonempty chromosome/job schedule')
+        flush_output = getattr(writer, 'flush', None)
+        if callable(flush_output):
+            with profiler.measure('output_durability_barrier'):
+                flush_output()
+            drain_durable_events()
+        with profiler.measure('output_finish_durability_and_readback'):
+            final_output = writer.finish()
+        drain_durable_events()
         report.update(total_seconds=time.perf_counter()-start, memory_limit_gib=budget,
             memory_limit_source='physical device total' if memory_limit_gib is None else 'explicit caller budget',
             live_memory_reserve_bytes=memory_reserve_bytes, single_execution=single_metadata(),
@@ -1985,7 +2024,7 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
             gpu_memory=_gpu_memory_diagnostics(device, model_repository),
             cpu_thread_control=dict(requested=cpu_threads, effective=torch.get_num_threads(), previous=previous_threads,
                                     restored=True, scope='pytorch_intraop'),
-            output=writer.finish(), stage_profile=profiler.report(), resource_samples=memory_samples,
+            output=final_output, stage_profile=profiler.report(), resource_samples=memory_samples,
             resource_samples_scope='bounded 120 throttled owned-process endpoints; not additive with allocator or cgroup usage')
         if callable(getattr(model_repository, 'summary', None)):
             report['model_repository'] = model_repository.summary()

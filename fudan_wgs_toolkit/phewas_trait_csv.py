@@ -294,6 +294,9 @@ class PerTraitCheckpointCSVWriter:
         # Only handles with unsynchronized bytes need a durability barrier at
         # eviction/close. Successful member appends have already crossed it.
         self._dirty_streams = set()
+        self._batch = None
+        self.durability_profile = dict(data_fsync_calls=0, tile_commit_transactions=0,
+            registration_transactions=0, batch_calls=0, batch_tiles=0, maximum_batch_tiles=0)
         self._recovered_traits = set()
         self._owned_traits = set()
         self.reused_blocks = self.computed_blocks = 0
@@ -479,7 +482,10 @@ class PerTraitCheckpointCSVWriter:
         if raw is not None:
             try:
                 if file_id in self._dirty_streams:
-                    raw.flush(); os.fsync(raw.fileno())
+                    raw.flush()
+                    if self._batch is None:
+                        os.fsync(raw.fileno())
+                        self.durability_profile['data_fsync_calls'] += 1
             finally:
                 try:
                     raw.close()
@@ -516,11 +522,35 @@ class PerTraitCheckpointCSVWriter:
 
     def _ensure_file(self, trait, kind, chromosome, columns):
         file_id, relative = self._file_identity(trait,kind,chromosome,columns)
+        if self._batch is not None:
+            prior = self._batch['files'].get(file_id)
+            if prior is not None:
+                if prior['columns'] != columns:
+                    raise CommittedCSVCorruption('canonical CSV schema signature collision')
+                return prior
+            row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
+            if row is None:
+                info = self._file((file_id,trait,kind,chromosome,relative,_canonical(columns),0,0,None,None))
+                # A prior crash may have created this deterministic path before
+                # its registration transaction became durable. Preserve/truncate
+                # that orphan suffix before treating the new file as empty.
+                if self._actual_path(info).exists():
+                    self._recover_tail(info)
+                self._batch['new_files'][file_id] = info.copy()
+            else:
+                info = self._file(row)
+            if info['columns'] != columns:
+                raise CommittedCSVCorruption('canonical CSV schema signature collision')
+            self._batch['files'][file_id] = info
+            self._batch['original'][file_id] = info.copy()
+            return info
         row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
         if row is None:
             self.db.execute('INSERT OR IGNORE INTO files(id,trait,kind,chromosome,relative_path,columns_json) VALUES(?,?,?,?,?,?)',
                 (file_id,trait,kind,chromosome,relative,_canonical(columns)))
             info = self._file_info(file_id)
+            if self._actual_path(info).exists():
+                self._recover_tail(info)
         else:
             info = self._file(row)
         if info['columns'] != columns:
@@ -551,6 +581,9 @@ class PerTraitCheckpointCSVWriter:
             if any(not isinstance(column, str) or not column for column in columns):
                 continue
             file_id, relative = self._file_identity(trait, kind, chromosome, columns)
+            if self._batch is not None:
+                files[file_id] = self._ensure_file(trait,kind,chromosome,columns)
+                continue
             row = self.db.execute('SELECT * FROM files WHERE id=?', (file_id,)).fetchone()
             if row is None:
                 missing.append((file_id, trait, kind, chromosome, relative, _canonical(columns)))
@@ -560,6 +593,7 @@ class PerTraitCheckpointCSVWriter:
                     raise CommittedCSVCorruption('canonical CSV schema signature collision')
                 files[file_id] = info
         if missing:
+            self.durability_profile['registration_transactions'] += 1
             self.db.execute('BEGIN IMMEDIATE')
             try:
                 self.db.executemany('''INSERT OR IGNORE INTO files
@@ -570,6 +604,9 @@ class PerTraitCheckpointCSVWriter:
                         raise CommittedCSVCorruption('canonical CSV schema signature collision')
                     files[item[0]] = info
                 self.db.execute('COMMIT')
+                for item in missing:
+                    if self._actual_path(files[item[0]]).exists():
+                        self._recover_tail(files[item[0]])
             except BaseException:
                 if self.db.in_transaction:
                     self.db.execute('ROLLBACK')
@@ -622,8 +659,13 @@ class PerTraitCheckpointCSVWriter:
                         output.writerow(info['columns'])
                     count,selected,failed = _write_bound_trait_rows(
                         output,rows,trait_index,info['columns'][1:])
-        raw.flush(); os.fsync(raw.fileno())
-        self._dirty_streams.discard(info['id'])
+        raw.flush()
+        if self._batch is None:
+            os.fsync(raw.fileno())
+            self.durability_profile['data_fsync_calls'] += 1
+            self._dirty_streams.discard(info['id'])
+        else:
+            self._batch['dirty'].add(info['id'])
         return dict(file_id=info['id'],start=start,end=start+hashing.size,rows=count,
                     header=int(start==0),sha256=hashing.digest.hexdigest()), selected, failed
 
@@ -725,39 +767,119 @@ class PerTraitCheckpointCSVWriter:
         return record
 
     def _commit_tile(self, token, record, ranges, before):
+        self._commit_tiles([(token,record,ranges,before)])
+
+    def _commit_tiles(self, tiles, new_files=()):
+        """Publish already-synchronized member ranges in one FULL transaction."""
         self.db.execute('BEGIN IMMEDIATE')
         try:
-            if self.db.execute('SELECT 1 FROM blocks WHERE token=?',(token,)).fetchone():
-                raise RuntimeError('scientific tile was committed by another owner')
-            ends,rows = {},{}
-            for ordinal,item in enumerate(ranges):
-                file_id = item['file_id']
-                expected = ends.get(file_id,before[file_id])
-                if item['start'] != expected:
-                    raise RuntimeError('scientific tile member ranges are not contiguous')
-                ends[file_id] = item['end']; rows[file_id] = rows.get(file_id,0)+item['rows']
-                self.db.execute('INSERT INTO ranges VALUES(?,?,?,?,?,?,?,?)',
-                    (token,ordinal,file_id,item['start'],item['end'],item['rows'],item['header'],item['sha256']))
-            for file_id,end in ends.items():
-                changed = self.db.execute('''UPDATE files SET committed_end=?,rows=rows+?,
-                    first_job=COALESCE(first_job,?),last_job=? WHERE id=? AND committed_end=?''',
-                    (end,rows[file_id],record['first_job'],record['last_job'],file_id,before[file_id])).rowcount
-                if changed != 1:
-                    raise RuntimeError('canonical CSV committed endpoint changed during tile commit')
-            self.db.execute('INSERT INTO blocks VALUES(?,?,?,?,?,?,?)',
-                (token,self.worker_id,self.invocation,record['kind'],record['rows'],_canonical(record),record['receipt_sha256']))
-            self.db.execute('INSERT INTO visits VALUES(?,?,0)',(self.invocation,token))
+            for info in new_files:
+                self.db.execute('''INSERT INTO files
+                    (id,trait,kind,chromosome,relative_path,columns_json) VALUES(?,?,?,?,?,?)''',
+                    (info['id'],info['trait'],info['kind'],info['chromosome'],info['relative_path'],_canonical(info['columns'])))
+            for token,record,ranges,before in tiles:
+                if self.db.execute('SELECT 1 FROM blocks WHERE token=?',(token,)).fetchone():
+                    raise RuntimeError('scientific tile was committed by another owner')
+                ends,rows = {},{}
+                for ordinal,item in enumerate(ranges):
+                    file_id = item['file_id']
+                    expected = ends.get(file_id,before[file_id])
+                    if item['start'] != expected:
+                        raise RuntimeError('scientific tile member ranges are not contiguous')
+                    ends[file_id] = item['end']; rows[file_id] = rows.get(file_id,0)+item['rows']
+                    self.db.execute('INSERT INTO ranges VALUES(?,?,?,?,?,?,?,?)',
+                        (token,ordinal,file_id,item['start'],item['end'],item['rows'],item['header'],item['sha256']))
+                for file_id,end in ends.items():
+                    changed = self.db.execute('''UPDATE files SET committed_end=?,rows=rows+?,
+                        first_job=COALESCE(first_job,?),last_job=? WHERE id=? AND committed_end=?''',
+                        (end,rows[file_id],record['first_job'],record['last_job'],file_id,before[file_id])).rowcount
+                    if changed != 1:
+                        raise RuntimeError('canonical CSV committed endpoint changed during tile commit')
+                self.db.execute('INSERT INTO blocks VALUES(?,?,?,?,?,?,?)',
+                    (token,self.worker_id,self.invocation,record['kind'],record['rows'],_canonical(record),record['receipt_sha256']))
+                self.db.execute('INSERT INTO visits VALUES(?,?,0)',(self.invocation,token))
             self.db.execute('COMMIT')
+            self.durability_profile['tile_commit_transactions'] += 1
         except BaseException:
             if self.db.in_transaction:
                 self.db.execute('ROLLBACK')
             raise
+
+    def _sync_batch_files(self):
+        """One data fsync per affected file, including evicted append handles."""
+        for file_id in sorted(self._batch['dirty']):
+            raw = self.streams.get(file_id)
+            if raw is not None:
+                raw.flush(); os.fsync(raw.fileno())
+            else:
+                # Dirty eviction closes/flushed the append handle without
+                # claiming durability; retain this bounded file identity until
+                # the whole batch crosses the durability barrier.
+                info = self._batch['files'][file_id]
+                with self._actual_path(info).open('rb') as source:
+                    os.fsync(source.fileno())
+            self.durability_profile['data_fsync_calls'] += 1
+            self._dirty_streams.discard(file_id)
+
+    def write_tiles(self, tiles):
+        """Atomically commit up to 256 FIFO tiles; receipts are durable on return.
+
+        Gzip members and scientific range checksums stay per tile. The batch
+        creates initial file registrations in the same short SQL transaction
+        as all ranges/blocks/visits, after every file has been synchronized.
+        There is no SQLite write transaction spanning CSV compression or IO.
+        Any failed append/fsync/commit preserves then truncates the entire
+        uncommitted suffix, leaving all earlier durable tiles unchanged.
+        """
+        self._require_open()
+        if self._batch is not None:
+            raise RuntimeError('canonical CSV batches cannot be nested')
+        values = list(tiles)
+        if len(values)>256:
+            raise ValueError('canonical CSV batch exceeds 256 tiles')
+        if not values:
+            return []
+        started, prior_seconds = time.perf_counter(), self.write_seconds
+        self._batch = dict(files={},new_files={},original={},dirty=set(),tiles=[],tokens={})
+        try:
+            receipts = [self.write_tile(**tile) for tile in values]
+            self._sync_batch_files()
+            pending = self._batch['tiles']
+            if pending:
+                self._commit_tiles(pending,self._batch['new_files'].values())
+                self.computed_blocks += len(pending)
+            self.durability_profile['batch_calls'] += 1
+            self.durability_profile['batch_tiles'] += len(pending)
+            self.durability_profile['maximum_batch_tiles'] = max(
+                self.durability_profile['maximum_batch_tiles'],len(pending))
+            self.write_seconds = prior_seconds + time.perf_counter()-started
+            return receipts
+        except BaseException as error:
+            # Cached endpoints are virtual within this batch. Only the copied
+            # original ledger endpoints are legal recovery/truncation limits.
+            for original in self._batch['original'].values():
+                try:
+                    # A COMMIT may have succeeded before an exception reached
+                    # its caller. The authoritative DB prefix then wins over
+                    # the pre-batch fallback, just as for write_tile failures.
+                    row = self.db.execute('SELECT * FROM files WHERE id=?',(original['id'],)).fetchone()
+                    self._recover_tail(self._file(row) if row is not None else original)
+                except BaseException as cleanup:
+                    _note(error,f'uncommitted CSV batch cleanup also failed: {type(cleanup).__name__}: {cleanup}')
+            raise
+        finally:
+            self._batch = None
 
     def write_tile(self, kind, chromosome, trait_results, *, job_index, block_index=0,
                    block_identity=None, ordinal_before=None, ordinal_after=None, binary_counts=None):
         self._require_open(); started = time.perf_counter()
         values = list(trait_results)
         key,token = self._key(kind,chromosome,job_index,[i for i,_ in values],block_index)
+        if self._batch is not None and token in self._batch['tokens']:
+            prior = self._batch['tokens'][token]
+            if prior['block_identity'] != block_identity or prior['ordinal_before'] != ordinal_before:
+                raise CommittedCSVCorruption('pending tile identity differs')
+            return prior
         if kind=='individual':
             if not _nonnegative(ordinal_before) or not _nonnegative(ordinal_after) or ordinal_after<ordinal_before:
                 raise ValueError('Single checkpoint requires nonnegative ordered ordinal endpoints')
@@ -825,13 +947,25 @@ class PerTraitCheckpointCSVWriter:
                 binary_spa_selected=selected if binary_counts is None else binary_counts['selected'],
                 binary_spa_failed=failed if binary_counts is None else binary_counts['failed'])
             record['receipt_sha256'] = _sha(record)
-            self._commit_tile(token,record,ranges,before)
-            self.computed_blocks += 1
+            if self._batch is None:
+                self._commit_tile(token,record,ranges,before)
+                self.computed_blocks += 1
+            else:
+                self._batch['tiles'].append((token,record,ranges,before))
+                self._batch['tokens'][token] = record
+                for item in ranges:
+                    info = self._batch['files'][item['file_id']]
+                    info['committed_end'] = item['end']
+                    info['rows'] += item['rows']
+                    info['first_job'] = job_index if info['first_job'] is None else info['first_job']
+                    info['last_job'] = job_index
             self.write_seconds += time.perf_counter()-started
             # Durable append/commit is not a readback. Resume authenticates the
             # existing ranges before skipping; finish reads each whole CSV once.
             return record
         except BaseException as error:
+            if self._batch is not None:
+                raise
             # This also handles a failure half way through a multi-trait tile.
             # A committed record stays intact; only uncommitted suffixes retire.
             for file_id in before:
@@ -932,7 +1066,8 @@ class PerTraitCheckpointCSVWriter:
             invalid_blocks_recomputed=0,write_seconds=self.write_seconds,
             checkpoint_database=str(self.database_path.relative_to(self.directory)),
             committed_range_checksums_verified=True,uncommitted_suffixes_never_reused=True,
-            maximum_open_append_streams=self.max_open,verification_cache_bound=self.verification_cache_size)
+            maximum_open_append_streams=self.max_open,verification_cache_bound=self.verification_cache_size,
+            durability_profile=dict(self.durability_profile))
         atomic_json(self.directory/f'worker_{self.worker_id}.complete.private.json',result)
         self._finished = result
         self.close()

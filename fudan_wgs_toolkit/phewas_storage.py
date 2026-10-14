@@ -601,6 +601,7 @@ class ModelRepository:
         self._file_verification_baseline = dict(_FILE_VERIFICATION_METRICS)
         self.spa_sources, self.spa_pinned = OrderedDict(), {}
         self.spa_source_loads = self.spa_source_hits = 0
+        self.spa_projection_cache_builds = self.spa_projection_cache_hits = 0
         self.loads = self.hits = self.evictions = 0
         self._descriptors = []
         self._descriptors_by_index = {}
@@ -784,6 +785,8 @@ class ModelRepository:
             elif isinstance(current, (tuple, list)):
                 for item in current:
                     visit(item)
+            elif callable(getattr(current, 'explicit_storage_owners', None)):
+                visit(current.explicit_storage_owners())
             elif hasattr(current, '_tensors'):
                 visit(current._tensors)
             elif hasattr(current, '__dict__') and not isinstance(current, np.ndarray):
@@ -1207,9 +1210,17 @@ class ModelRepository:
     @contextmanager
     def acquire_spa(self, index, device):
         with self._acquire_binary_source(int(index), device) as source:
-            self._admit(device, fitted_bytes=_binary_derivation_peak_bytes(source, spa=True),
-                        phase='binary_spa_derivation')
-            model = source.spa()
+            hit = source.spa_projection_cached()
+            self._admit(device,
+                        fitted_bytes=0 if hit else _binary_derivation_peak_bytes(source, spa=True),
+                        phase='binary_spa_projection_cache_hit' if hit else 'binary_spa_derivation')
+            model = source.spa(cache_projection=True)
+            key = (int(index), str(device))
+            self._refresh_entry('spa', key)
+            if hit:
+                self.spa_projection_cache_hits += 1
+            else:
+                self.spa_projection_cache_builds += 1
             try:
                 yield model
             finally:
@@ -1253,7 +1264,7 @@ class ModelRepository:
                 visit(vars(value))
         visit(self.models)
         for source in self.spa_sources.values():
-            visit(getattr(source, '_tensors', source))
+            visit(source.explicit_storage_owners())
         totals = {}
         for (device, _), size in storages.items():
             totals[device] = totals.get(device, 0)+size
@@ -1270,6 +1281,9 @@ class ModelRepository:
                     resident_models=len(self.models), workspace_bytes=self.workspace_bytes,
                     spa_source_loads=self.spa_source_loads, spa_source_hits=self.spa_source_hits,
                     resident_spa_sources=len(self.spa_sources), spa_projection_reconstructed_on_gpu=True,
+                    spa_projection_cache_builds=self.spa_projection_cache_builds,
+                    spa_projection_cache_hits=self.spa_projection_cache_hits,
+                    spa_projection_cache_policy='source_version_device_bound_shared_lru',
                     binary_normal_from_same_fp64_source=self.binary_normal_cache == 'derived_fp64',
                     binary_normal_cache_policy=self.binary_normal_cache,
                     binary_normal_derivations=self.binary_normal_derivations,

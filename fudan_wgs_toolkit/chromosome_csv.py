@@ -7,6 +7,7 @@ import re
 
 from .phewas_storage import atomic_json
 from .phewas_trait_csv import PerTraitCheckpointCSVWriter
+from .phewas_async_writer import AsyncPerTraitCheckpointCSVWriter
 from .worker_file_resources import FileDescriptorTelemetry
 
 _KINDS = ('individual', 'coding', 'noncoding', 'ncrna')
@@ -25,7 +26,9 @@ class ChromosomeCheckpointCSVWriter:
     output_layout = 'per_trait'
 
     def __init__(self, directory, *, binding, chromosomes, resume=False,
-                 worker_id='0', minimum_free_bytes=0, file_descriptor_admission=None):
+                 worker_id='0', minimum_free_bytes=0, file_descriptor_admission=None,
+                 asynchronous=False, pending_bytes_limit=64*2**20,
+                 batch_tiles=32, flush_interval_seconds=2.):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.chromosomes = [str(name) for name in chromosomes]
@@ -35,6 +38,10 @@ class ChromosomeCheckpointCSVWriter:
         self.binding, self.resume = binding, resume
         self.worker_id, self.minimum_free_bytes = str(worker_id), minimum_free_bytes
         self.current, self.current_name = None, None
+        self.asynchronous = asynchronous
+        self.output_options = dict(pending_bytes_limit=pending_bytes_limit,
+            batch_tiles=batch_tiles, flush_interval_seconds=flush_interval_seconds)
+        self._durable_events = []
         self.outputs, self.completed = [], []
         self._finished, self._closed = None, False
         self.telemetry = (None if file_descriptor_admission is None
@@ -44,6 +51,9 @@ class ChromosomeCheckpointCSVWriter:
         if self.current is None:
             return
         result = self.current.finish()
+        poll = getattr(self.current, 'poll_durable_events', None)
+        if callable(poll):
+            self._durable_events.extend(poll())
         prefix = Path('chromosomes')/f'chr{self.current_name}'
         # Receipts remain relative to the common csv root, allowing the same
         # final export logic to consume single-card and multi-card reports.
@@ -68,26 +78,45 @@ class ChromosomeCheckpointCSVWriter:
             raise ValueError('chromosome CSV callbacks differ from the assigned ordered schedule')
         self._finish_current()
         # Stable scientific owner excludes GPU/worker placement entirely.
-        self.current = PerTraitCheckpointCSVWriter(self.directory/'chromosomes'/f'chr{name}',
+        factory = AsyncPerTraitCheckpointCSVWriter if self.asynchronous else PerTraitCheckpointCSVWriter
+        self.current = factory(self.directory/'chromosomes'/f'chr{name}',
             binding=self.binding, resume=self.resume, worker_id=f'chr{name}',
-            minimum_free_bytes=self.minimum_free_bytes)
+            minimum_free_bytes=self.minimum_free_bytes,
+            **(dict(self.output_options, consumer_observer=(
+                None if self.telemetry is None else lambda: self.telemetry.sample(force=True)))
+               if self.asynchronous else {}))
         self.current_name = name
         return self.current
 
     def checkpoint_tile(self, kind, chromosome, job_index, trait_indices, **options):
         result = self._for(chromosome).checkpoint_tile(kind, chromosome, job_index, trait_indices, **options)
-        if self.telemetry is not None:
+        if self.telemetry is not None and not self.asynchronous:
             self.telemetry.sample()
         return result
 
     def write_tile(self, kind, chromosome, trait_results, **options):
         result = self._for(chromosome).write_tile(kind, chromosome, trait_results, **options)
-        if self.telemetry is not None:
+        if self.telemetry is not None and not self.asynchronous:
             self.telemetry.sample()
         return result
 
     def write(self, kind, trait_index, chromosome, result, **options):
         return self._for(chromosome).write(kind, trait_index, chromosome, result, **options)
+
+    def defer_completion(self, event):
+        if self.current is not None and self.asynchronous:
+            return self.current.defer_completion(event)
+        self._durable_events.append(dict(event))
+
+    def poll_durable_events(self):
+        result, self._durable_events = self._durable_events, []
+        if self.current is not None and self.asynchronous:
+            result.extend(self.current.poll_durable_events())
+        return result
+
+    def flush(self):
+        if self.current is not None and self.asynchronous:
+            return self.current.flush()
 
     @property
     def row_counts(self):

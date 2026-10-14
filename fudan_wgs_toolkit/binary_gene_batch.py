@@ -133,6 +133,74 @@ class BinaryHostPanelSource(_BinaryPanelSource):
             if admitted and self.host_ready is not None:
                 self.host_ready()
 
+    def read_device_columns(self, columns, device):
+        """Decode one bounded FP32 panel on the broker's existing CUDA device.
+
+        Original lossless minor dosage, ordered sample axis, reference MAF and
+        mean/minor imputation are unchanged. Only small summaries cross to CPU;
+        the uint8 payload never takes a device-to-host-to-device round trip.
+        No panel is retained by this recipe beyond the caller's tensor lease.
+        """
+        target = torch.device(device)
+        if target.type != 'cuda':
+            return self.read_columns(columns).to(device=target)
+        self.validate()
+        broker = self.binding.broker
+        if target != torch.device(broker.device):
+            raise ValueError('binary panel target differs from its verified broker device')
+        requested = np.asarray(columns)
+        if (requested.ndim != 1 or requested.dtype.kind not in 'iu'
+                or len(requested) > self.maximum_panel_width
+                or np.any(requested < 0) or np.any(requested >= self.shape[1])):
+            raise ValueError('binary device panel exceeds the verified bounded recipe')
+        raw = block = output = original = None
+        admitted = self.host_guard is None
+        try:
+            if self.host_guard is not None:
+                admitted = False
+                self.host_guard(len(requested), 0)
+                admitted = True
+            # Output, a possible uint8 device transfer and small decoding axes
+            # are NEW. Live broker source storage is already allocator-owned.
+            required = 5*self.shape[0]*len(requested) + 8*self.shape[0] + 64*len(requested)
+            _guard_exact_burden_workspace(target, required)
+            raw = broker.read_states(self.variants[requested])
+            block = broker.trait_block(raw, self.samples)
+            raw = None
+            if (not np.array_equal(block.variant_indices, self.variants[requested])
+                    or not np.array_equal(block.sample_indices, self.samples)):
+                raise ValueError('binary device panel changed its ordered axes')
+            maf = block.trait_summary(self.identity, self.imputation,
+                                      frequency_mode='reference')[0]
+            if not np.array_equal(maf, self.expected_maf[requested]):
+                raise ValueError('binary device panel changed first-pass cohort MAF')
+            if block.dosage.device != target:
+                from .genotype_device import DeviceMinorBlock
+                original = block
+                block = DeviceMinorBlock(original.dosage.to(device=target),
+                    original.sample_indices, original.variant_indices,
+                    original.union_ref_af, original.union_initial_mac,
+                    original.union_missing_rate, original.union_ref_ac,
+                    original.union_called_alleles)
+                # Frequency/count summaries are source-checked above. Preserve
+                # them when only exact uint8 bytes change device ownership.
+                cached = original._cached_counts(self.identity)
+                if cached is not None:
+                    block._store_counts(self.identity, *cached)
+                original = None
+            output = torch.empty((len(requested), self.shape[0]),
+                                 dtype=torch.float32, device=target).T
+            block.trait_dense_columns(self.identity, np.arange(len(requested), dtype=np.int64),
+                self.imputation, frequency_mode='reference', dtype=torch.float32, out=output)
+            return output
+        except BaseException as error:
+            traceback.clear_frames(error.__traceback__)
+            raise
+        finally:
+            raw = block = output = original = None
+            if admitted and self.host_ready is not None:
+                self.host_ready()
+
 
 def _checked_binding(models, prepared, genotype, maf, annotations, names,
                      rare_maf_cutoff, rv_num_cutoff, rv_num_cutoff_max):

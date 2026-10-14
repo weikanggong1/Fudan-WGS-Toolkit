@@ -661,6 +661,32 @@ def host_scope():
     return key,identity
 
 
+def _local_ledger_filesystem(directory):
+    """Verify an explicit ephemeral ledger really uses a node-local mount.
+
+    Mount names alone (for example ``/tmp``) do not prove locality. Resolve the
+    longest matching mount from the current process's own mount namespace and
+    fail closed for distributed, FUSE, unknown or unreadable mount types.
+    """
+    directory = Path(directory).resolve()
+    matches = []
+    try:
+        for line in Path('/proc/self/mountinfo').read_text().splitlines():
+            left, separator, right = line.partition(' - ')
+            fields, filesystem = left.split(), right.split()
+            if not separator or len(fields) < 6 or len(filesystem) < 3:
+                continue
+            mount = Path(_unescape(fields[4]))
+            if directory == mount or mount in directory.parents:
+                matches.append((len(mount.parts), int(fields[0]), filesystem[0]))
+    except OSError as error:
+        raise RuntimeError('ephemeral host ledger mount cannot be verified') from error
+    kind = max(matches)[2] if matches else None
+    if kind not in ('tmpfs', 'ramfs', 'ext4', 'xfs', 'btrfs', 'f2fs', 'overlay', 'aufs'):
+        raise ValueError('ephemeral host ledger requires a verified node-local filesystem')
+    return kind
+
+
 def shared_gene_workspace_bytes(n,m,*,variant_tile_size=128,scratch_bytes=256*2**20):
     """Peak uint8 parts + FP32 host G + a bounded conversion tile + metadata.
 
@@ -807,7 +833,39 @@ class HostMemoryGate:
     Only increasing future budgets sample pressure; zero or decreasing budgets
     retain identity-bound ledger publication without claiming live headroom.
     """
-    def __init__(self,directory,*,host_limit_gib=None,reserve_gib=None,lock_timeout_seconds=5):
+    def __init__(self,directory,*,host_limit_gib=None,reserve_gib=None,lock_timeout_seconds=5,
+                 ledger_directory=None,ledger_durable=True,task_root_identity=None,
+                 host_memory_sampler=None):
+        """Create one task's host-memory coordinator.
+
+        ``directory`` retains the task's logical ownership. An explicit
+        ``ledger_directory`` relocates IPC to node-local storage, with a key
+        bound to both that logical directory and this node/boot/cgroup.
+        ``ledger_durable=False`` is allowed only on a verified local mount;
+        atomic replacement and flock remain mandatory. It affects ephemeral
+        budget IPC only, never scientific output or final report durability.
+
+        ``task_root_identity`` includes a controller and all its descendants
+        alongside registered peers, deduplicated before one fresh PSS scan.
+        ``host_memory_sampler(task_snapshot)`` may transform real node/cgroup
+        constraints using that same fresh scan. It must not cache endpoints or
+        perform another task scan. The ordinary default calls read_host_memory.
+        """
+        if type(ledger_durable) is not bool:
+            raise ValueError('ledger_durable must be boolean')
+        if not ledger_durable and ledger_directory is None:
+            raise ValueError('nondurable host IPC requires an explicit local ledger_directory')
+        if host_memory_sampler is not None and not callable(host_memory_sampler):
+            raise TypeError('host_memory_sampler must be callable or None')
+        if task_root_identity is not None and not _valid_identity(task_root_identity):
+            raise ValueError('task_root_identity requires exact PID/start/boot identity')
+        self.task_root_identity = copy.deepcopy(task_root_identity)
+        self.host_memory_sampler = host_memory_sampler
+        self.ledger_durable = ledger_durable
+        self._ledger_writes = self._ledger_fsyncs = self._ledger_noops = 0
+        self._ledger_write_seconds = self._lock_wait_seconds = 0.
+        self._lock_acquisitions = self._lock_wait_attempts = 0
+        self._loaded_payload = None
         self.automatic_limit = host_limit_gib is None
         self.automatic_reserve = reserve_gib is None
         requested_limit = None if self.automatic_limit else _gib_bytes(host_limit_gib,"host_limit_gib")
@@ -827,9 +885,17 @@ class HostMemoryGate:
         if not isinstance(lock_timeout_seconds,(int,float)) or not math.isfinite(lock_timeout_seconds) or lock_timeout_seconds<=0:
             raise ValueError("lock timeout must be positive and finite")
         self.lock_timeout_seconds = float(lock_timeout_seconds)
-        self.directory = Path(directory)/"host_memory"
+        logical_directory = Path(directory).resolve()
+        self.directory = Path(directory if ledger_directory is None else ledger_directory)/"host_memory"
         self.directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         self.key,self.scope = host_scope()
+        self.ledger_filesystem = None
+        if ledger_directory is not None:
+            self.ledger_filesystem = _local_ledger_filesystem(self.directory)
+            task_key = hashlib.sha256(os.fsencode(str(logical_directory))).hexdigest()
+            self.key = hashlib.sha256((self.key+'\0'+task_key).encode()).hexdigest()
+            self.scope = dict(self.scope, logical_task_directory_sha256=task_key,
+                              ipc_ledger_durable=self.ledger_durable)
         self.path = self.directory/(self.key+".private.json")
         self.lock_path = self.directory/(self.key+".lock")
         self._retired_tokens = {}
@@ -837,6 +903,12 @@ class HostMemoryGate:
         self.identity = process_identity(os.getpid())
         if self.identity is None:
             raise RuntimeError("host memory task owner identity cannot be verified")
+        if self.task_root_identity is not None:
+            if process_identity(self.task_root_identity['pid']) != self.task_root_identity:
+                raise RuntimeError('task root identity cannot be verified')
+            root = dict(identity=self.task_root_identity, descendants=[], closed=False)
+            if self.identity not in _task_processes({'root': root}):
+                raise RuntimeError('host gate caller is not owned by the supplied task root')
         self.closed = False
         self._pss_samples = self._pss_unverified = 0
         self._pss_host_seconds = 0.
@@ -845,6 +917,20 @@ class HostMemoryGate:
             state = self._load()
             self._live_leases(state)
             self._live_owners(state)
+            root = state.get('task_root_owner')
+            if (root is None) != (self.task_root_identity is None) or (root is not None
+                    and root['identity'] != self.task_root_identity):
+                old_scope_alive = bool(root is not None and _task_processes({'root':root}))
+                if state['owners'] or state['leases'] or old_scope_alive:
+                    raise ValueError('host memory peers must share one task root identity')
+                # A crashed controller can leave its last root binding behind.
+                # Rebind only after exact PID/start/boot reaping proves that no
+                # registered peer or remembered orphan from that scope lives.
+                if self.task_root_identity is None:
+                    state.pop('task_root_owner',None)
+                else:
+                    state['task_root_owner'] = dict(identity=self.task_root_identity,
+                                                   descendants=[],closed=False)
             state["owners"][self.registration_token] = dict(identity=self.identity,
                 descendants=[],closed=False)
             self._write(state)
@@ -853,6 +939,7 @@ class HostMemoryGate:
     def _locked(self,required_bytes):
         fd = os.open(self.lock_path,os.O_CREAT|os.O_RDWR,0o600)
         started = time.monotonic()
+        wait_recorded = False
         try:
             while True:
                 try:
@@ -861,17 +948,27 @@ class HostMemoryGate:
                 except BlockingIOError:
                     if time.monotonic()-started >= self.lock_timeout_seconds:
                         raise HostMemoryDeferred(required_bytes,reason="host_ledger_lock_busy")
-                    time.sleep(.025)
+                    self._lock_wait_attempts += 1
+                    time.sleep(.005)
+            self._lock_acquisitions += 1
+            self._lock_wait_seconds += time.monotonic()-started
+            wait_recorded = True
             yield
         finally:
+            if not wait_recorded:
+                self._lock_wait_seconds += time.monotonic()-started
             fcntl.flock(fd,fcntl.LOCK_UN)
             os.close(fd)
 
     def _load(self):
         if not self.path.exists():
+            self._loaded_payload = None
             return dict(schema_version=2,scope_key=self.key,scope=self.scope,
-                policy=dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes),leases={},owners={})
-        state = json.loads(self.path.read_text())
+                policy=dict(limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes),leases={},owners={},
+                **({} if self.task_root_identity is None else {'task_root_owner':dict(
+                    identity=self.task_root_identity, descendants=[], closed=False)}))
+        self._loaded_payload = self.path.read_text()
+        state = json.loads(self._loaded_payload)
         if state.get("schema_version") != 2 or state.get("scope_key") != self.key or state.get("scope") != self.scope:
             raise ValueError("private host memory ledger scope binding differs")
         policy = state.get("policy")
@@ -882,6 +979,12 @@ class HostMemoryGate:
             raise ValueError("private host memory ledger has an invalid limit/reserve policy")
         if not isinstance(state.get("leases"),dict):
             raise ValueError("private host memory ledger has invalid leases")
+        root = state.get('task_root_owner')
+        if root is not None and (not isinstance(root,dict) or not _valid_identity(root.get('identity'))
+                or not isinstance(root.get('descendants'),list)
+                or any(not _valid_identity(identity) for identity in root['descendants'])
+                or root.get('closed') is not False):
+            raise ValueError('private host memory task root has invalid ownership')
         for token,record in state["leases"].items():
             if not isinstance(token,str) or not token or not isinstance(record,dict):
                 raise ValueError("private host memory ledger has an invalid lease record")
@@ -922,17 +1025,26 @@ class HostMemoryGate:
         return state
 
     def _write(self,state):
+        payload = json.dumps(state,sort_keys=True,allow_nan=False)+'\n'
+        if payload == self._loaded_payload:
+            self._ledger_noops += 1
+            return
+        started = time.perf_counter()
         temporary = self.path.with_name(self.path.name+f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
         fd = os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
         try:
             with os.fdopen(fd,"w") as stream:
-                json.dump(state,stream,sort_keys=True,allow_nan=False)
-                stream.write("\n")
+                stream.write(payload)
                 stream.flush()
-                os.fsync(stream.fileno())
+                if self.ledger_durable:
+                    os.fsync(stream.fileno())
+                    self._ledger_fsyncs += 1
             os.replace(temporary,self.path)
+            self._loaded_payload = payload
+            self._ledger_writes += 1
         finally:
             temporary.unlink(missing_ok=True)
+            self._ledger_write_seconds += time.perf_counter()-started
 
     def _live_leases(self,state):
         for token,lease in list(state["leases"].items()):
@@ -984,7 +1096,35 @@ class HostMemoryGate:
             pss_unverified_count=self._pss_unverified,last_task_memory=copy.deepcopy(self._last_task_memory),
             task_limit_bytes=self.limit_bytes,reserve_bytes=self.reserve_bytes,
             pss_sampling_scope="NEW-byte growth only; zero/shrink/release do not sample",
+            task_root_scope_enabled=self.task_root_identity is not None,
+            fresh_task_snapshot_shared_with_host_sampler=self.host_memory_sampler is not None,
+            ledger_durable=self.ledger_durable,ledger_relocated=self.ledger_filesystem is not None,
+            ledger_filesystem=self.ledger_filesystem,ledger_writes=self._ledger_writes,
+            ledger_fsyncs=self._ledger_fsyncs,ledger_noop_publications=self._ledger_noops,
+            ledger_write_host_seconds=self._ledger_write_seconds,
+            ledger_lock_acquisitions=self._lock_acquisitions,
+            ledger_lock_wait_seconds=self._lock_wait_seconds,ledger_lock_wait_attempts=self._lock_wait_attempts,
             task_budget_is_cgroup_hard_limit=False,closed=self.closed)
+
+    def _fresh_task_memory(self,state):
+        """Scan the union once while all peer future budgets remain locked."""
+        owners = dict(state['owners'])
+        root = state.get('task_root_owner')
+        if self.task_root_identity is not None:
+            if (root is None or root['identity'] != self.task_root_identity
+                    or process_identity(self.task_root_identity['pid']) != self.task_root_identity):
+                raise RuntimeError('complete task root identity cannot be verified')
+            # The root record remembers observed children so reparenting cannot
+            # erase their ownership. _task_processes deduplicates registered
+            # children against the root traversal before any PSS reads occur.
+            owners['scope_root'] = root
+        elif root is not None:
+            raise RuntimeError('task root binding changed during admission')
+        result = _task_memory_snapshot(_task_processes(owners))
+        if (self.task_root_identity is not None
+                and process_identity(self.task_root_identity['pid']) != self.task_root_identity):
+            raise RuntimeError('task root identity changed during complete PSS sampling')
+        return result
 
     def lease_factory(self,kind,chromosome_index,job_index):
         return self.lease(label=dict(kind=str(kind),chromosome_index=int(chromosome_index),job_index=int(job_index)))
@@ -1020,10 +1160,16 @@ class HostMemoryGate:
             # tree while buffers are being released. Every later increase
             # takes the fresh-pressure path below, including growth from zero.
             if not required_bytes or shrinking:
-                state["leases"][lease.token] = dict(identity=lease.identity,
-                    future_bytes=required_bytes,peak_future_bytes=max(required_bytes,
-                        previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label,
-                    registration_token=self.registration_token)
+                coalesced = (not self.ledger_durable and previous is not None
+                             and required_bytes == previous['future_bytes'])
+                # Ephemeral IPC records the phase of the last budget change;
+                # current per-call diagnostics remain local on the lease. A
+                # changed label alone never requires a shared-file rewrite.
+                if not coalesced:
+                    state["leases"][lease.token] = dict(identity=lease.identity,
+                        future_bytes=required_bytes,peak_future_bytes=max(required_bytes,
+                            previous["peak_future_bytes"] if previous else 0),phase=phase,label=lease.label,
+                        registration_token=self.registration_token)
                 self._write(state)
                 self._retired_tokens.clear()
                 lease.required_bytes,lease.total_bytes = required_bytes,required_bytes
@@ -1040,11 +1186,40 @@ class HostMemoryGate:
                     future_new_allocations=True,shared_rss_admission=False,phase=phase,
                     task_memory=None,task_pss_admission=False,task_budget_is_cgroup_hard_limit=False,
                     pressure_constraints=[],shrinking_or_zero=True,
+                    ledger_phase_coalesced=coalesced,
                     pressure_check_performed=False,
                     pressure_check_skipped_reason="zero_or_nonincreasing_future_budget")
                 return
-            live = read_host_memory()
+            for token,record in state["leases"].items():
+                if not any(owner["identity"]==record["identity"] and not owner["closed"]
+                           for owner in state["owners"].values()):
+                    state["owners"]["legacy:"+token] = dict(identity=record["identity"],
+                        descendants=[],closed=False)
+            try:
+                pss_started = time.perf_counter()
+                self._pss_samples += 1
+                task = self._fresh_task_memory(state)
+            except RuntimeError as error:
+                self._pss_unverified += 1
+                state["leases"].pop(lease.token,None)
+                self._write(state);lease.closed = True
+                raise HostMemoryDeferred(required_bytes,total_required_bytes=future,
+                    reason="task_pss_coverage_not_verified") from error
+            finally:
+                self._pss_host_seconds += time.perf_counter()-pss_started
+            self._last_task_memory = copy.deepcopy(task)
+            # A private resource policy consumes this exact fresh endpoint;
+            # there is no second controller-tree scan and no cached admission.
+            live = (read_host_memory() if self.host_memory_sampler is None else
+                    self.host_memory_sampler(copy.deepcopy(task)))
+            if (self.task_root_identity is not None
+                    and process_identity(self.task_root_identity['pid']) != self.task_root_identity):
+                raise RuntimeError('task root identity changed during host-pressure sampling')
+            if not isinstance(live,dict):
+                raise RuntimeError('host memory sampler must return live constraints')
             constraints = live.get("constraints",[live])
+            if not isinstance(constraints,(list,tuple)) or not constraints:
+                raise RuntimeError('live host memory constraints are unavailable')
             capacity = max(0,min(self.limit_bytes,*[int(c["limit_bytes"]) for c in constraints])-self.reserve_bytes)
             # A future allocation larger than the immutable total capacity
             # cannot ever fit. Shared/file-backed RSS is not a job-size bound.
@@ -1065,24 +1240,6 @@ class HostMemoryGate:
             # All increases check freshly observed task PSS, every actual
             # node constraint and every other owner's future budget. No
             # cached endpoint can admit new bytes.
-            for token,record in state["leases"].items():
-                if not any(owner["identity"]==record["identity"] and not owner["closed"]
-                           for owner in state["owners"].values()):
-                    state["owners"]["legacy:"+token] = dict(identity=record["identity"],
-                        descendants=[],closed=False)
-            try:
-                pss_started = time.perf_counter()
-                self._pss_samples += 1
-                task = _task_memory_snapshot(_task_processes(state["owners"]))
-            except RuntimeError as error:
-                self._pss_unverified += 1
-                state["leases"].pop(lease.token,None)
-                self._write(state);lease.closed = True
-                raise HostMemoryDeferred(required_bytes,total_required_bytes=future,
-                    reason="task_pss_coverage_not_verified") from error
-            finally:
-                self._pss_host_seconds += time.perf_counter()-pss_started
-            self._last_task_memory = copy.deepcopy(task)
             task_available = self.limit_bytes-self.reserve_bytes-task["pss_bytes"]-others_future
             available = min(available,task_available)
             if (task["pss_bytes"]+future>self.limit_bytes-self.reserve_bytes

@@ -859,7 +859,7 @@ class ImmutableFittedBinarySource:
     admission. Mutation through unsupported ``.data`` writes is prohibited by
     this ownership contract, as it bypasses Torch's own version mechanism.
     """
-    __slots__ = ("_ids", "_tensors", "_stamps", "_binding", "_method",
+    __slots__ = ("_ids", "_tensors", "_stamps", "_binding", "_method", "_spa_projection_cache",
                  "_has_kinship", "_iterations", "_provenance", "_sealed", "__weakref__")
 
     def __setattr__(self, name, value):
@@ -938,6 +938,9 @@ class ImmutableFittedBinarySource:
         self._binding, self._method = binding, method
         self._has_kinship, self._iterations = bool(has_kinship), iterations
         self._provenance = str(provenance)
+        # Mutable contents are private, version-checked, and owned by the same
+        # fitted-bank LRU entry as the immutable source. No global tensor pool.
+        self._spa_projection_cache = {}
         self._sealed = True
 
     @property
@@ -980,11 +983,49 @@ class ImmutableFittedBinarySource:
         model.fitted_source_validation = "immutable_once_with_tensor_version_guard"
         return model
 
-    def spa(self):
-        """Derive an FP64 SPA projection only when selected tests need it."""
-        x, r, mu, cov, inverse, sx, beta, y = self._projection()
-        with explicit_binary_fitted_projection_fp64():
-            left = x @ cov
+    def spa_projection_cached(self):
+        """Validate both source and cached derived tensors before reusing them."""
+        if tuple(self._stamp(value) for value in self._tensors) != self._stamps:
+            raise ValueError("immutable binary fitted source was mutated")
+        cached = self._spa_projection_cache
+        if not cached:
+            return False
+        if (cached['binding'] != self._binding or cached['source_stamps'] != self._stamps
+                or tuple(self._stamp(value) for value in cached['values']) != cached['stamps']):
+            raise ValueError("cached binary SPA projection was mutated or rebound")
+        x = self._tensors[0]
+        if any(value.shape != x.shape or value.dtype != torch.float64
+               or value.device != x.device for value in cached['values']):
+            raise ValueError("cached binary SPA projection has different geometry or device")
+        return True
+
+    def explicit_storage_owners(self):
+        """Expose retained projection storage to the source's existing LRU."""
+        self.spa_projection_cached()
+        return (self._tensors, self._spa_projection_cache.get('values', ()))
+
+    def spa(self, *, cache_projection=False):
+        """Derive FP64 SPA state; optional fixed projections share source ownership.
+
+        The fitted repository admits the extra two N-by-Q arrays before
+        enabling caching and refreshes their physical-storage accounting.
+        Direct callers retain the established temporary-projection behavior.
+        """
+        if type(cache_projection) is not bool:
+            raise TypeError('cache_projection must be boolean')
+        hit = self.spa_projection_cached() if cache_projection else False
+        if hit:
+            x, r, mu, cov, inverse, beta, y = self._tensors
+            sx, left = self._spa_projection_cache['values']
+        else:
+            x, r, mu, cov, inverse, sx, beta, y = self._projection()
+            with explicit_binary_fitted_projection_fp64():
+                left = x @ cov
+            if cache_projection:
+                values = (sx, left)
+                self._spa_projection_cache.update(values=values,
+                    stamps=tuple(self._stamp(value) for value in values),
+                    source_stamps=self._stamps, binding=self._binding)
         model = BinaryNullModel(self._ids, x, r, mu, sx.T, left, cov,
             precision=inverse, precision_x=sx, coefficients=beta, phenotype=y,
             iterations=self._iterations, has_kinship=self._has_kinship,

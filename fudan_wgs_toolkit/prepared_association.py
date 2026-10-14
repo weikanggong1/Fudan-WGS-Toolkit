@@ -480,7 +480,7 @@ def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, devic
     """Run this invocation's own partition; parent affinity stays unchanged."""
     from .worker_file_resources import configure_worker_file_capacity
     file_admission = configure_worker_file_capacity(plan.get('trait_count', 0))
-    from .phewas_trait_csv import PerTraitCheckpointCSVWriter
+    from .phewas_async_writer import AsyncPerTraitCheckpointCSVWriter
     from .phewas_runtime.runtime import run_batched_configuration
     from .phewas_resources import HostMemoryGate
     from .phewas_run import (_host_memory_policy, _close_association_resources,
@@ -522,12 +522,13 @@ def _worker_unleased(plan, entries, resources, *, worker_id, worker_count, devic
         if dispatch['strategy']=='whole_chromosomes':
             from .chromosome_csv import ChromosomeCheckpointCSVWriter
             writer = ChromosomeCheckpointCSVWriter(output/'csv', binding=binding,
+                asynchronous=True,
                 chromosomes=dispatch['workers'][worker_id]['assigned_chromosomes'],
                 resume=resources['resume'], worker_id=str(worker_id),
                 minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
                 file_descriptor_admission=file_admission)
         else:
-            writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
+            writer = AsyncPerTraitCheckpointCSVWriter(output/'csv', binding=binding,
                 resume=resources['resume'], worker_id=str(worker_id),
                 minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
                 ownership_scope='chromosome' if dispatch['strategy']=='chromosomes' else 'trait')

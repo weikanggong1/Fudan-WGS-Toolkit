@@ -441,12 +441,18 @@ class _BinaryPanelSource:
     def read_columns(self, columns):
         raise NotImplementedError
 
+    def read_device_columns(self, columns, device):
+        """Compatibility fallback for sources without a direct device decoder."""
+        return self.read_columns(columns).to(device=device)
 
-def _binary_genotype_panel(source, columns, start, stop):
+
+def _binary_genotype_panel(source, columns, start, stop, *, device=None):
     """Read one original ordered FP32 panel without a whole-mask host tensor."""
     selected = columns[start:stop]
     if isinstance(source, _BinaryPanelSource):
         source.validate()
+        if device is not None and torch.device(device).type == 'cuda':
+            return source.read_device_columns(selected, device)
         return source.read_columns(selected)
     if len(columns) == source.shape[1]:
         return source[:, start:stop]
@@ -583,7 +589,7 @@ class ExactBinaryBurdenCache:
                                 device=prepared.burdens.device)
             for start in range(0, count, tile):
                 stop = min(start+tile, count)
-                block = _binary_genotype_panel(g, prepared.columns, start, stop)
+                block = _binary_genotype_panel(g, prepared.columns, start, stop, device=exact.device)
                 try:
                     exact.add_(block.to(device=exact.device, dtype=torch.float64) @ weights[start:stop])
                 finally:
@@ -724,7 +730,7 @@ def prepare_binary_burdens(model, genotype, maf, annotations=None, names=None, *
             stop = min(start+tile, count)
             piece = block = None
             try:
-                piece = _binary_genotype_panel(source, columns, start, stop)
+                piece = _binary_genotype_panel(source, columns, start, stop, device=model.device)
                 _finite(piece, "genotype")
                 block = piece.to(device=model.device, dtype=dtype)
                 burdens.add_(matmul(block, weights[start:stop], mode=mode))
@@ -893,7 +899,7 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
                 tile = _binary_panel_width(g, spa_variant_tile_size)
                 for start in range(0, count, tile):
                     stop = min(start+tile, count)
-                    block = _binary_genotype_panel(g, prepared.columns, start, stop)
+                    block = _binary_genotype_panel(g, prepared.columns, start, stop, device=model.device)
                     try:
                         exact_burdens.add_(block.to(device=model.device, dtype=torch.float64) @ exact_weights[start:stop])
                     finally:

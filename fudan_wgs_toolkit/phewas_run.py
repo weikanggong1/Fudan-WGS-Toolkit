@@ -859,13 +859,26 @@ def portable_reader(reference, spec=None):
     container = None
     try:
         container = Container(directory)
+        settings = reference if isinstance(reference, dict) else (spec or {})
+        container.enable_prefetch(settings.get('frame_prefetch_bytes', 64*2**20))
         if not np.array_equal(container.samples, metadata._array(metadata.manifest['source_sample_rows'])):
             raise ValueError('cache source sample rows differ from portable metadata')
         yield dict(metadata=metadata, container=container, portable_axis=True)
     finally:
-        metadata.close()
-        if container is not None:
-            container.close()
+        primary = sys.exc_info()[1]
+        cleanup_error = None
+        for resource in (metadata, container):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except BaseException as error:
+                if cleanup_error is None:
+                    cleanup_error = error
+                if primary is not None and hasattr(primary, 'add_note'):
+                    primary.add_note('portable reader cleanup also failed: '+type(error).__name__)
+        if primary is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def _verify_stored_model(target, metadata, *, cache_sample_ids=None):
@@ -1404,7 +1417,7 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
         per_trait_output = (plan.get('public_api_options') or
                             plan.get('csv_output_layout') == 'per_trait_checkpoint')
         if per_trait_output:
-            from .phewas_trait_csv import PerTraitCheckpointCSVWriter
+            from .phewas_async_writer import AsyncPerTraitCheckpointCSVWriter
             binding = dict(source_implementation_sha256=plan['source_implementation_sha256'],
                 input_manifest_sha256=plan['prepared_inputs_manifest_sha256'],
                 trait_batch_size=plan.get('trait_batch_size', 32), checkpoint_schema_version=2,
@@ -1414,12 +1427,13 @@ def _execute_worker(plan, *, worker_id=0, worker_count=1, device='cuda:0', fit_o
             if dispatch is not None and dispatch['strategy']=='whole_chromosomes':
                 from .chromosome_csv import ChromosomeCheckpointCSVWriter
                 writer = ChromosomeCheckpointCSVWriter(output/'csv', binding=binding,
+                    asynchronous=True,
                     chromosomes=dispatch['workers'][worker_id]['assigned_chromosomes'],
                     resume=plan.get('resume', False), worker_id=str(worker_id),
                     minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
                     file_descriptor_admission=file_admission)
             else:
-                writer = PerTraitCheckpointCSVWriter(output/'csv', binding=binding,
+                writer = AsyncPerTraitCheckpointCSVWriter(output/'csv', binding=binding,
                     resume=plan.get('resume', False), worker_id=str(worker_id),
                     minimum_free_bytes=plan.get('csv_minimum_free_bytes', 0),
                     ownership_scope=('chromosome' if dispatch is not None

@@ -306,6 +306,7 @@ class SharedStateBroker:
     @property
     def metrics(self):
         return dict(self._metrics, backend='shared-lossless-six-state-CSR', device=str(self.device),
+            compressed_frame_prefetch=dict(getattr(self._container, 'prefetch_metrics', {})),
             compact_cache_limit_bytes=self._compact_capacity,
             gpu_csr_cache_limit_bytes=self._device_capacity,
             gpu_csr_cache_configured_limit_bytes=self._device_capacity_configured,
@@ -454,6 +455,11 @@ class SharedStateBroker:
             return self._device_sources[frame][2]
         started = time.perf_counter()
         f = self._container.read_frame(int(frame))
+        prefetch = getattr(self._container, 'prefetch', None)
+        following = int(frame)+1
+        if (callable(prefetch) and following < len(self._starts)
+                and following not in self._sources and following not in self._device_sources):
+            prefetch(following)
         if (f['start'] != self._starts[frame] or f['m'] != self._sizes[frame]
                 or f['n'] != len(self.samples)):
             raise ValueError('verified frame geometry differs from cache index')
