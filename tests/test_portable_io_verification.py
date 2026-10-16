@@ -2,6 +2,7 @@
 from collections import OrderedDict
 import hashlib
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,9 @@ def isolated_digest_cache(monkeypatch):
     monkeypatch.setattr(metadata_io, "_SHA_CACHE", OrderedDict())
     monkeypatch.setattr(metadata_io, "_SHA_METRICS", dict(calls=0, identity_hits=0,
         content_hashes=0, content_bytes=0, content_hash_seconds=0.0))
+    # Most tests exercise stable immutable metadata, without wall-clock sleeps.
+    now = time.time_ns()
+    monkeypatch.setattr(metadata_io.time, "time_ns", lambda: now + 10_000_000_000)
 
 
 def test_checksum_hashes_complete_bytes_once_and_reuses_exact_file_identity(tmp_path):
@@ -32,7 +36,11 @@ def test_checksum_hashes_complete_bytes_once_and_reuses_exact_file_identity(tmp_
 
 
 @pytest.mark.parametrize("change", ["rewrite", "replace", "touch"])
-def test_changed_identity_cannot_reuse_the_previous_checksum(tmp_path, change):
+def test_changed_identity_cannot_reuse_the_previous_checksum(tmp_path, change, monkeypatch):
+    if change == "rewrite":
+        # Include coarse filesystems where a same-tick rewrite and restored
+        # mtime retain the entire stat identity. Recent bytes must be rehashed.
+        monkeypatch.setattr(metadata_io, "_SHA_CACHE_SETTLE_NS", 60_000_000_000)
     path = tmp_path/"metadata.bin"
     first, second = b"first exact bytes", b"second exact data"
     path.write_bytes(first)
@@ -51,6 +59,37 @@ def test_changed_identity_cannot_reuse_the_previous_checksum(tmp_path, change):
     assert metadata_io._sha(path) == hashlib.sha256(second).hexdigest()
     assert metadata_io._SHA_METRICS["content_hashes"] == 2
     assert metadata_io._SHA_METRICS["identity_hits"] == 0
+
+
+def test_recent_identical_stat_identity_rehashes_changed_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "coarse-clock.bin"
+    path.write_bytes(b"first exact bytes")
+    identity = metadata_io._identity(path)
+    monkeypatch.setattr(metadata_io.time, "time_ns", lambda: max(identity[3:]) + 1)
+    monkeypatch.setattr(metadata_io, "_identity", lambda _: identity)
+    monkeypatch.setattr(metadata_io, "_stat_identity", lambda _: identity)
+    metadata_io._sha(path)
+    path.write_bytes(b"second exact data")
+    assert metadata_io._sha(path) == hashlib.sha256(b"second exact data").hexdigest()
+    assert metadata_io._SHA_METRICS["content_hashes"] == 2
+    assert metadata_io._SHA_METRICS["identity_hits"] == 0
+
+
+@pytest.mark.parametrize("shape,dtype", [((0,), "<f8"), ((3, 0), "<i8"),
+    ((17,), "<u8"), ((7, 3), ">f4"), ((9,), "|b1")])
+def test_metadata_finalization_copies_bounded_bytes_without_mapping(tmp_path, monkeypatch, shape, dtype):
+    values = np.arange(int(np.prod(shape))).reshape(shape).astype(dtype)
+    writer = metadata_io._ArrayWriter(tmp_path, "bounded", dtype, shape[1:])
+    writer.append(values)
+    def reject_mapping(*args, **kwargs):
+        raise AssertionError("metadata finalization must not map full chromosome fields")
+    monkeypatch.setattr(np.lib.format, "open_memmap", reject_mapping)
+    monkeypatch.setattr(np, "memmap", reject_mapping)
+    specification = writer.finish()
+    observed = np.load(tmp_path / specification["file"], allow_pickle=False)
+    assert observed.dtype == values.dtype
+    np.testing.assert_array_equal(observed, values)
+    assert not writer.raw_path.exists()
 
 
 def test_checksum_never_caches_bytes_changed_during_the_initial_scan(tmp_path, monkeypatch):

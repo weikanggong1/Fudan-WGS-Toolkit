@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -23,6 +24,10 @@ from .fast_container import Container
 
 FORMAT = "portable-six-state-metadata-v1"
 _SHA_CACHE_LIMIT = 4096
+# Some shared filesystems expose coarse ctime ticks. A same-size rewrite that
+# restores mtime can retain an identity inside that tick. Rehash recent files
+# until the timestamp has settled; immutable older metadata keeps the fast path.
+_SHA_CACHE_SETTLE_NS = 2_000_000_000
 _SHA_CACHE = OrderedDict()
 _SHA_METRICS = dict(calls=0, identity_hits=0, content_hashes=0,
                     content_bytes=0, content_hash_seconds=0.0)
@@ -39,7 +44,8 @@ def _sha(path):
     identity = _identity(path)
     _SHA_METRICS["calls"] += 1
     previous = _SHA_CACHE.get(key)
-    if previous is not None and previous[0] == identity:
+    settled = time.time_ns() - max(identity[3:]) >= _SHA_CACHE_SETTLE_NS
+    if previous is not None and previous[0] == identity and settled:
         if _identity(path) != identity:
             raise ValueError("portable file changed during checksum verification")
         _SHA_CACHE.move_to_end(key)
@@ -88,16 +94,21 @@ class _ArrayWriter:
     def finish(self):
         self.close()
         path = self.directory / (self.name + ".npy")
-        array = np.lib.format.open_memmap(path, mode="w+", dtype=self.dtype,
-            shape=(self.count, *self.trailing_shape))
-        if self.count and int(np.prod(self.trailing_shape, dtype=np.int64)) != 0:
-            raw = np.memmap(self.raw_path, mode="r", dtype=self.dtype,
-                shape=(self.count, *self.trailing_shape))
-            for begin in range(0, self.count, 65536):
-                array[begin:begin + 65536] = raw[begin:begin + 65536]
-            del raw
-        array.flush()
-        del array
+        shape = (self.count, *self.trailing_shape)
+        expected_bytes = self.dtype.itemsize * math.prod(shape)
+        if self.raw_path.stat().st_size != expected_bytes:
+            raise ValueError("metadata raw byte count differs from its declared shape")
+        # Copy the already ordered bytes behind a standard NPY header. Mapping
+        # full chromosome fields here retained hundreds of MB of dirty/resident
+        # pages per worker; fixed byte blocks keep this finalization bounded.
+        with path.open("wb") as destination, self.raw_path.open("rb") as source:
+            np.lib.format.write_array_header_2_0(destination, dict(
+                descr=np.lib.format.dtype_to_descr(self.dtype),
+                fortran_order=False, shape=shape))
+            for block in iter(lambda: source.read(8 * 2**20), b""):
+                destination.write(block)
+            destination.flush()
+            os.fsync(destination.fileno())
         self.raw_path.unlink()
         return dict(kind="dense", file=path.name, dtype=self.dtype.str,
                     shape=[self.count, *self.trailing_shape])
@@ -219,15 +230,54 @@ def _export_field(reader, path, directory, name, block_size):
     return writer.finish()
 
 
+def _complete_annotation_coverage(coverage, fields, directory, n_variants, block_size):
+    """Prove optional complete coverage from the actual exported boolean field."""
+    if not isinstance(coverage, dict):
+        raise ValueError("annotation_coverage must be a complete coverage mapping")
+    result = dict(coverage)
+    expected = dict(n_variants=n_variants, matched_variants=n_variants,
+                    missing_snv=0, missing_non_snv=0)
+    if any(type(result.get(name)) is not int or result[name] != count
+           for name, count in expected.items()):
+        raise ValueError("annotation_coverage must describe complete selected-variant coverage")
+    if result.get("allow_missing_non_snv", False) is not False:
+        raise ValueError("complete annotation_coverage cannot allow missing annotations")
+    field = result.get("available_field", "annotation_available")
+    if not isinstance(field, str) or field not in fields:
+        raise ValueError("annotation_coverage requires an exported availability field")
+    spec = fields[field]
+    if (spec.get("kind") != "dense" or spec.get("shape") != [n_variants]
+            or np.dtype(spec.get("dtype")).kind != "b"):
+        raise ValueError("annotation availability must be a boolean selected-variant vector")
+    values = np.load(Path(directory) / spec["file"], mmap_mode="r", allow_pickle=False)
+    try:
+        if values.shape != (n_variants,) or values.dtype.kind != "b":
+            raise ValueError("annotation availability must be a boolean selected-variant vector")
+        matched = sum(int(np.count_nonzero(values[begin:begin + block_size]))
+                      for begin in range(0, n_variants, block_size))
+        if matched != n_variants:
+            raise ValueError("annotation availability differs from complete coverage proof")
+    finally:
+        mapping = getattr(values, "_mmap", None)
+        if mapping is not None:
+            mapping.close()
+    result.update(available_field=field, allow_missing_non_snv=False)
+    return result
+
+
 def export_metadata(reader, container_directory, output_directory, field_paths, *,
                     annotation_catalog=None, annotation_names=(), qc_path="annotation/filter",
-                    block_size=65536, sample_pairs=None):
+                    block_size=65536, sample_pairs=None, annotation_coverage=None):
     """Prepare immutable metadata beside a verified complete genotype cache.
 
     ``reader`` supplies sample IDs and chunked metadata. ``field_paths`` are
     aligned variant fields, including position/chromosome/variant.id/allele,
     QC and every requested mask/weight annotation. Native genotype is never
     read here. The completed manifest binds the exact target cache manifest.
+    Optional ``annotation_coverage`` declares complete selected-axis coverage;
+    its counts are checked against an exported all-true boolean availability
+    vector before the same atomic metadata/COMPLETE publication. Omitting it
+    preserves the previous metadata schema and export behavior.
     """
     if type(block_size) is not int or block_size < 1:
         raise ValueError("block_size must be a positive integer")
@@ -271,6 +321,9 @@ def export_metadata(reader, container_directory, output_directory, field_paths, 
         required.update((annotation_catalog or {}).values())
         if not required <= fields.keys():
             raise ValueError("portable metadata lacks required variant/QC/annotation fields")
+        coverage = (None if annotation_coverage is None else
+                    _complete_annotation_coverage(annotation_coverage, fields, temporary,
+                                                  reader.n_variants, block_size))
         files = {p.name: dict(sha256=_sha(p), size=p.stat().st_size)
                  for p in temporary.iterdir() if p.is_file()}
         manifest = dict(schema_version=1, format=FORMAT, n_samples=len(container.samples),
@@ -284,6 +337,8 @@ def export_metadata(reader, container_directory, output_directory, field_paths, 
                           annotation_names=list(annotation_names), qc_path=qc_path),
             preparation=dict(metadata_only=True, genotype_read=False,
                              block_size=block_size, seconds=time.perf_counter() - started))
+        if coverage is not None:
+            manifest["annotation_coverage"] = coverage
         document = json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False).encode() + b"\n"
         (temporary / "manifest.json").write_bytes(document)
         (temporary / "COMPLETE").write_text(hashlib.sha256(document).hexdigest())

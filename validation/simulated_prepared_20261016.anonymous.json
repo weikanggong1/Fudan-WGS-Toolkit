@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "implementation": "direct_prepared_synthetic_generator",
+  "source_candidate": "profile4",
+  "synthetic": true,
+  "scope": "CPU compatibility, integrity and bounded aggregate calibration; no current-revision GPU association execution or full reference-scale generation.",
+  "tests": {
+    "passed": 267,
+    "failed": 0,
+    "pytest_seconds": 24.83,
+    "cpu_affinity_count": 8,
+    "native_blas_threads": 2,
+    "cuda_visible_devices_empty": true,
+    "coverage": [
+      "Direct compact six-state storage and integer-count roundtrip",
+      "Production portable metadata and completion checks",
+      "All 15 mask categories through mature selectors",
+      "Synthetic streaming journal and explicit storage budgets",
+      "Bounded metadata copies",
+      "Two-second settled-timestamp SHA cache regression",
+      "Prepared input and binary/continuous public parameter contracts"
+    ]
+  },
+  "bounded_calibration": {
+    "scope": "A bounded fixture derived from private aggregate calibration; not an entire reference chromosome or original variant set.",
+    "variants": 8192,
+    "known_published_mask_targets": 15,
+    "reference_n": {
+      "n": 345967,
+      "generation_seconds": 35.912,
+      "known_mask_targets_matched": 15,
+      "frequency_bin_inventory_exact": true,
+      "maf_count_weighted_mean_absolute_error": 2.65669e-08,
+      "maf_bin_maximum_absolute_error": 7.64412e-07
+    },
+    "scaled_n": {
+      "n": 4096,
+      "generation_seconds": 1.567,
+      "known_mask_targets_matched": 0,
+      "frequency_bin_inventory_exact": true,
+      "maf_count_weighted_mean_absolute_error": 5.46935e-06,
+      "maf_bin_maximum_absolute_error": 6.09517e-05,
+      "interpretation": "Low reference-MAC bins round to zero under MAF-preserving sample-size scaling; mask eligibility changes are reported rather than forcing nonzero MAC."
+    },
+    "stream_checksums_verified": true,
+    "raw_plink_written": false,
+    "maf_error_definition": "Absolute generated-bin MAF minus target-bin MAF; mean weighted by bin variant count."
+  },
+  "reference_inventory_and_preflight": {
+    "autosomes": 22,
+    "physical_variants": 1023836503,
+    "reference_samples": 345967,
+    "known_published_mask_rows": 233589,
+    "coding_groups": 18308,
+    "known_coding_marginals_feasible": true,
+    "scope": "Aggregate inventory and feasible mask construction only; absent published masks are unknown and may produce additional inferred eligible rows.",
+    "conservative_estimated_storage_bytes": 14517782875204,
+    "available_storage_bytes_at_check": 310284124160,
+    "generation_invoked_for_preflight": true,
+    "preflight_exception": "OSError",
+    "preflight_rejected_before_output_directory_creation": true,
+    "full_reference_data_generated": false
+  },
+  "annotation_channels": {
+    "count": 11,
+    "values": "Entirely invented; channel count matches the calibration workload but original annotation values and distributions are not reproduced.",
+    "variant_mode": "Includes synthetic Indel/PTV; mature association behavior does not apply annotation weighting in this mode.",
+    "snv_mode": "An explicit gene_variant_type=SNV override exercises numerical annotation weights and changes non-SNV mask eligibility."
+  },
+  "gpu_association_validation": {
+    "status": "not_assessed",
+    "executed_on_current_revision": false,
+    "reason": "Automatic approval review rejected the attempted launch on busy shared GPUs.",
+    "observed_shared_gpu_utilization_percent_range": [
+      92,
+      95
+    ],
+    "historical_gpu_calls_reused_as_current_evidence": false
+  },
+  "scientific_accuracy": {
+    "same_input_official_p_value_validation": "not_assessed",
+    "original_variant_intersections_or_ld_reproduced": false,
+    "oracle_p_values_provided": false
+  },
+  "privacy": {
+    "original_identifiers_loci_genes_and_trait_names_included": false,
+    "per_chromosome_reference_vectors_or_mask_tables_included": false,
+    "private_calibration_hashes_or_server_paths_included": false
+  },
+  "tested_runtime_binding": {
+    "file_count": 102,
+    "manifest_sha256": "bb9d3e1a39be37207e334050d10794f705c2c84581aeee5ba854a6c0fee128c4",
+    "definition": "SHA256 of canonical sorted JSON mapping package-relative Python source filenames to their SHA256; runtime files are identical to the tested profile4 snapshot."
+  }
+}

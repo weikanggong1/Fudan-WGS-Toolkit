@@ -2,10 +2,12 @@
 
 Frames cover original physical columns consecutively, including all-zero and
 zero-layer sites. Counts apply only to the bound complete ordered sample axis.
-CSR and count frames are independently checksummed Zstd; original genotype retained.
+CSR and count frames are independently checksummed Zstd. Ordinary conversion
+retains its original genotype source; explicitly synthetic sources may use a
+direct byte budget and an append-only journal without chromosome-sized lists.
 A completed container is immutable. Incomplete recovery requires exact binding.
 """
-import hashlib, json, os
+import hashlib, json, mmap, os
 from pathlib import Path
 import numpy as np
 from . import sparse_codec_fast as csr
@@ -32,38 +34,92 @@ def _append(p,b):
   pos=f.tell();f.write(b);f.flush();os.fsync(f.fileno())
  return pos
 class Writer:
- def __init__(self,path,binding,samples,m,*,source_bytes,storage_fraction=.10,minimum_storage_bytes=0,chunk=CHUNK):
+ def __init__(self,path,binding,samples,m,*,source_bytes=None,storage_fraction=.10,minimum_storage_bytes=0,chunk=CHUNK,storage_limit_bytes=None,streaming=False):
   self.path=Path(path);self.samples=np.asarray(samples)
+  if type(streaming) is not bool:raise ValueError('streaming must be a boolean')
+  if streaming and (not isinstance(binding,dict) or binding.get('synthetic') is not True):raise ValueError('Streaming journals require a synthetic source binding')
+  self.streaming=streaming
   if self.samples.dtype!=np.int64 or self.samples.ndim!=1 or len(np.unique(self.samples))!=len(self.samples):raise ValueError('Physical sample axis must be unique int64')
-  if type(m)is not int or m<0 or source_bytes<=0 or not 0<storage_fraction<=.10:raise ValueError('Invalid dimension/storage budget')
+  if type(m)is not int or m<0 or not 0<storage_fraction<=.10:raise ValueError('Invalid dimension/storage budget')
+  if storage_limit_bytes is not None:
+   if not isinstance(binding,dict) or binding.get('synthetic') is not True:raise ValueError('Explicit storage limits require a synthetic source binding')
+   if type(storage_limit_bytes) is not int or storage_limit_bytes<=0:raise ValueError('storage_limit_bytes must be a positive integer')
+   if source_bytes is not None and (type(source_bytes) is not int or source_bytes<=0):raise ValueError('Invalid source byte count')
+   storage_cap_bytes=storage_limit_bytes
+  else:
+   if source_bytes is None or source_bytes<=0:raise ValueError('Invalid dimension/storage budget')
+   storage_cap_bytes=max(int(source_bytes*storage_fraction),minimum_storage_bytes)
   if type(chunk) is not int or not 1<=chunk<=CHUNK:raise ValueError('chunk must be an integer in 1..1024')
   if type(minimum_storage_bytes) is not int or not 0<=minimum_storage_bytes<=2**20:raise ValueError('minimum_storage_bytes must be 0..1048576')
-  self.spec=dict(format=FORMAT,state_encoding=codec.STATE_ENCODING,m=m,n=len(samples),chunk=chunk,binding=binding,sample_sha256=sha(self.samples.astype('<i8').tobytes()),source_bytes=source_bytes,storage_cap_bytes=max(int(source_bytes*storage_fraction),minimum_storage_bytes))
+  self.spec=dict(format=FORMAT,state_encoding=codec.STATE_ENCODING,m=m,n=len(samples),chunk=chunk,binding=binding,sample_sha256=sha(self.samples.astype('<i8').tobytes()),source_bytes=source_bytes,storage_cap_bytes=storage_cap_bytes)
+  if storage_limit_bytes is not None:self.spec['storage_budget_kind']='explicit_synthetic_bytes'
+  if streaming:self.spec['journal_format']='jsonl-v1'
+  self.journal_path=self.path/('journal.jsonl' if streaming else 'journal.json')
   if self.path.exists():
    if (self.path/'COMPLETE').exists():raise FileExistsError('Completed cache cannot be overwritten')
    if json.loads((self.path/'manifest.pending.json').read_text())!=self.spec:raise ValueError('Resume source/sample binding mismatch')
    actual=np.load(self.path/'samples.npy',allow_pickle=False)
    if not np.array_equal(actual,self.samples) or actual.dtype!=self.samples.dtype:raise ValueError('Resume sample axis mismatch')
-   self.rows=json.loads((self.path/'journal.json').read_text())
+   self.rows=None if streaming else json.loads(self.journal_path.read_text())
   else:
    self.path.mkdir(parents=True,mode=0o700)
    atomic(self.path/'manifest.pending.json',canonical(self.spec));np.save(self.path/'samples.npy',self.samples,allow_pickle=False)
    for name in ('data.bin','headers.bin','counts.bin'):(self.path/name).touch()
-   self.rows=[];atomic(self.path/'journal.json',canonical(self.rows))
+   self.rows=None if streaming else [];atomic(self.journal_path,b'' if streaming else canonical(self.rows))
   self._recover()
+ def _journal_rows(self,repair_tail=False):
+  """Yield one bounded durable record at a time, rejecting committed damage.
+
+  A newline is the commit boundary after all three frame streams are fsynced.
+  Only an unterminated final record is an uncommitted torn append; recovery
+  removes that tail and later truncates the streams to the last valid record.
+  """
+  if not self.streaming:
+   yield from self.rows
+   return
+  valid_end=0;torn=False
+  with self.journal_path.open('rb') as stream:
+   while True:
+    line=stream.readline(16385)
+    if not line:break
+    if len(line)>16384:raise ValueError('Streaming journal record exceeds its byte bound')
+    if not line.endswith(b'\n'):
+     if not repair_tail:raise ValueError('Uncommitted streaming journal tail')
+     torn=True;break
+    try:row=json.loads(line)
+    except (ValueError,UnicodeError) as error:raise ValueError('Invalid committed streaming journal record') from error
+    if not isinstance(row,dict) or set(row)!=set(INDEX.names):raise ValueError('Streaming journal row keys differ')
+    for key in INDEX.names:
+     value=row[key]
+     if key in ('payload_sha','counts_sha'):
+      if not isinstance(value,str) or len(value)!=64 or any(character not in '0123456789abcdef' for character in value):raise ValueError('Invalid streaming journal digest')
+     elif type(value) is not int or value<0:raise ValueError('Invalid streaming journal integer')
+    valid_end=stream.tell()
+    yield row
+  if torn:
+   with self.journal_path.open('r+b') as stream:
+    stream.truncate(valid_end);stream.flush();os.fsync(stream.fileno())
  def _recover(self):
-  ends=dict(data=0,header=0,counts=0);start=0
-  for row in self.rows:
+  ends=dict(data=0,header=0,counts=0);start=0;frames=0
+  for row in self._journal_rows(repair_tail=True):
    if row['start']!=start or row['m']!=min(self.spec['chunk'],self.spec['m']-start):raise ValueError('Nonconsecutive committed frame')
+   if row['m']<=0:raise ValueError('Committed frame is empty')
    for kind,key,size in [('data','offset','size'),('header','header_offset','header_size'),('counts','counts_offset','counts_size')]:
     if row[key]!=ends[kind]:raise ValueError('Frame stream gap')
     ends[kind]+=row[size]
-   _read_frame(self.path,row,self.spec);start+=row['m']
+   _read_frame(self.path,row,self.spec);start+=row['m'];frames+=1
   for kind,name in [('data','data.bin'),('header','headers.bin'),('counts','counts.bin')]:
    p=self.path/name
    if p.stat().st_size<ends[kind]:raise ValueError('Committed stream truncated')
-   with p.open('r+b') as f:f.truncate(ends[kind])
-  self.next_start=start
+   with p.open('r+b') as f:f.truncate(ends[kind]);f.flush();os.fsync(f.fileno())
+  if self.streaming:
+   # An interrupted finalization can leave an incomplete or already renamed
+   # index. Without COMPLETE neither is published; rebuild from verified ACKs
+   # rather than charging the stale index twice against the byte budget.
+   for name in ('index.npy.tmp','index.npy'):
+    p=self.path/name
+    if p.exists():p.unlink()
+  self.next_start=start;self.frame_count=frames
  def _budget(self,extra):
   u=usage(self.path);cap=self.spec['storage_cap_bytes']
   # Logical projection plus per-file alignment/headroom; no filesystem quota guarantee.
@@ -74,6 +130,23 @@ class Writer:
   payload,meta=csr.encode(s,level=3);arrays=csr.decode_compact(payload,meta)
   direct=csr.compact(s);counts=csr.integer_counts(*arrays,m,n)
   if not all(np.array_equal(a,b) for a,b in zip(arrays,direct)):raise ValueError('CSR roundtrip mismatch')
+  self._commit_frame(payload,meta,counts,original_counts,m,n)
+ def append_compact(self,offsets,samples,values,original_counts):
+  """Append one full ordered CSR frame with the normal durable validations.
+
+  All six states, exact integer counts, compression roundtrip, storage
+  admission and journal/fsync checks are shared with the dense writer.
+  """
+  if not isinstance(offsets,np.ndarray) or offsets.ndim!=1:raise ValueError('CSR offsets must be a one-dimensional NumPy array')
+  m,n=len(offsets)-1,self.spec['n']
+  if m!=min(self.spec['chunk'],self.spec['m']-self.next_start) or m<=0:raise ValueError('Frame shape/order mismatch')
+  payload,meta=csr.encode_compact(offsets,samples,values,m,n,level=3)
+  arrays=csr.decode_compact(payload,meta)
+  if not all(np.array_equal(a,b) for a,b in zip(arrays,(offsets,samples,values))):raise ValueError('CSR roundtrip mismatch')
+  counts=csr.integer_counts(*arrays,m,n)
+  self._commit_frame(payload,meta,counts,original_counts,m,n)
+ def _commit_frame(self,payload,meta,counts,original_counts,m,n):
+  start=self.next_start
   keys=('reference_alleles','called_alleles','half_missing_samples')
   if not all(np.asarray(original_counts[k]).dtype==np.int64 and np.array_equal(counts[k],original_counts[k]) for k in keys):raise ValueError('Original integer summary differs before writing')
   raw=np.column_stack([counts[k] for k in keys]).astype('<i8').tobytes();cp=codec._zstd().ZstdCompressor(level=3,write_content_size=True).compress(raw)
@@ -81,17 +154,38 @@ class Writer:
   row=dict(start=start,m=m,offset=(self.path/'data.bin').stat().st_size,size=len(payload),header_offset=(self.path/'headers.bin').stat().st_size,header_size=len(header),counts_offset=(self.path/'counts.bin').stat().st_size,counts_size=len(cp),payload_sha=sha(payload),counts_sha=sha(cp))
   self._budget(len(payload)+len(cp)+len(header)+len(canonical(row))*2)
   for name,b in [('data.bin',payload),('counts.bin',cp),('headers.bin',header)]:_append(self.path/name,b)
-  self.rows.append(row);atomic(self.path/'journal.json',canonical(self.rows));self.next_start+=m
+  if self.streaming:_append(self.journal_path,canonical(row)+b'\n')
+  else:self.rows.append(row);atomic(self.journal_path,canonical(self.rows))
+  self.next_start+=m;self.frame_count+=1
   if max(usage(self.path).values())>self.spec['storage_cap_bytes']:raise MemoryError('Measured cache storage cap exceeded')
  def finish(self):
   if self.next_start!=self.spec['m']:raise ValueError('Incomplete physical axis')
-  a=np.empty(len(self.rows),dtype=INDEX)
-  for i,row in enumerate(self.rows):a[i]=tuple(row[k] for k in INDEX.names)
   tmp=self.path/'index.npy.tmp'
-  with tmp.open('wb') as f:np.save(f,a,allow_pickle=False);f.flush();os.fsync(f.fileno())
+  if self.streaming:
+   # The index is the ordinary reader-compatible NPY structured array. Build
+   # it through a mapping and one small block, never a chromosome-sized list.
+   self._budget(self.frame_count*INDEX.itemsize+512)
+   a=np.lib.format.open_memmap(tmp,mode='w+',dtype=INDEX,shape=(self.frame_count,))
+   block=np.empty(min(4096,max(1,self.frame_count)),dtype=INDEX);first=0;count=0
+   for row in self._journal_rows():
+    if first+count>=self.frame_count:raise ValueError('Streaming journal gained unexpected frames')
+    block[count]=tuple(row[k] for k in INDEX.names);count+=1
+    if count==len(block):
+     a[first:first+count]=block[:count];a.flush();first+=count;count=0
+     if hasattr(a._mmap,'madvise'):
+      try:a._mmap.madvise(mmap.MADV_DONTNEED)
+      except (AttributeError,OSError,ValueError):pass
+   if count:a[first:first+count]=block[:count];first+=count
+   if first!=self.frame_count:raise ValueError('Streaming journal lost committed frames')
+   a.flush();del a,block
+   with tmp.open('rb') as f:os.fsync(f.fileno())
+  else:
+   a=np.empty(len(self.rows),dtype=INDEX)
+   for i,row in enumerate(self.rows):a[i]=tuple(row[k] for k in INDEX.names)
+   with tmp.open('wb') as f:np.save(f,a,allow_pickle=False);f.flush();os.fsync(f.fileno())
   os.replace(tmp,self.path/'index.npy')
   hashes={name:file_sha(self.path/name) for name in ('data.bin','headers.bin','counts.bin','samples.npy','index.npy')}
-  manifest=dict(self.spec,frames=len(a),files_sha256=hashes,storage=usage(self.path),association_precision_accepted=False)
+  manifest=dict(self.spec,frames=self.frame_count,files_sha256=hashes,storage=usage(self.path),association_precision_accepted=False)
   b=canonical(manifest);self._budget(len(b)+128)
   atomic(self.path/'manifest.json',b);atomic(self.path/'COMPLETE',sha(b).encode())
   if max(usage(self.path).values())>self.spec['storage_cap_bytes']:(self.path/'COMPLETE').unlink();raise MemoryError('Final measured storage cap exceeded')
@@ -126,7 +220,9 @@ class Container:
   if s['format']!=FORMAT or s['state_encoding']!=codec.STATE_ENCODING or type(s['chunk']) is not int or not 1<=s['chunk']<=CHUNK:raise ValueError('Container semantic mismatch')
   chunk=s['chunk']  # Readers accept committed smaller frames; Writer stays at CHUNK.
   if expected_source_binding is not None and s['binding']!=expected_source_binding:raise ValueError('Source binding mismatch')
-  self.samples=np.load(self.path/'samples.npy',allow_pickle=False);self.index=np.load(self.path/'index.npy',allow_pickle=False)
+  self.samples=np.load(self.path/'samples.npy',allow_pickle=False)
+  index_mode='r' if s.get('journal_format')=='jsonl-v1' and s.get('binding',{}).get('synthetic') is True else None
+  self.index=np.load(self.path/'index.npy',allow_pickle=False,mmap_mode=index_mode)
   if self.samples.dtype!=np.int64 or self.samples.shape!=(s['n'],) or sha(self.samples.astype('<i8').tobytes())!=s['sample_sha256']:raise ValueError('Sample binding mismatch')
   if expected_samples is not None and not np.array_equal(self.samples,expected_samples):raise ValueError('Requested sample axis differs')
   if self.index.dtype!=INDEX or len(self.index)!=s['frames'] or len(self.index)!=(s['m']+chunk-1)//chunk:raise ValueError('Invalid frame index')

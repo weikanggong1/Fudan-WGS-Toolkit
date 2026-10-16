@@ -9,13 +9,14 @@ Fudan WGS Toolkit 使用 PyTorch GPU 完成多个二分类或连续表型的全�
 | 数据准备 | `prepare_WGS_data` | 原始 PLINK BED/BIM/FAM 与独立功能注释，生成有校验和的遗传目录 | [数据准备](docs/wgs_data_preparation.md) |
 | 二分类 WGS | `run_WGS_all_binanry` | 至少两个 0/1/缺失表型；默认缺失标签填为 0，可选各列 available 样本 | [二分类分析](docs/wgs_binary.md) |
 | 连续表型 WGS | `run_WGS_continuous` | 至少两个连续数值表型；默认逐列均值填补，可选各列 available 样本 | [连续表型分析](docs/wgs_continuous.md) |
-| 合成测试数据 | `generate_simulated_data` | 生成虚构表型、协变量、PLINK 与独立注释，默认完成数据准备，可直接进入两类关联入口 | [合成数据生成器](docs/generate_simulated_data.md) |
+| 合成测试数据 | `generate_simulated_data` | 直接生成 prepared、虚构表型和协变量；默认私有参考规模 / 频谱及15类mask校准，另有显式人工小预设 | [合成数据生成器](docs/generate_simulated_data.md) |
 
 各功能文档介绍流程图、输入格式、全部参数、Python 和 CLI 调用、原软件对应调用、验证范围及参考文献。`run_WGS_all_binanry` 是当前公开函数名，调用时保留这一拼写。
 
 ```mermaid
 flowchart LR
     RAW["原始 PLINK + 独立注释"] --> PREP["prepare_WGS_data"]
+    SIM["generate_simulated_data<br/>私有汇总校准 / 人工预设"] --> CACHE
     PREP --> CACHE["完成的遗传目录"]
     CACHE --> BINARY["run_WGS_all_binanry"]
     CACHE --> CONTINUOUS["run_WGS_continuous"]
@@ -42,6 +43,7 @@ Conda 环境包含 CUDA 11.8、PyTorch 2.5.1 和本包的 editable 安装。数�
 
 1. 尚无遗传目录：按[数据准备说明](docs/wgs_data_preparation.md)准备原始 PLINK 和独立注释。
 2. 已有完成目录：准备带身份列的表型、协变量 CSV，选择[二分类](docs/wgs_binary.md)或[连续表型](docs/wgs_continuous.md)入口。
-3. 按文档核对 `completed`、worker 退出、已提交块和最终 CSV；恢复时使用同一输出目录和输入配置。
+3. 无真实数据的软件优化：按[合成数据说明](docs/generate_simulated_data.md)直接生成 prepared；参考模式需私有校准文件，快速测试显式选择 `preset="small"`。
+4. 按文档核对 `completed`、worker 退出、已提交块和最终 CSV；恢复时使用同一输出目录和输入配置。
 
 两种表型分析的标签处理和模型不同，应分别调用相应入口。实测速度、精度及覆盖范围分别记录在各功能文档的“验证与 benchmark”中；[验证口径](validation/README.md)说明如何解读这些指标。

@@ -313,5 +313,8 @@
       "trait_chromosome_kind_combinations": 24,
       "single_trait_sample_counts_verified": true
     }
-  ]
+  ],
+  "implementation_status": "historical_superseded_raw_plink_generator",
+  "implementation_commit": "9ae80ba3eafc9d24a9635f332170f398bbb6a7a7",
+  "current_direct_prepared_validation": false
 }

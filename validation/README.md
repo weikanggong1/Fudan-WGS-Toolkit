@@ -7,7 +7,7 @@
 | 数据准备 | [数据准备：验证与 benchmark](../docs/wgs_data_preparation.md#验证与-benchmark) | 原始 PLINK 的局部真实转换、独立 BED 回读、注释转换和 1 / 8 CPU 对照 |
 | 二分类 WGS | [二分类：验证与 benchmark](../docs/wgs_binary.md#验证与-benchmark) | 最新六表型同输入官方统计核心对照、128 表型有限端到端与 CSV 核查；唯一官方 Single 求根回退差异另列。历史双 GPU / 两种缺失策略的入口验证保留各自范围 |
 | 连续表型 WGS | [连续表型：验证与 benchmark](../docs/wgs_continuous.md#验证与-benchmark) | 成熟关联内核的真实局部对照；独立连续入口的样本、字段、排序和恢复检查另行区分 |
-| 合成测试输入 | [合成数据生成器：验证与 benchmark](../docs/generate_simulated_data.md#7-验证与-benchmark) | 149项回归通过；3二分类与3连续表型、双染色体、四种缺失策略完整GPU调用和CSV校验通过；10万人输入完成生成及准备；[匿名汇总](simulated_data_20261016.anonymous.json) |
+| 合成测试输入 | [合成数据生成器：验证与 benchmark](../docs/generate_simulated_data.md#7-验证与-benchmark) | 当前direct prepared版267项CPU测试及8,192位点有界校准；GPU关联not_assessed，全参考规模未生成；[当前匿名汇总](simulated_prepared_20261016.anonymous.json)。 |
 
 ## 精度
 
@@ -32,6 +32,8 @@
 
 ## 合成输入
 
-`generate_simulated_data` 用固定种子生成完全虚构的输入，再通过正常数据准备和关联入口运行。它适用于不访问真实数据的代码回归、速度比较、内存压力测试及同输入优化前后 `−log10(P)` 比较。生成系数不是 oracle P 值，合成输入上的数值一致不替代真实数据或官方同输入精度验证。合成与真实 benchmark 分别记录数据来源、规模、实际 mask M、阶段和资源，不能直接外推彼此的端到端时间。
+`generate_simulated_data` 从私有汇总校准或显式的 small 人工预设直接生成生产格式 prepared，再由正常关联入口读取。它适用于不访问真实数据的代码回归、速度比较、内存压力测试及同输入优化前后 `−log10(P)` 比较。生成系数不是 oracle P 值，合成输入上的数值一致不替代真实数据或官方同输入精度验证。合成与真实 benchmark 分别记录数据来源、规模、实际 mask M、阶段和资源。
 
-2026-10-16的完整GPU输入为1024名人工样本、两条染色体各256个变异，每类3个表型；四次运行分别验证二分类available / 缺失填0及连续available / 均值填补。每次24个表型×染色体×分析类型组合，30份gzip CSV均核对SHA、CRC、行数和Single样本数。10万人检查仅完成1024个变异的生成与正常准备，没有运行该规模的关联。公开记录不包含生成的样本、位点或基因表。
+默认 reference 的逐染色体位点数、频谱和官方15类mask目标来源于私有汇总，不发布原始身份、坐标或基因结果。改变 n 时保持目标 MAF，MAC 及实际合格 M 可因整数化和样本筛选变化，应保存目标 / 实际审计。已发布 mask 行匹配与未发布类别的推断行分开记录，未知类别不能当成 M=0，也不能把额外推断行算作已发布目标的重复。完整数量校准、资源准入、有限规模生成与完整GPU关联分别报告。当前修订267项CPU测试通过；8,192位点有界输入在参考n下15条目标M匹配，n缩小后的低MAC取整与M变化另行报告。[当前匿名记录](simulated_prepared_20261016.anonymous.json)将这些检查与GPU关联分开：GPU为 `not_assessed`，共享设备繁忙时的自动批准拒绝未转为运行证据；全参考规模只做资源预检，未生成。
+
+[历史 PLINK 版记录](simulated_data_20261016.anonymous.json)对应提交 `9ae80ba3eafc9d24a9635f332170f398bbb6a7a7`：149项回归、1024名人工样本和两条染色体的四次GPU入口，以及10万人 / 1024变异的输入生成及准备。该记录不属于当前 direct prepared 实现，不用于当前版速度结论。

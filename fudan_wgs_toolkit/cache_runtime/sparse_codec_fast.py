@@ -72,6 +72,19 @@ def integer_counts(offsets,samples,values,m,n):
 def encode(states,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES):
  if type(level) is not int or level not in (1,3):raise ValueError('Sparse probe levels are1/3')
  s=codec._states(states);m,n=map(int,s.shape);offsets,samples,values=compact(s,max_raw_bytes=max_raw_bytes)
+ return encode_compact(offsets,samples,values,m,n,level,max_raw_bytes=max_raw_bytes)
+
+def encode_compact(offsets,samples,values,m,n,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES):
+ """Encode validated sparse exceptions without allocating an m-by-n matrix.
+
+ The payload and header are identical to ``encode`` for the same states.
+ Caller-owned arrays are never trusted as prevalidated or modified in place.
+ """
+ if type(level) is not int or level not in (1,3):raise ValueError('Sparse probe levels are1/3')
+ if any(not isinstance(value,np.ndarray) for value in (offsets,samples,values)):raise ValueError('CSR inputs must be NumPy arrays')
+ validate(offsets,samples,values,m,n)
+ if len(values)>2**32-1:raise ValueError('CSR offset exceeds uint32 capacity')
+ _budget(_size(m,n,len(values)),max_raw_bytes)
  raw=offsets.tobytes()+samples.tobytes()+values.tobytes()
  payload=codec._zstd().ZstdCompressor(level=level,write_content_size=True).compress(raw)
  meta=dict(format=FORMAT,version=1,state_encoding=codec.STATE_ENCODING,state_mapping=[v.copy() for v in codec.MAPPING],default_state=0,m=m,n=n,nnz=len(values),offset_dtype='<u4',sample_dtype=_sample_dtype(n).str,value_dtype='|u1',array_order=['offsets','samples','states'],codec='zstd',level=level,raw_bytes=len(raw),compressed_bytes=len(payload),raw_sha256=_sha(raw),compressed_sha256=_sha(payload))

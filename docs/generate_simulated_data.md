@@ -2,43 +2,33 @@
 
 ## 1. 功能与流程
 
-`generate_simulated_data` 生成完全虚构的二分类或连续表型、共同协变量、PLINK BED/BIM/FAM 及独立功能注释，默认再调用成熟的 `prepare_WGS_data`。返回的 `binary_kwargs` 和 `continuous_kwargs` 可直接传入 `run_WGS_all_binanry` 与 `run_WGS_continuous`，用于不接触真实队列的解码、读取、传输、矩阵计算、输出和恢复优化。
+`generate_simulated_data` 直接生成可供 `run_WGS_all_binanry` 和 `run_WGS_continuous` 读取的 **prepared 遗传目录、表型 CSV 和协变量 CSV**。它用于不接触真实个体数据的速度优化、内存测试及同一合成输入上的数值回归。生成阶段只用 CPU，不创建 PLINK、GDS 或 aGDS 中间文件，也不启动关联分析。
 
-样本数由 `n` 控制，每条染色体的变异数由 `variants_per_chromosome` 控制，局部基因窗口大小由 `variants_per_gene` 控制。生成器保留现有输入格式及 mask 分类语义，所有样本身份、坐标、等位基因、基因名称、注释值和生成系数均为人工数据，不读取真实遗传缓存、参考基因组或外部功能数据库，也不访问网络。
+默认 `preset="reference"`、`chromosomes="all"`、`variant_scale=1`。参考模式从私有校准文件读取各染色体的物理位点数、MAF / 缺失分布和匿名 mask M。当前已提取的完整参考规模为 **22 条常染色体、1,023,836,503 个物理位点、345,967 个样本**；每条染色体采用自己的计数，不按染色体长度或染色体数平均分配。345,967 是遗传数据的完整样本轴，不是某个表型剔除缺失后的拟合人数。
+
+参考 mask 固定取一份官方 STAAR PheWAS 表型结果的 15 类 gene 文件，按染色体及匿名基因组提取 M；不会把多个表型的结果行重复相加。这里的 M 是该 mask 的合格变异数，已发布 mask 数是官方结果中有记录的基因与类别组合数；两者均不等于物理位点总数、表型数、遗传帧数或关联 CSV 行数。
+
+真实的逐染色体计数、频谱、匿名 M 表及来源绑定留在私有环境。公共仓库提供生成方法、校准格式和完全人工的 `preset="small"`，没有参考文件时明确报错，不使用人工小规模作为参考默认值。
 
 ```mermaid
 flowchart TD
-    CONFIG["n、染色体、每条变异数、每基因变异数<br/>表型类型 / 数量、缺失率、随机种子、资源预算"] --> VALIDATE["检查参数、最小工作集与新输出目录<br/>保存 simulation.pending.json"]
-    VALIDATE --> SEEDS["按染色体与表型分别派生随机流<br/>多 CPU 有界染色体并行"]
-    SEEDS --> ID["虚构 FID / IID<br/>age、sex、PC1–PC20"]
-    SEEDS --> LOCUS["指数分布的正整数位置间距<br/>不同的 A/C/G/T REF 和 ALT"]
-    LOCUS --> AF["稀有频率 log-uniform + 常见频率 uniform<br/>条件 Binomial 等位基因计数"]
-    AF --> GT["随机分配双倍体单倍型<br/>同类前位点按概率复制 + 独立缺失"]
-    GT --> PLINK["variant-major BED / 六列 BIM / FAM<br/>A1=ALT，A2=REF；检查尾部填充"]
-    LOCUS --> ANNOTATION["人工类别轮转、3 类数值注释<br/>独立 gene / ncRNA / promoter 表"]
-    ANNOTATION --> MANIFEST["annotations.json<br/>标准原始注释清单 + synthetic 标记"]
-    GT --> CAUSAL["首条染色体的人工常见位点<br/>标准化 ALT dosage"]
-    ID --> PHENO["协变量效应 + 人工遗传效应<br/>连续正态噪声 / logistic-Bernoulli"]
-    CAUSAL --> PHENO
-    PHENO --> MISSING["各表型独立缺失；协变量可选缺失<br/>输出两类表型 CSV 与 ground_truth.csv"]
-    PLINK --> PREPARE{"prepare"}
-    MANIFEST --> PREPARE
-    PREPARE -- True --> PREP["正常 prepare_WGS_data<br/>解码、方向、注释、任务索引与逐帧校验"]
-    PREP --> CACHE["prepared：生产格式的完成遗传目录"]
-    CACHE --> KW["binary_kwargs / continuous_kwargs<br/>grm=none；保留各列 available 样本"]
-    MISSING --> KW
-    KW --> BINARY["run_WGS_all_binanry<br/>至少两个二分类表型；四类分析"]
-    KW --> CONT["run_WGS_continuous<br/>至少两个连续表型；四类分析"]
-    PREPARE -- False --> RAW["仅保留原始 PLINK、注释、CSV<br/>以后手动 prepare_WGS_data"]
-    CACHE --> REPORT["simulation.json<br/>配置、计数、文件 SHA、生成与准备耗时"]
-    RAW --> REPORT
+    PROFILE["私有汇总校准 / 显式 small 人工预设"] --> CHECK["核对格式、计数和 mask 关系"]
+    CHECK --> PLAN["按 n、位点规模、稀疏度预估内存与磁盘"]
+    PLAN --> CALLS["逐位点构造人工等位基因调用\nMAF 保持，整数 MAC 随 n 缩放"]
+    CHECK --> ANNOT["人工坐标、身份、注释和 mask 归属"]
+    CALLS --> PREP["生产格式的六状态稀疏 prepared\n逐帧计数、压缩、SHA 和完成清单"]
+    ANNOT --> PREP
+    PREP --> PHENO["人工 dosage + 协变量\n二分类 / 连续表型与独立缺失"]
+    PREP --> AUDIT["频谱及各 mask 目标 M / 实际 M 核对"]
+    PHENO --> REPORT["simulation.json + 两类调用参数"]
+    AUDIT --> REPORT
+    REPORT --> BINARY["run_WGS_all_binanry"]
+    REPORT --> CONT["run_WGS_continuous"]
 ```
-
-本工具是软件测试输入生成器。它可以固定同一合成输入比较优化前后输出与耗时；关于真实数据的精度、病例不平衡、群体结构和全基因组速度结论，仍由[二分类](wgs_binary.md)及[连续分析](wgs_continuous.md)的真实验证记录支持。生成器不提供预先知道的 P 值。
 
 ## 2. Python 调用
 
-使用主页的 Conda 环境即可，无新增依赖。生成和准备只使用 CPU；关联分析要求可用 CUDA。下面一次生成两种表型，每种两列，并分别运行全部四类分析：
+主页 Conda 环境已包含所需依赖。下面的人工小规模例子生成两条染色体、每条 1,024 个位点及两类表型，随后分别运行四类分析。`preset="small"` 必须显式指定；它的频谱和 mask 数没有真实队列含义。
 
 ```python
 from pathlib import Path
@@ -50,43 +40,38 @@ from fudan_wgs_toolkit import (
 
 
 def main():
-    # 必须使用尚不存在的新目录；所有输出都位于这个目录内。
-    simulated_data_directory = Path("work/simulated_example")
+    # 必须是新目录；产物放在公共仓库外。
+    simulated_data_directory = Path("work/simulated_small")
     simulation_report = generate_simulated_data(
         output_directory=simulated_data_directory,
-        n=1000,                         # 人工样本数。
-        chromosomes=[21],
-        variants_per_chromosome=1024,   # 每条染色体生成的变异数，亦为默认值。
-        variants_per_gene=256,          # 每个人工基因的变异窗口大小。
+        preset="small",                 # 完全人工的格式与接口测试预设。
+        n=1000,                         # 样本数；改变 n 时保持目标 MAF。
+        chromosomes=[21, 22],
+        variant_scale=1.0,               # small 中每条 1,024 个位点。
         phenotype_type="both",
         n_binary_traits=2,
         n_continuous_traits=2,
-        phenotype_missing_rate=0.02,    # 每个表型独立生成缺失位置。
+        phenotype_missing_rate=0.02,     # 各表型独立生成缺失。
         covariate_missing_rate=0.0,
-        genotype_missing_rate=1e-5,
-        rare_fraction=0.999,             # 目标稀有分量；仍保留常见Single校准位点。
         seed=1729,
-        cpu_threads=8,                  # 染色体生成 worker 上限及准备调度预算。
-        memory_limit_gib=8,             # 生成 / 准备阶段主存工作区估算。
-        prepare=True,
+        chunk_size=256,
+        cpu_threads=2,
+        memory_limit_gib=8,              # 生成阶段主存估算预算。
     )
-    print(simulation_report["completed"])
     print(simulation_report["prepared_directory"])
+    print(simulation_report["mask_counts_exact"])
 
-    # 返回参数含 phenotype_csv、covariate_csv、prepared_directory、
-    # output_directory、chromosomes、analyses、cpu_threads 和 grm="none"。
-    # 二分类默认在此示例中保留各列 available 样本。
+    # 返回参数已经包含表型、协变量、prepared、四类分析和独立输出目录。
     binary_analysis_arguments = dict(simulation_report["binary_kwargs"])
     binary_analysis_arguments.update(
         device=["cuda:0"],
-        memory_limit_gib=20,             # 关联阶段每张 GPU 的准入预算。
-        host_memory_limit_gib=8,         # 关联阶段整个节点任务的主存预算。
+        memory_limit_gib=20,             # 关联阶段每卡的准入预算。
+        host_memory_limit_gib=8,         # 关联阶段任务的节点主存预算。
         resume=False,
     )
     binary_association_report = run_WGS_all_binanry(**binary_analysis_arguments)
     print(binary_association_report["completed"])
 
-    # 连续入口独立运行；两次关联共用同一份 prepared，不重新准备。
     continuous_analysis_arguments = dict(simulation_report["continuous_kwargs"])
     continuous_analysis_arguments.update(
         device=["cuda:0"],
@@ -102,299 +87,262 @@ if __name__ == "__main__":
     main()
 ```
 
-`cpu_threads` 控制生成 worker 和准备阶段的调度，不限制 NumPy 已初始化的原生 BLAS 线程。将上例保存为 `run_simulated_example.py` 后，可在启动 Python **之前**设置线程环境，例如：
+两类返回参数均包含 `grm="none"`、`gene_variant_type="variant"` 和 `analyses=("individual", "coding", "noncoding", "ncrna")`。`variant` 保留人工 Indel，以覆盖 PTV；成熟关联内核在该模式下不使用数值功能注释权重。需要测试11个数值注释通道的加权计算时，将返回参数改为 `gene_variant_type="SNV"`，同时使用新的关联输出目录；SNV 筛选会改变 PTV 等 mask 的资格与 M。这两种负载应分别记录，不改变现有关联行为。多 GPU 按完整染色体分配，一条染色体不会自动拆给多张卡。
 
-```bash
-OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 \
-  python run_simulated_example.py
-```
+二分类返回 `impute_missing=False`，连续返回 `rm_nan=False`，分别保留每列表型的 available 样本。协变量缺失始终剔除。需要共同样本轴时可把 `phenotype_missing_rate=0`；需要测试其他标签策略时，在新的关联输出目录中分别设置 `impute_missing=True` 或 `rm_nan=True`。这些选择会影响关联阶段的 MAC、MAF 和 mask 资格。
 
-这样设定每个原生线程池的上限；多个 worker 与线程池仍可能重叠，不等于操作系统的总 CPU 硬配额。修改已导入 NumPy 的 Python 进程环境不保证重设已初始化线程池；不额外依赖线程池管理包。
+### 参考规模生成
 
-`completed=True` 在生成报告中表示生成及所请求的准备完成，不表示两次关联已运行。关联是否完成须分别检查返回报告、worker 退出、块提交和最终 CSV。
-
-关联入口同时检查文件描述符容量。系统硬上限足够当前表型规模时可提高软上限，并在资源回执中记录；不足以完成当前规模时仍明确拒绝运行。
-
-返回的二分类参数使用 `impute_missing=False`；连续参数使用 `rm_nan=False`，因此可以测试不同 NaN 模式下的样本子集处理。测试共同样本轴时，可把 `phenotype_missing_rate=0`，或在新的关联输出目录中分别改为 `impute_missing=True`、`rm_nan=True`。协变量缺失始终由关联入口剔除，不填补。
-
-### 多染色体和不同规模的 mask
-
-```python
-from fudan_wgs_toolkit import generate_simulated_data, run_WGS_all_binanry
-
-if __name__ == "__main__":
-    simulation_report = generate_simulated_data(
-        output_directory="work/simulated_multi_chromosome",
-        n=10000,
-        chromosomes=[20, 21, 22],
-        variants_per_chromosome={20: 4096, 21: 2048, 22: 8192},
-        variants_per_gene=2048,
-        phenotype_type="binary",
-        n_binary_traits=16,
-        cpu_threads=8,
-        memory_limit_gib=8,
-        seed=1730,
-    )
-    binary_analysis_arguments = dict(simulation_report["binary_kwargs"])
-    binary_analysis_arguments.update(device=["cuda:0", "cuda:1"])
-    binary_association_report = run_WGS_all_binanry(**binary_analysis_arguments)
-```
-
-多 GPU 仍按完整染色体分配。一条染色体的数据不会因为指定多张 GPU 而自动拆开。`variants_per_gene` 是基因范围内的总变异数，经过类别和 MAF 筛选后的实际 mask 长度 M 更小；应读取运行报告中的实际 M，不能把这个参数直接当作 mask 长度。需要研究长 mask 时同时增加每条染色体变异数和每基因窗口，并记录实际 M 分层。
-
-增加样本数时，建议每条染色体至少保留默认1024个变异，例如：
+私有参考文件配置完成后，不需要再次访问原始个体数据。下面保留所有染色体的物理位点数和 mask 目标，只将样本数改为 10,000：
 
 ```python
 from fudan_wgs_toolkit import generate_simulated_data
 
 if __name__ == "__main__":
-    large_simulation_report = generate_simulated_data(
-        output_directory="work/simulated_large_input",
-        n=100000,
-        chromosomes=[21],
-        variants_per_chromosome=1024,
-        rare_fraction=0.999,
+    reference_simulation_report = generate_simulated_data(
+        output_directory="work/simulated_reference_n10000",
+        calibration_profile="/private/calibration/simulation_profile.json",
+        n=10000,
         phenotype_type="binary",
-        n_binary_traits=2,
-        cpu_threads=2,
+        n_binary_traits=16,
+        cpu_threads=8,
         memory_limit_gib=8,
-        prepare=True,
     )
-    print(large_simulation_report["completed"])
+    print(reference_simulation_report["frequency_counts_exact"])
+    print(reference_simulation_report["mask_counts_exact"])
 ```
 
-默认采用1024个变异和0.999的目标稀有分量，减少常见变异的编码占用，为样本轴和正常压缩容器留出空间。准备器沿用其相对原始BED大小的容量检查；大样本配很少变异、较多常见变异或较高缺失时，样本轴与遗传payload仍可能超过该上限，即使工作内存不大也会拒绝完成。显式减小 `variants_per_chromosome` 适合小样本格式测试；大样本测试先核对变异数及分布，不修改准备器的容量限制。只需原始输入时可用 `prepare=False`。
+示例路径由使用者替换；参考文件不随包分发。省略 `n` 时使用文件中的 `reference_n`，省略 `chromosomes` 和 `variant_scale` 时保留完整参考位点规模。全规模输出可能需要很大磁盘与生成时间；函数先检查估算工作集和可用空间，不能容纳时在创建输出目录前拒绝，不自动缩减为小数据。`variant_scale=0.001` 等显式比例可用于缩小测试，同时按比例缩小位点数和 mask 目标；它不再是完整参考规模。
 
-## 3. 输入参数与生成分布
+## 3. 参数与校准文件
 
 ### 全部参数
 
 | 参数 | 默认值 | 意义与格式 |
 | --- | --- | --- |
-| `output_directory` | 必填 | 新输出根目录，接受字符串或 `Path`。已有目录报错，不覆盖或恢复。 |
-| `n` | `1000` | 样本数，整数且至少 128；所有染色体共用同一有序 FID/IID 双列。 |
-| `variants_per_chromosome` | `1024` | 每条染色体变异数，整数且至少 32；Python 也接受 `{染色体: 数量}` 字典，键须与所选染色体完全一致。大样本配很少变异时，正常准备的容量检查可能不通过。 |
-| `chromosomes` | `("21",)` | 常染色体 1–22 的唯一列表，可用数字、数字字符串或 `chr` 前缀；`"all"` 为全部 22 条。 |
-| `phenotype_type` | `"both"` | `"binary"`、`"continuous"` 或 `"both"`。两种表型写入不同 CSV。 |
-| `n_binary_traits` | `2` | 选择二分类时生成的列数，整数且至少 2；未选择该类型时忽略。 |
-| `n_continuous_traits` | `2` | 选择连续时生成的列数，整数且至少 2；未选择该类型时忽略。 |
-| `seed` | `1729` | 非负整数随机种子；按染色体和表型派生独立随机流。 |
-| `phenotype_missing_rate` | `0.02` | 每个表型独立的缺失概率，`[0,1)`；CSV 使用空单元格。 |
-| `covariate_missing_rate` | `0.0` | 每个协变量单元格独立的缺失概率，`[0,1)`；不填补。22 列共同使用时，完整样本比例约为 `(1-rate)^22`。 |
-| `genotype_missing_rate` | `1e-5` | 每个位点每个样本的完整缺失概率，`[0,1)`；BED 保存标准缺失状态。 |
-| `case_fraction` | `0.2` | Logistic 概率的目标平均值，严格位于 `(0,1)`；实际病例数由 Bernoulli 采样及缺失决定，不是固定数量。 |
-| `causal_effect` | `0.35` | 标准化人工 ALT dosage 的生成系数，有限实数；各表型交替使用正负号。0 为不设置该遗传效应。 |
-| `rare_fraction` | `0.999` | 目标稀有变异比例，`[0,1]`。常见分量目标数量为 `max(2, round(m × (1−rare_fraction)))`，在候选位置随机分配；首轮 mask 保留稀有代表的约束可能限制实际数量，实际比例见报告。 |
-| `ld_strength` | `0.2` | 复制此前同稀有 / 常见类别位点基因型的概率，`[0,1]`；不等于目标相关系数或目标 LD r²。 |
-| `variants_per_gene` | `256` | 每个人工基因窗口的总变异数，整数且至少 32；尾部基因可以不足这个数量。 |
-| `chunk_size` | `256` | 每个准备帧的变异数，整数 1–1024；生成器也据预算限制实际生成块。 |
-| `cpu_threads` | `8` | 染色体生成 worker 总上限，并传给 `prepare_WGS_data` 的调度预算。一条染色体生成阶段使用一个 worker；NumPy 原生 BLAS 线程另外在启动前用环境变量限制，不是总 CPU 硬上限。 |
-| `memory_limit_gib` | `8` | 生成及准备阶段的主机工作区估算，正有限数；1 GiB=`2**30` 字节，不是 RSS 硬配额，也不是关联 GPU 上限。 |
-| `prepare` | `True` | True 自动调用正常数据准备并返回可运行参数；False 只写原始 PLINK、注释与 CSV，`prepared_directory` 和两类 kwargs 为 None。 |
+| `output_directory` | 必填 | 字符串或 `Path`，必须是不存在的新目录；不覆盖已有输入或恢复半成品。 |
+| `n` | `None` | 整数且至少 128。None 使用校准文件的 `reference_n`；small 使用 1,000。 |
+| `calibration_profile` | `None` | 私有校准 JSON 路径或 Python 字典。reference 模式可由环境变量或用户配置指定，small 不接受该参数。 |
+| `preset` | `"reference"` | reference 使用私有汇总；small 为完全人工的 22 条染色体、每条 1,024 位点及 15 类 mask 测试预设。 |
+| `chromosomes` | `"all"` | 校准文件中全部染色体，或不重复的 1–22 列表；接受整数、数字字符串及 `chr` 前缀。 |
+| `variant_scale` | `1.0` | 正有限数。逐染色体位点数及 mask 目标按比例取整；1 保留校准规模。取整后的嵌套关系或 M<2 可以改变输出 mask 数，须查实际审计。 |
+| `phenotype_type` | `"both"` | binary、continuous 或 both；两类表型分别写入 CSV。 |
+| `n_binary_traits` | `2` | 选择二分类时的列数，整数且至少 2；未选择该类型时忽略。 |
+| `n_continuous_traits` | `2` | 选择连续时的列数，整数且至少 2；未选择该类型时忽略。 |
+| `seed` | `1729` | 非负整数；为染色体、位点、协变量和表型派生独立随机流。 |
+| `phenotype_missing_rate` | `0.02` | 每个表型独立的缺失概率，范围 `[0,1)`；CSV 缺失为空单元格。 |
+| `covariate_missing_rate` | `0.0` | 每个协变量单元格的缺失概率，范围 `[0,1)`；22 列共同完整的期望比例约 `(1-rate)^22`。 |
+| `case_fraction` | `0.2` | 二分类 Logistic 概率的目标平均值，严格在 `(0,1)`；实际病例数由 Bernoulli 采样及缺失决定。 |
+| `causal_effect` | `0.35` | 标准化人工 ALT dosage 的生成系数，有限实数；各表型交替使用正负号，0 表示该遗传项为零。 |
+| `chunk_size` | `256` | 请求每个遗传帧的最大位点数，整数 1–1,024；根据主存预算可自动减小。 |
+| `cpu_threads` | `8` | 染色体生成 worker 的上限，同时作为后续返回调用参数的 CPU 调度预算。 |
+| `memory_limit_gib` | `8` | 生成阶段的主存估算预算，正有限数；1 GiB=`2**30` 字节。不代表 GPU 预算或操作系统 RSS 硬配额。 |
+| `storage_limit_gib` | `None` | 可选正有限数，限定生成的 prepared 遗传存储预算；None 按估算及剩余磁盘决定。CSV 空间另行预留。低于估算或大于可用空间时拒绝。 |
 
-参数校验在创建目录前完成；生成中如出现不可用表型、协变量完整样本不足或准备失败，会保留当前目录及 `simulation.pending.json`，不会发布 `simulation.json` 的完成状态。应保留现场，调整参数后选用新目录。
+`cpu_threads` 不会重设已经初始化的 BLAS 线程池。需要限制 NumPy 原生线程时，在启动 Python 前设置，例如：
 
-### 遗传值、位置和注释
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 python run_simulated_example.py
+```
 
-所有变异为双等位 SNV。位置从一个人工正坐标起点开始，后续间距为 `1 + floor(Exponential(mean=80))` bp，因此递增且不重复。这些坐标没有参考基因组含义；不用它们查询真实基因、注释或区域资源。
+内存估算覆盖样本向量、有限大小的 metadata 块、并发 worker 和紧凑遗传帧，不分配 `n × 整条染色体位点数` 的稠密矩阵。磁盘估算包含 genotype、metadata、catalog 和输入 CSV，不依赖理想压缩率。生产 prepared writer 对本生成器的合成数据使用明确字节预算；真实源数据的既有压缩容量约束保留原规则。
 
-每条染色体先按 `rare_fraction` 计算常见分量数量，在保留首轮稀有 mask 代表的候选位置随机分配，至少保留两个常见位点。分量归属不逐位点做独立 Bernoulli 采样，最终数量由报告记录。稀有分量的目标频率服从 `log-uniform(min(0.002, 1/n), 0.008)`，常见分量服从 `uniform(0.05, 0.45)`。ALT 等位基因总数先按 `Binomial(2n, frequency)` 采样，再限制至少两个 ALT；稀有分量另限制 ALT 数除以 `2n` 不超过 0.009。随机选择携带 ALT 的单倍型后合成每人的 0、1、2 dosage，再叠加缺失。这个条件采样有意增加可用于小规模 mask 的变异，不等同无条件的群体等位基因频谱；缺失后的实际 MAC 与 MAF由各入口重新计算。
+### 私有文件解析顺序
 
-局部相关性用前一同类位点的完整调用向量复制实现，然后在当前位点独立加入缺失。它能产生相关及重复的基因型列，适合检验矩阵谱和内存路径；不生成相位、真实重组史、亲缘结构或群体 LD。需要稀疏 GRM 的方法测试应另提供一致的合成模型和身份绑定，目前生成器固定输出 `grm="none"`。
+reference 模式依次使用：
 
-每个基因窗口轮转 stopgain、stoploss、splicing、两类 missense、synonymous、upstream、downstream、UTR3、UTR5、CAGE / DHS promoter、CAGE / DHS enhancer 及 ncRNA exonic / splicing 类别，每类连续两个位置。独立基因、ncRNA 和 promoter 参考与这些人工归属一致，使生产 catalog 走正常筛选路径。小规模 mask 是否产生非空结果仍由实际 M、MAF、QC 及最小变异数规则决定，不修改这些规则以制造通过。
+1. 显式 `calibration_profile` 路径或字典。
+2. 环境变量 `FUDAN_WGS_SIMULATION_PROFILE` 指定的 JSON。
+3. `FUDAN_WGS_SIMULATION_CONFIG` 指定的用户配置，未指定时为 `~/.config/fudan-wgs-toolkit/simulation.json`。
 
-默认准备目录沿用现有5种 coding、7种 noncoding和1种 ncRNA 类别；人工分类还支持选择器的可选 `ptv`、`ptv_ds`。测试中的15类覆盖包含这两种可选类别，不能与默认关联运行的13类输出混为一谈。
+用户配置只需一项：
 
-三类数值权重为 `CADD`、`aPC.LocalDiversity`、`aPC.Epigenetics`，数值独立来自 `uniform(0.5, 35)`；这些名称用于已有权重接口，数值没有数据库注释含义。人工变异全部声明 `qc="PASS"`，不表示执行了真实遗传 QC。原始注释清单和报告均标记 `synthetic=true`。
+```json
+{"calibration_profile": "/private/calibration/simulation_profile.json"}
+```
+
+配置中的相对路径相对于该配置文件；文件路径由使用者决定。校准文件使用 `format="synthetic-wgs-calibration-v1"`：
+
+| 字段 | 结构与意义 |
+| --- | --- |
+| `reference_n` | 原始遗传样本轴大小，整数且至少128。用于 MAF / MAC 的样本量缩放。 |
+| `chromosomes` | 染色体对象列表，`name` 为唯一的 1–22，`variants` 为该染色体物理位点数。 |
+| `frequency_bins` | 每条染色体的联合频谱列表；每项含整数 `count`、`maf∈[0,0.5]`、`missing_rate∈[0,1]`。count 合计必须等于 variants。 |
+| `minor_ac_mean`, `called_alleles_mean` | frequency bin 中可选的参考 MAC / 已调用等位基因数均值，供参考 n 下恢复整数计数。 |
+| `minor_ac_low`, `minor_ac_high` | 可选的参考 MAC 分箱边界，只保存汇总，不包含个体调用。 |
+| `masks` | 每条染色体的匿名目标列表，每项含 `kind`、非负整数 `group`、规范 `category` 和整数 `m≥2`；kind/group/category 组合唯一。 |
+| `position_span` | 可选的染色体坐标跨度汇总，不小于 variants；只限定人工位置范围，不保留原始坐标。省略时人工跨度为 `2×variants`。 |
+| `analysis_reference_n` | 可选的原分析样本数说明，与完整遗传 reference_n 区分；不改变遗传样本轴。 |
+
+该格式只需要汇总统计。原始样本标识、疾病名、字段编号、坐标、基因名和关联 P 值均不作为生成输入。参考文件及生成后的逐位点 / 逐 mask 审计文件应留在私有存储。
+
+## 4. 遗传、mask 与表型的生成方式
+
+### MAF 保持与 MAC 缩放
+
+每条染色体保留频谱各 bin 的位点库存；缩放位点数时采用总数守恒的分配。每个位点从剩余库存随机取一个 bin，根据 MAF 与缺失率确定已调用等位基因数 AN 和 MAC，再随机分配到人工样本的单倍型。参考样本量下可采用 bin 的参考计数均值；改变 n 时约为 `AN≈2n×(1−missing_rate)`、`MAC≈AN×MAF`，均取合法整数。
+
+频谱 bin 的位点库存可以精确相同，bin 内使用均值不能恢复每个原始位点。低 MAC 位点随 n 变小可能变成 MAC=0，MAF 和稀有资格也受整数化影响；不把这类位点强行变成 MAC≥2。完整缺失及单等位基因缺失都使用成熟的六状态格式保存，持久化整数计数在每帧回读时核对。
+
+### 15 类 mask
+
+| 分析类型 | 规范 category |
+| --- | --- |
+| coding：7 类 | `plof`、`plof_ds`、`missense`、`disruptive_missense`、`synonymous`、`ptv`、`ptv_ds` |
+| noncoding：7 类 | `upstream`、`downstream`、`UTR`、`promoter_CAGE`、`promoter_DHS`、`enhancer_CAGE`、`enhancer_DHS` |
+| ncRNA：1 类 | `ncRNA` |
+
+coding 使用人工 stopgain、splice、missense、synonymous 及 frameshift Indel 注释构造交集。disruptive missense 可以与 splice 重叠，所以 `plof_ds` 是集合并集，M 为两类 M 之和减去交集，`ptv_ds` 同理；不能只把两个 M 相加。官方没有发布的类别记为未知，不能据此断定 M=0 或 M<2。生成器从已知边际 M 推断一组可行的人工交集与未知类别，无法满足时报告不兼容目标。
+
+各 noncoding mask 由人工独立的注释原子构造。已发布 M 只能约束边际数量，不能恢复原始变异交集、同一变异属于多个基因的关系或 LD。其余物理位点作为人工背景保留，仍可进入 Single 的正常筛选。
+
+prepared 保存11个数值注释通道：`CADD`、`aPC.LocalDiversity`、`aPC.Epigenetics`，以及8个明确人工命名的 `Synthetic.Score01`–`Synthetic.Score08`。通道数量与参考计算配置一致，数值由人工分布生成，不匹配真实注释值或注释分布，也不复制额外数据库字段。人工类别与 QC 使用生产 selector 读取；数值注释是否参与加权沿用上面的 variant / SNV 规则。QC="PASS" 是合成标记，不代表执行真实遗传 QC。
+
+`mask_counts_exact` 只核对**已发布目标行**在生成样本轴上的稀有资格 M，`mask_audit` 逐项保存 `source_m`、`target_m`、`observed_rare_m` 及 `matched`。当前参考清单含233,589条已发布目标，目标匹配不表示全部运行时 mask 行数相同。推断出的未知类别可能有 M≥2，正常关联会另外输出；`inferred_mask_audit` 和 `additional_inferred_eligible_mask_rows` 单独记录这些类别。
+
+关联入口还会根据该列表型的有效样本、变异类型和 QC 重新筛选，所以生成审计不等于每个关联结果最终 M。改变 n、variant_scale 或缺失策略后，mask 数与 M 的偏离均应直接读取实际报告。
+
+位置在给定跨度内分层随机采样，一层一个互异正整数；样本和基因采用人工前缀标签，等位基因为人工 SNV 或必要的 Indel。坐标不映射真实参考基因组。当前模型不重建真实 LD、亲缘、相位、重组史、跨 mask 交集和群体结构。
 
 ### 表型与协变量
 
-身份使用有前缀的字符串双列 `FID,IID`；两份表型 CSV 和协变量 CSV 与所有 FAM 采用相同样本行序。协变量 `age` 服从 `uniform(40,80)`，`sex` 为 0/1，`PC1`–`PC20` 为独立标准正态随机数；这些 PC 是测试变量，不是由遗传数据计算的主成分。FAM sex 按 PLINK 1/2 编码，FAM phenotype 固定为 -9，关联表型从独立 CSV 读取。
-
-设第一条染色体选定人工常见位点的 ALT dosage 标准化为 z，生成线性项为：
+所有染色体与 CSV 共用相同的有序 `FID,IID` 双列。协变量为 `age~Uniform(40,80)`、`sex∈{0,1}` 和独立标准正态的 `PC1`–`PC20`；这些 PC 是人工测试变量。由某个人工非恒定位点取得 ALT dosage，按均值和标准差标准化为 z：
 
 \[
 \eta=0.015(age-60)+0.15(sex-0.5)+0.08PC1+\beta z.
 \]
 
-连续表型为 `η + Normal(0,1)`；二分类先求使平均 Logistic 概率接近 `case_fraction` 的截距，再独立 Bernoulli 采样。每列使用独立噪声、标签和缺失随机流。`ground_truth.csv` 保存生成 β、dosage 均值 / 标准差、截距及协变量系数。它描述生成模型，不是估计效应或 P 值的数值答案；有限样本、随机噪声、缺失、基因型处理及检验定义都会影响拟合结果。
+连续表型为 `η+Normal(0,1)`；二分类求使平均 Logistic 概率接近 `case_fraction` 的截距，再独立 Bernoulli 采样。各列使用独立噪声与缺失位置。`ground_truth.csv` 保存生成系数与 dosage 尺度，可复核生成模型；它不提供预先知道的关联 P 值或有限样本估计系数。
 
-## 4. 输出目录、格式与返回值
+## 5. 输出格式与返回值
 
 ```text
-simulated_example/
-  raw/
-    chr21.bed / chr21.bim / chr21.fam
-    chr21.causal.npy
-  annotations/
-    annotations.json
-    chr21.csv
-    chr21.genes.csv
-    chr21.ncrna.csv
-    chr21.promoters.tsv
+simulated_small/
+  prepared/
+    dataset.json / COMPLETE
+    sample_pairs.npy / sample_ids.npy
+    chr21/                      # 标准稀疏容器、计数、索引和 metadata。
+    chr22/
+    catalogs/                   # 人工 gene 任务与 promoter 区间。
   inputs/
     binary_phenotypes.csv
     continuous_phenotypes.csv
     covariates.csv
     ground_truth.csv
-  prepared/                     # 仅 prepare=True 时创建。
-  simulation.json               # 成功后发布；生成报告和配置。
-  results_binary/               # 调用二分类入口后才产生。
-  results_continuous/           # 调用连续入口后才产生。
+    causal_chr21.npy             # 各染色体找到的人工生成 dosage；不作为关联输入。
+  simulation.json               # 全部生成及核对成功后发布。
 ```
 
 | 输出 | 格式与意义 |
 | --- | --- |
-| `raw/chr*.bed` | PLINK variant-major 二位编码；A1=ALT，A2=REF，0/1/2 ALT dosage 分别编码为 `11/10/00`，缺失为 `01`，不足四人的尾部填充位为零。 |
-| `raw/chr*.bim` | 无表头六列，CHR、`CHR:POS:REF:ALT` 人工变异 ID、遗传距离0、1-based人工位置、A1=ALT、A2=REF。 |
-| `raw/chr*.fam` | 无表头六列 FID、IID、父本0、母本0、sex、phenotype -9。BED 精确大小为每条染色体 `3 + ceil(n/4) × m` 字节。 |
-| `raw/chr*.causal.npy` | 生成表型使用的人工位点 dosage 浮点数组；缺失用当前位点平均 ALT dosage，仅供生成溯源，关联入口不读取。 |
-| `annotations/chr*.csv` | 带表头的独立人工功能表。包含 CHR/POS/REF/ALT、QC、三类数值注释、类别及归属、`synthetic`、目标 MAF、实际 ALT 数 / 调用数和被复制源行号。复制源为零基位点行号，不是样本索引。 |
-| `annotations/chr*.genes.csv` | 人工基因闭区间，`hgnc_symbol,chromosome_name,start_position,end_position`。 |
-| `annotations/chr*.ncrna.csv` | 人工 ncRNA 归属参考，`chr,ncRNA`。 |
-| `annotations/chr*.promoters.tsv` | 人工 promoter 闭区间，`chromosome,start,end`；直接覆盖相应人工类别位点。 |
-| `annotations/annotations.json` | 标准 `raw-wgs-annotations-v1` 清单，包含列映射、数值权重名称、各染色体参考路径、生成种子和合成来源声明。 |
-| `inputs/*_phenotypes.csv` | UTF-8 CSV：`FID,IID` 与至少两列 `sim_binary_*` 或 `sim_continuous_*`。二分类有限值仅0/1，连续值为有限实数，缺失为空单元格。 |
-| `inputs/covariates.csv` | UTF-8 CSV：`FID,IID,age,sex,PC1,...,PC20`，与分析所用身份轴一致。 |
-| `inputs/ground_truth.csv` | 人工生成系数和尺度，含每列的 family、人工位点、`effect_per_dosage_sd`、dosage尺度、截距及三个非零协变量系数。关联入口不读取。 |
-| `prepared/` | 正常 `prepare_WGS_data` 的压缩遗传目录、metadata、catalog、完成清单与校验值；与从普通 PLINK 准备的格式相同，不手工拼接缓存。具体结构见[数据准备](wgs_data_preparation.md)。 |
-| `simulation.json` | 可 JSON 读取的最终报告；记录配置、实现参数、样本 / 表型计数、每条染色体摘要、原始文件尺寸 / SHA-256、阶段耗时及调用参数。 |
+| `prepared/` | schema version 2 的生产 prepared 格式，含六状态压缩容器、metadata、catalog、样本身份、SHA 和完成标志。两类关联入口直接读取，具体格式见[数据准备](wgs_data_preparation.md)。 |
+| `inputs/*_phenotypes.csv` | UTF-8 CSV，前两列 FID/IID，随后至少两列 `sim_binary_*` 或 `sim_continuous_*`；二分类有限值为0/1，连续为有限实数，缺失为空。未选择的类型不生成。 |
+| `inputs/covariates.csv` | UTF-8 CSV：`FID,IID,age,sex,PC1,...,PC20`，行序与 prepared 相同。 |
+| `inputs/ground_truth.csv` | 人工表型的生成系数、人工因果位点、dosage 均值 / 标准差及截距；关联入口不读取。 |
+| `inputs/causal_chr*.npy` | 人工 dosage 数组，用于表型生成与溯源，关联入口不读取。 |
+| `simulation.json` | 最终 JSON 报告，含配置、校准 SHA、计数审计、资源估算、耗时、输入文件 SHA 和两类调用参数。 |
 
-报告的重要字段：
+生成期间保留 `simulation.pending.json`；全部成功后以最终报告替换。生成失败时保留现场且不发布成功报告。参数和资源准入失败发生在建目录前；写出过程中失败的目录不能作为完成输入。
 
-| 字段 | 意义 |
+| 重要返回字段 | 含义 |
 | --- | --- |
-| `completed`, `synthetic`, `schema_version` | 生成是否完成、合成标记、报告结构版本。 |
-| `n_samples`, `seed`, `configuration` | 请求样本数、随机种子与完整生成配置。 |
-| `source_directory`, `annotation_directory` | 原始 PLINK 与独立注释目录，可手动传给 `prepare_WGS_data`。 |
-| `binary_phenotype_csv`, `continuous_phenotype_csv`, `covariate_csv`, `ground_truth_csv` | 各 CSV 的路径；未选择的表型类型为 None。 |
-| `prepared_directory` | 已准备完成目录；`prepare=False` 时为 None。 |
-| `binary_kwargs`, `continuous_kwargs` | 可直接用 `**kwargs` 调用相应公开入口；未生成该类或未 prepare 时为 None。已经包含独立关联输出目录。 |
-| `chromosome_reports`, `trait_reports` | 实际变异 / 人工基因 / 稀有分量 / 相关复制计数。`observed` / `missing` 为原表型有限值 / 缺失数；`available_for_analysis` 为该列有限值与完整共同协变量的交集，`cases` / `controls` 为此交集中的病例 / 对照数。 |
-| `complete_covariate_samples` | 全部22个协变量均有限的样本数，不等于每列表型最终分析人数。 |
-| `preparation`, `generation_seconds`, `total_seconds` | 正常准备报告、原始生成耗时、完整生成加准备耗时；不含关联。 |
-| `resource_plan` | 实际生成 worker、生成块大小、主存估算预算、全局向量 / worker固定工作集 / 生成峰值估算字节数及原始 BED 字节数。 |
-| `ground_truth_definition` | 以原始 age / sex 数值和保存的截距重建生成线性项的公式；`ground_truth.csv` 截距已吸收 age / sex 的中心化常数。 |
-| `files` | 原始 PLINK、注释及 CSV 的相对路径、字节数、SHA-256；完成遗传目录另有正常准备清单负责校验。 |
+| `completed`, `synthetic`, `schema_version` | 生成完成、人工数据标记及报告版本；不表示关联已经运行。 |
+| `configuration`, `n_samples`, `seed` | 实际生成参数、样本数和随机种子。 |
+| `calibration` | reference / small 来源类型、是否有参考校准及校准文件 SHA-256；calibrated 不表示所有 mask M 都精确匹配。 |
+| `prepared_directory`, 各 `*_csv` | 完成目录与 CSV 路径；未选择的表型 CSV 为 None。 |
+| `binary_kwargs`, `continuous_kwargs` | 对应公开入口可直接接收的参数字典；未选择的类型为 None。 |
+| `chromosome_reports`, `mask_audit` | 各染色体位点数、频谱库存、MAC / AN、mask 目标与实际计数、时间和存储量；详细文件留私有。 |
+| `mask_counts_exact`, `frequency_counts_exact` | 已发布目标行的稀有资格 M 与频谱库存是否核对一致；mask 标志不覆盖未知类别的总行数。 |
+| `preparation.mask_counts_exact_scope` | 明确记录 mask 完全匹配仅针对已发布目标行。 |
+| `chromosome_reports[].inferred_mask_audit`, `preparation.additional_inferred_eligible_mask_rows` | 未发布类别的人工推断 M、实际稀有 M，以及额外可能输出的合格 mask 行数。 |
+| `trait_reports`, `complete_covariate_samples` | 各列表型可用 / 缺失 / 病例 / 对照数，以及22列协变量均完整的人数。 |
+| `resource_plan`, `preparation` | 内存 / 磁盘准入估算、实际 worker / 帧大小与 direct prepared 子报告。 |
+| `generation_seconds`, `total_seconds` | 完整生成调用的时间，不含关联；不再有原始 PLINK 生成与转换两个阶段。 |
+| `files` | inputs 文件的相对路径、大小及 SHA；prepared 使用自身逐帧与清单校验。 |
 
-`results_binary` 和 `results_continuous` 由关联入口建立，各人工表型一个文件夹，保存与当前入口完全相同的最终 CSV 及非 R 的块存储 / 检查点。生成器不修改统计公式、结果字段、排序、缺失策略或 mask 筛选。
+`results_binary/` 和 `results_continuous/` 仅在调用关联入口后创建。运行完成仍须检查各自返回报告、worker 退出、块提交及最终 CSV。
 
-## 5. 命令行调用
+## 6. 命令行与原软件对应
+
+所有生成参数使用对应的 `--连字符` 选项。可用安装后的 `generate_simulated_data` 或 `python -m fudan_wgs_toolkit.simulate`；报告同时保存到文件并打印到标准输出。
 
 ```bash
-# 在启动任何 Python / 入口命令之前设定；同样适用于下面的原始生成例子。
 export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
 export OPENBLAS_NUM_THREADS=2
 
+# 显式的小规模人工预设；生成完成即可直接进入关联。
 generate_simulated_data \
   --output-directory work/simulated_cli \
-  --n 1000 --chromosomes 21 \
-  --variants-per-chromosome 1024 --variants-per-gene 256 \
+  --preset small --n 1000 --chromosomes 21 22 \
   --phenotype-type both --n-binary-traits 2 --n-continuous-traits 2 \
   --phenotype-missing-rate 0.02 --covariate-missing-rate 0 \
-  --genotype-missing-rate 0.00001 \
   --case-fraction 0.2 --causal-effect 0.35 \
-  --rare-fraction 0.999 --ld-strength 0.2 \
-  --seed 1729 --chunk-size 256 --cpu-threads 8 --memory-limit-gib 8
+  --seed 1729 --chunk-size 256 --cpu-threads 2 --memory-limit-gib 8
 
-# 两类入口复用上一命令准备的同一个目录；输出位置分别指定。
 run-WGS-all-binanry \
   work/simulated_cli/inputs/binary_phenotypes.csv \
   work/simulated_cli/inputs/covariates.csv \
   work/simulated_cli/prepared \
   --output-directory work/simulated_cli/results_binary \
-  --chromosomes 21 --device cuda:0 --cpu-threads 8 \
-  --analyses individual coding noncoding ncrna --no-impute-missing --grm none
+  --chromosomes 21 22 --device cuda:0 --cpu-threads 2 \
+  --analyses individual coding noncoding ncrna \
+  --gene-variant-type variant --no-impute-missing --grm none
 
 run-WGS-continuous \
   work/simulated_cli/inputs/continuous_phenotypes.csv \
   work/simulated_cli/inputs/covariates.csv \
   work/simulated_cli/prepared \
   --output-directory work/simulated_cli/results_continuous \
-  --chromosomes 21 --device cuda:0 --cpu-threads 8 \
-  --analyses individual coding noncoding ncrna --no-rm-nan --grm none
-```
+  --chromosomes 21 22 --device cuda:0 --cpu-threads 2 \
+  --analyses individual coding noncoding ncrna \
+  --gene-variant-type variant --no-rm-nan --grm none
 
-所有生成参数均有与 Python 名对应的 `--连字符` 选项；`--output-directory` 必填。CLI 的 `--variants-per-chromosome` 仅接受一个整数，不接受 Python 字典；不同染色体数量使用 Python。`--chromosomes all` 选择22条，`--chromosomes 20 21 22` 选择三条。`--raw-only` 对应 `prepare=False`；不加则自动 prepare。同一生成器也可用 `python -m fudan_wgs_toolkit.simulate` 调用，最终报告写到文件并打印至标准输出。
-
-仅生成原始数据、以后再准备：
-
-```bash
+# 完整参考规模：省略 n 使用 reference_n，省略 chromosomes 使用全部22条。
+# 先由生成器执行资源准入；空间不足时不会启动缩小版替代。
 generate_simulated_data \
-  --output-directory work/simulated_raw \
-  --n 1000 --chromosomes 21 --variants-per-chromosome 1024 \
-  --phenotype-type binary --n-binary-traits 4 --raw-only
-
-prepare-WGS-data \
-  --source-directory work/simulated_raw/raw \
-  --annotation-directory work/simulated_raw/annotations \
-  --output-directory work/simulated_raw/prepared \
-  --chromosomes 21 --cpu-threads 8 --memory-limit-gib 8
+  --output-directory work/simulated_reference \
+  --calibration-profile /private/calibration/simulation_profile.json \
+  --phenotype-type binary --n-binary-traits 16 \
+  --cpu-threads 8 --memory-limit-gib 8
 ```
 
-## 6. 原软件对应与可比较的范围
+本生成器输出的是本包 prepared 格式，没有直接对应的官方模拟 prepared 命令。官方 STAAR 流程读取 GDS/aGDS，再调用 `Individual_Analysis_PheWAS`、`Gene_Centric_Coding_PheWAS`、`Gene_Centric_Noncoding_PheWAS` 和 `ncRNA_PheWAS`；相同输入的官方 R 调用见[二分类原软件调用](wgs_binary.md#原-staar-软件调用)。本功能不启动 R、PLINK 或官方程序。
 
-本功能不复刻某个现成的队列模拟器。PLINK 1.9 的 [`--dummy`](https://www.cog-genomics.org/plink/1.9/input#dummy)可用于独立检查随机 PLINK 文件的格式：
-
-```bash
-plink --dummy 1000 1024 --make-bed --out simulated_plink_format_check
-
-# 如已安装 PLINK，可另外只读加载本生成器的三文件进行格式检查。
-plink --bfile work/simulated_cli/raw/chr21 --freq --missing \
-  --out work/simulated_cli/plink_format_check
-```
-
-`--dummy` 不生成本工具的独立功能注释、完整人工 mask 归属、共同协变量或双类型表型输入；它的随机模型及默认分布也不同，不要求两个生成器的随机字节或 P 值一致。包运行时不依赖或调用 PLINK 可执行程序。
-
-检查优化精度应固定同一组生成产物、输入 SHA、表型缺失处理、样本轴、协变量、零模型、权重与 mask，再比较两个关联实现的 `−log10(P)`，目标为 `0.001` 以内。尤其检查任一路径 `P<0.05` 的并集。生成系数为零不能保证每个有限样本 P 值不显著；生成系数非零也不能预先指定某个 P 值。
+同一合成输入可固定输入 SHA、样本处理、零模型、权重及 mask，比较优化前后的 `−log10(P)`；应同时核查全部有限值与任一路径显著的并集。校准到已发布 MAF / M 分布提供的是接近目标负载的人工输入，不能将跨队列官方结果当作这些人工数据的数值真值。
 
 ## 7. 验证与 benchmark
 
-本节只记录合成输入与软件接口验证；真实数据结果仍保留在各关联功能文档。记录端到端时分别计生成、正常准备和关联，不能把小规模合成耗时外推成真实全基因组耗时。
+2026-10-16 的当前 direct prepared 修订完成 **267项CPU测试，全部通过，pytest计时24.83秒**。进程限定8个CPU的 affinity，原生BLAS线程数为2，CUDA设备不可见。测试覆盖紧凑六状态编码与计数回读、生产 metadata / 完成清单、成熟selector的15类mask、合成数据流式journal、显式存储预算、有界metadata复制、两类公开入口的输入参数契约及SHA缓存回归。测试耗时不是完整关联速度；[当前匿名记录](../validation/simulated_prepared_20261016.anonymous.json)保存相应范围和资源。
 
-2026-10-16，本版选定的生成器、数据准备、连续输入及调度资源回归 **149 项全部通过，pytest耗时98.08秒，测试进程墙钟98.70秒**。测试耗时不是关联运行速度。安装后的 `generate_simulated_data` 控制台入口另以 **n=131、单条染色体1024个变异、rare_fraction=0.999、raw-only** 实际运行成功。配置、源码SHA和汇总保存在[匿名验证记录](../validation/simulated_data_20261016.anonymous.json)。
+另从私有参考汇总构造8,192个位点、15条已知mask目标的有界输入。它检验参考频谱及mask构造，不代表整条参考染色体。生成后核对压缩流SHA，且没有写出原始PLINK：
 
-| 项目 | 数据范围与判据 | 当前证据 |
-| --- | --- | --- |
-| 原始格式和身份 | n=131、67个变异，故意使用非4倍数样本和非整帧大小，含完整缺失 | 独立二位BED解码与正常准备回读逐值相同；FID/IID、REF/ALT方向、尺寸及尾部填充检查通过。 |
-| 正常数据准备 | 从原始 PLINK + 独立人工注释调用 `prepare_WGS_data`；另测 raw-only 后手动准备 | 完成清单和生产reader可读；原始与准备后全部调用状态一致。 |
-| 二分类完整入口 | 3列，分别运行available与缺失填0，全四类分析 | 两次均完成；默认13类mask齐全、最终CSV与Single人数核对通过，见下表。 |
-| 连续完整入口 | 3列，分别运行available与均值填补，全四类分析 | 两次均完成；默认13类mask齐全、最终CSV与Single人数核对通过，见下表。 |
-| 缺失模式和生成重复性 | 每类3个表型；独立NaN、协变量缺失、不同CPU数和生成块大小 | available身份交集与计数通过；同种子的raw / inputs / annotations文件SHA完全相同，改变种子后遗传及协变量改变。 |
-| mask及权重输入 | n=1000，双染色体256 / 64变异，3个二分类及3个连续表型 | 7种coding（含2种可选PTV）、7种noncoding和ncRNA均保留至少2个合格稀有变异；至少2个常见位点符合Single的MAC资格，3类数值权重均有限。 |
-| 参数和资源边界 | 非法参数、不可容纳的估算内存、已存在目录 | 在不创建输出或不改动原文件的前提下明确拒绝；公开导入和两类调用参数契约通过。 |
-| 精度边界 | 同输入优化前后 log P 可比较；没有 oracle P 或真实参考实现结论 | 生成模型及输入契约已明确；不能记为官方精度通过。 |
+| 样本数 | 生成耗时 | 已知目标M匹配 | 频谱bin位点库存 | 按位点数加权平均绝对MAF误差 | bin最大绝对MAF误差 |
+| --- | --- | --- | --- | --- | --- |
+| 345,967，参考n | 35.912秒 | 15/15 | 精确相同 | 2.657×10⁻⁸ | 7.644×10⁻⁷ |
+| 4,096，缩放n | 1.567秒 | 0/15 | 精确相同 | 5.469×10⁻⁶ | 6.095×10⁻⁵ |
 
-以下完整GPU入口的四次运行采用同一人工数据：n=1024、两条染色体各256个变异、每基因128个变异、每类3个表型，表型缺失率0.04、协变量单元格缺失率0.002。保留现有默认TF32关联路径；配置2CPU、每卡GPU准入12GiB及节点任务主存8GiB。设备为共享GPU，结果用于本规模兼容性和耗时记录，不代表独占设备速度。
+MAF误差比较生成bin的实际MAF与目标bin均值。样本缩小后，该有界输入中的低MAC变异按MAF保持规则取整为零，15条目标的稀有资格M随之改变。这是已报告的样本量缩放结果，没有提高MAC来制造相同M；不能将频谱bin库存一致解释为每个位点MAF完全相同。
 
-小规模数据原始生成 **0.180秒**，正常准备 **4.919秒**，生成加准备完整调用 **5.146秒**。下表是各关联调用的墙钟，包含正常公开入口执行，不包含前面的生成、准备或调用后独立核查；四次顺序运行使用同一份已准备数据，未清理共享文件缓存，不用于计算填补策略的独立速度倍率。
+完整参考的22条染色体、1,023,836,503个位点、233,589条已发布mask目标和18,308个coding组已做汇总核对；所有已知coding边际数量可用人工交集表达。官方缺失的类别仍是未知，额外推断的合格mask行单独记录，未声称运行时总mask行数完全一致。完整输出的保守磁盘估算为14,517,782,875,204字节，约13.2TiB；预检时可用310,284,124,160字节，约289GiB。实际调用在创建输出目录前以OSError拒绝，**未生成全参考规模数据**。
 
-| 完整公开入口 | 缺失策略 | 关联调用端到端 | PyTorch峰值allocated | 输出与回读 |
-| --- | --- | --- | --- | --- |
-| `run_WGS_all_binanry` | 各列 available | 23.550秒 | 35.93MiB | 完成，30份gzip CSV校验通过。 |
-| `run_WGS_all_binanry` | 缺失标签填0 | 10.482秒 | 35.76MiB | 完成，30份gzip CSV校验通过。 |
-| `run_WGS_continuous` | 各列 available | 36.683秒 | 33.04MiB | 完成，30份gzip CSV校验通过。 |
-| `run_WGS_continuous` | 各列均值填补 | 20.933秒 | 32.91MiB | 完成，30份gzip CSV校验通过。 |
+当前修订的GPU关联验证为 **`not_assessed`**：执行时共享GPU利用率约92%–95%，自动批准审核拒绝启动本次验证。当前修订没有复用历史版本的四次GPU调用作为完成证据，也没有执行官方同输入P值对照。
 
-每次覆盖 **3表型 × 2染色体 × 4分析类型=24个组合**，合计保存Single 12行、coding 60行、noncoding 84行、ncRNA 12行。30份gzip CSV的SHA、CRC及完整回读行数一致；默认5种coding、7种noncoding及ncRNA类别全部出现，Single各列表型人数与零模型样本一致。所有概率字段均有限，Single原生log P字段均有限；这些检查证明输入兼容和输出完整，没有执行与官方软件的同输入P值对照。
+本轮复用成熟的 portable metadata 校验时发现一个已有问题：部分共享文件系统的ctime粒度较粗，同大小文件在同一时间刻度改写并恢复mtime后，旧SHA缓存可能误命中。修复为对mtime / ctime尚未稳定2秒的文件重新计算内容SHA；稳定的不可变文件保留缓存快路径，prepared格式与关联公式保持原行为。该修复的回归包含在上述267项测试中。
 
-四次调用均使用一个GPU worker，PyTorch峰值reserved均为56MiB。allocated / reserved仅统计PyTorch分配器，不包含GPU上下文、其他任务或板卡总占用，也不能作为大样本内存峰值预测。生成及准备配置的主存工作区估算为4GiB，关联主存预算为8GiB；本汇总未报告实测CPU PSS峰值。
-
-大样本另完成 **n=100000、单条染色体1024个变异（1022个稀有分量、2个常见分量）** 的正常生成及准备：原始生成 **6.042秒**、准备 **6.842秒**、完整调用 **13.008秒**。这项检查只验证大样本输入可正常制作，未对10万人运行关联；不将它记为大样本GPU端到端分析。阶段计时边界不同，生成加准备完整调用还包含清单和校验等开销，不要求两个阶段相加等于完整调用。
-
-公开仓库只包含生成代码、测试、文档和匿名汇总，不发布生成的位点 / 基因结果表。大规模压测应把生成产物放在仓库外，并记录实际磁盘、CPU PSS、GPU allocated / reserved / 峰值。生成阶段不初始化 CUDA；总样本数和变异数增大时首先评估 `n × m`、原始 BED 尺寸以及准备器正常压缩限制。提高常见分量、缺失率或 LD 复制比例会改变压缩率和谱结构，应分别报告。
+历史原始PLINK生成版的[匿名记录](../validation/simulated_data_20261016.anonymous.json)固定于提交 `9ae80ba3eafc9d24a9635f332170f398bbb6a7a7`，不作为本版direct prepared的通过记录或速度结果。
 
 ## 8. 更新记录
 
 | 日期 | 更新与验证范围 |
 | --- | --- |
-| 2026-10-16 | 新增 `generate_simulated_data`，生成独立原始PLINK、人工注释、两类表型、22列共同协变量和生成系数；默认1024变异、0.999目标稀有比例及正常prepare；149项回归、双入口四种缺失策略GPU运行、10万人输入生成及准备通过。 |
+| 2026-10-16 | 改为直接生成 prepared；默认使用私有参考位点数 / 频谱 / 官方15类mask校准，n 改变时保持 MAF、缩放 MAC；增加11个人工数值注释通道、已发布目标 / 未知推断类别与实际 M 审计、内存 / 磁盘准入；修复 metadata SHA 缓存的同时间刻度改写误命中；267项CPU测试与8,192位点有界校准通过，GPU关联为not_assessed。 |
+| 2026-10-16，历史版 | 提交 `9ae80ba` 采用原始 PLINK + 独立人工注释再准备；149项回归、4次小规模GPU入口及10万人输入准备记录仅适用于该实现，已被当前生成路径替代。 |
 
 ## 9. 参考与源码
 
-- [生成器 Python 源码](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/simulate.py)。
-- [数据准备源码](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/prepare.py)、[二分类入口](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/run.py)、[连续入口](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/continuous_run.py)。
-- [PLINK 1.9 BED/BIM/FAM 文件格式](https://www.cog-genomics.org/plink/1.9/formats#bed)与[随机数据选项](https://www.cog-genomics.org/plink/1.9/input#dummy)。
-- Chang CC, et al. Second-generation PLINK: rising to the challenge of larger and richer datasets. *GigaScience*. 2015;4:7. [doi:10.1186/s13742-015-0047-8](https://doi.org/10.1186/s13742-015-0047-8)。
+- [生成器入口](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/simulate.py)、[私有汇总格式与预设](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/simulation_profile.py)、[直接 prepared 构建](https://github.com/weikanggong1/Fudan-WGS-Toolkit/blob/main/fudan_wgs_toolkit/simulate_prepared.py)。
+- [prepared 格式与生产数据准备](wgs_data_preparation.md)、[二分类入口](wgs_binary.md)、[连续入口](wgs_continuous.md)。
+- [STAARpipelinePheWAS 官方实现](https://github.com/li-lab-genetics/STAARpipelinePheWAS)：对应四类分析及 mask 定义。
+- Li et al. Dynamic incorporation of multiple in silico functional annotations empowers rare variant association analysis of large whole-genome sequencing studies at scale. *Nature Genetics* (2020). [DOI:10.1038/s41588-020-0676-4](https://doi.org/10.1038/s41588-020-0676-4)。
+- Li et al. A framework for detecting noncoding rare-variant associations of large-scale whole-genome sequencing studies. *Nature Methods* (2022). [DOI:10.1038/s41592-022-01640-x](https://doi.org/10.1038/s41592-022-01640-x)。
