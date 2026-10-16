@@ -186,6 +186,22 @@ def test_default_requires_real_aggregate_profile_without_silent_small_fallback(t
     assert not output.exists()
 
 
+def test_dry_run_reports_compressed_final_and_peak_without_publishing(tmp_path, monkeypatch):
+    import fudan_wgs_toolkit.simulate as implementation
+    monkeypatch.setattr(implementation.shutil, "disk_usage", lambda _: SimpleNamespace(free=1))
+    output = tmp_path/"planned"
+    report = generate_simulated_data(output, preset="small", n=1000, chromosomes=[21],
+                                     cpu_threads=1, memory_limit_gib=2, dry_run=True)
+    assert report["dry_run"] and not report["completed"] and not report["output_created"]
+    assert not output.exists()
+    resources = report["resource_plan"]
+    assert resources["estimated_total_peak_bytes"] > resources["estimated_total_disk_bytes"]
+    assert not resources["generation_fits_available_disk"]
+    with pytest.raises(ValueError, match="available disk"):
+        generate_simulated_data(output, preset="small", n=1000, chromosomes=[21],
+                                cpu_threads=1, memory_limit_gib=2)
+
+
 def test_n_defaults_to_profile_reference_and_no_private_identifiers_are_preserved(tmp_path):
     profile = small_profile()
     profile["chromosomes"] = [entry for entry in profile["chromosomes"] if entry["name"] == "21"]
@@ -235,7 +251,7 @@ def test_covariate_nan_excludes_only_actual_unavailable_subjects(tmp_path):
     {"variant_scale": 0}, {"variant_scale": float("nan")},
     {"phenotype_missing_rate": 1}, {"covariate_missing_rate": -0.1},
     {"case_fraction": 0}, {"case_fraction": 1}, {"causal_effect": float("inf")},
-    {"memory_limit_gib": float("inf")}, {"storage_limit_gib": 0},
+    {"memory_limit_gib": float("inf")}, {"storage_limit_gib": 0}, {"dry_run": "yes"},
 ])
 def test_invalid_options_fail_before_output_creation(tmp_path, invalid):
     root = tmp_path / "invalid"

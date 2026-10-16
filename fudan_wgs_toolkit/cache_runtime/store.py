@@ -4,10 +4,12 @@ Frames cover original physical columns consecutively, including all-zero and
 zero-layer sites. Counts apply only to the bound complete ordered sample axis.
 CSR and count frames are independently checksummed Zstd. Ordinary conversion
 retains its original genotype source; explicitly synthetic sources may use a
-direct byte budget and an append-only journal without chromosome-sized lists.
+direct byte budget. New sources can use an append-only journal without
+chromosome-sized lists and lossless row-delta index encoding. Legacy absolute
+frames and JSON journals remain readable and resumable with their binding.
 A completed container is immutable. Incomplete recovery requires exact binding.
 """
-import hashlib, json, mmap, os
+import hashlib, json, mmap, os, shutil, stat
 from pathlib import Path
 import numpy as np
 from . import sparse_codec_fast as csr
@@ -27,17 +29,23 @@ def atomic(p,b):
  with tmp.open('wb') as f:f.write(b);f.flush();os.fsync(f.fileno())
  os.replace(tmp,p);fd=os.open(p.parent,os.O_RDONLY);os.fsync(fd);os.close(fd)
 def usage(p):
- files=[f for f in Path(p).iterdir() if f.is_file()]
- return dict(logical_bytes=sum(f.stat().st_size for f in files),allocated_bytes=sum(getattr(f.stat(),'st_blocks',0)*512 for f in files))
+ logical=allocated=0
+ for entry in Path(p).iterdir():
+  value=entry.stat()
+  if stat.S_ISREG(value.st_mode):logical+=value.st_size;allocated+=getattr(value,'st_blocks',0)*512
+ return dict(logical_bytes=logical,allocated_bytes=allocated)
 def _append(p,b):
  with p.open('ab') as f:
   pos=f.tell();f.write(b);f.flush();os.fsync(f.fileno())
  return pos
 class Writer:
- def __init__(self,path,binding,samples,m,*,source_bytes=None,storage_fraction=.10,minimum_storage_bytes=0,chunk=CHUNK,storage_limit_bytes=None,streaming=False):
+ def __init__(self,path,binding,samples,m,*,source_bytes=None,storage_fraction=.10,minimum_storage_bytes=0,chunk=CHUNK,storage_limit_bytes=None,streaming=False,sample_encoding='absolute',free_disk_reserve_bytes=64*2**20):
   self.path=Path(path);self.samples=np.asarray(samples)
   if type(streaming) is not bool:raise ValueError('streaming must be a boolean')
-  if streaming and (not isinstance(binding,dict) or binding.get('synthetic') is not True):raise ValueError('Streaming journals require a synthetic source binding')
+  if streaming and not isinstance(binding,dict):raise ValueError('Streaming journals require an explicit source binding')
+  if sample_encoding not in ('absolute','row-delta'):raise ValueError('Unknown CSR sample encoding')
+  if type(free_disk_reserve_bytes) is not int or free_disk_reserve_bytes<0:raise ValueError('free_disk_reserve_bytes must be a nonnegative integer')
+  self.free_disk_reserve_bytes=free_disk_reserve_bytes
   self.streaming=streaming
   if self.samples.dtype!=np.int64 or self.samples.ndim!=1 or len(np.unique(self.samples))!=len(self.samples):raise ValueError('Physical sample axis must be unique int64')
   if type(m)is not int or m<0 or not 0<storage_fraction<=.10:raise ValueError('Invalid dimension/storage budget')
@@ -54,6 +62,7 @@ class Writer:
   self.spec=dict(format=FORMAT,state_encoding=codec.STATE_ENCODING,m=m,n=len(samples),chunk=chunk,binding=binding,sample_sha256=sha(self.samples.astype('<i8').tobytes()),source_bytes=source_bytes,storage_cap_bytes=storage_cap_bytes)
   if storage_limit_bytes is not None:self.spec['storage_budget_kind']='explicit_synthetic_bytes'
   if streaming:self.spec['journal_format']='jsonl-v1'
+  if sample_encoding!='absolute':self.spec['sample_encoding']=sample_encoding
   self.journal_path=self.path/('journal.jsonl' if streaming else 'journal.json')
   if self.path.exists():
    if (self.path/'COMPLETE').exists():raise FileExistsError('Completed cache cannot be overwritten')
@@ -62,11 +71,13 @@ class Writer:
    if not np.array_equal(actual,self.samples) or actual.dtype!=self.samples.dtype:raise ValueError('Resume sample axis mismatch')
    self.rows=None if streaming else json.loads(self.journal_path.read_text())
   else:
+   self._disk_budget(self.samples.nbytes+65536)
    self.path.mkdir(parents=True,mode=0o700)
    atomic(self.path/'manifest.pending.json',canonical(self.spec));np.save(self.path/'samples.npy',self.samples,allow_pickle=False)
    for name in ('data.bin','headers.bin','counts.bin'):(self.path/name).touch()
    self.rows=None if streaming else [];atomic(self.journal_path,b'' if streaming else canonical(self.rows))
   self._recover()
+  self.peak_storage=usage(self.path)
  def _journal_rows(self,repair_tail=False):
   """Yield one bounded durable record at a time, rejecting committed damage.
 
@@ -123,11 +134,29 @@ class Writer:
  def _budget(self,extra):
   u=usage(self.path);cap=self.spec['storage_cap_bytes']
   # Logical projection plus per-file alignment/headroom; no filesystem quota guarantee.
-  if max(u.values())+extra+65536>cap:raise MemoryError('Additional cache storage exceeds configured fraction of retained genotype')
+  if max(u.values())+extra+65536>cap:raise MemoryError('Additional cache storage exceeds configured genotype-container byte budget')
+  self._disk_budget(extra+65536)
+ def _disk_budget(self,extra):
+  ancestor=self.path
+  while not ancestor.exists():ancestor=ancestor.parent
+  if shutil.disk_usage(ancestor).free<extra+self.free_disk_reserve_bytes:raise OSError('Insufficient free disk space for cache write and reserved free space')
+ def storage_report(self):
+  """Measure this container's retained files, excluding portable metadata.
+
+  Peak counters cover observed write boundaries in this Writer process. They
+  are disk-byte measurements, not process RAM or a filesystem hard quota.
+  """
+  measured=self._observe_storage()
+  return dict(scope='genotype container files only; excludes metadata subdirectories',
+   current=measured,peak_observed=dict(self.peak_storage),free_disk_reserve_bytes=self.free_disk_reserve_bytes)
+ def _observe_storage(self):
+  measured=usage(self.path)
+  self.peak_storage={key:max(self.peak_storage[key],value) for key,value in measured.items()}
+  return measured
  def append(self,states,original_counts):
   s=codec._states(states);m,n=map(int,s.shape);start=self.next_start
   if n!=self.spec['n'] or m!=min(self.spec['chunk'],self.spec['m']-start) or m<=0:raise ValueError('Frame shape/order mismatch')
-  payload,meta=csr.encode(s,level=3);arrays=csr.decode_compact(payload,meta)
+  payload,meta=csr.encode(s,level=3,sample_encoding=self.spec.get('sample_encoding','absolute'));arrays=csr.decode_compact(payload,meta)
   direct=csr.compact(s);counts=csr.integer_counts(*arrays,m,n)
   if not all(np.array_equal(a,b) for a,b in zip(arrays,direct)):raise ValueError('CSR roundtrip mismatch')
   self._commit_frame(payload,meta,counts,original_counts,m,n)
@@ -140,7 +169,7 @@ class Writer:
   if not isinstance(offsets,np.ndarray) or offsets.ndim!=1:raise ValueError('CSR offsets must be a one-dimensional NumPy array')
   m,n=len(offsets)-1,self.spec['n']
   if m!=min(self.spec['chunk'],self.spec['m']-self.next_start) or m<=0:raise ValueError('Frame shape/order mismatch')
-  payload,meta=csr.encode_compact(offsets,samples,values,m,n,level=3)
+  payload,meta=csr.encode_compact(offsets,samples,values,m,n,level=3,sample_encoding=self.spec.get('sample_encoding','absolute'))
   arrays=csr.decode_compact(payload,meta)
   if not all(np.array_equal(a,b) for a,b in zip(arrays,(offsets,samples,values))):raise ValueError('CSR roundtrip mismatch')
   counts=csr.integer_counts(*arrays,m,n)
@@ -157,7 +186,8 @@ class Writer:
   if self.streaming:_append(self.journal_path,canonical(row)+b'\n')
   else:self.rows.append(row);atomic(self.journal_path,canonical(self.rows))
   self.next_start+=m;self.frame_count+=1
-  if max(usage(self.path).values())>self.spec['storage_cap_bytes']:raise MemoryError('Measured cache storage cap exceeded')
+  measured=self._observe_storage()
+  if max(measured.values())>self.spec['storage_cap_bytes']:raise MemoryError('Measured cache storage cap exceeded')
  def finish(self):
   if self.next_start!=self.spec['m']:raise ValueError('Incomplete physical axis')
   tmp=self.path/'index.npy.tmp'
@@ -188,7 +218,8 @@ class Writer:
   manifest=dict(self.spec,frames=self.frame_count,files_sha256=hashes,storage=usage(self.path),association_precision_accepted=False)
   b=canonical(manifest);self._budget(len(b)+128)
   atomic(self.path/'manifest.json',b);atomic(self.path/'COMPLETE',sha(b).encode())
-  if max(usage(self.path).values())>self.spec['storage_cap_bytes']:(self.path/'COMPLETE').unlink();raise MemoryError('Final measured storage cap exceeded')
+  measured=self._observe_storage()
+  if max(measured.values())>self.spec['storage_cap_bytes']:(self.path/'COMPLETE').unlink();raise MemoryError('Final measured storage cap exceeded')
   return manifest
 
 def _range(path,offset,size):
@@ -203,6 +234,7 @@ def _read_frame(path,row,spec):
   expected=row[key];expected=expected.decode() if isinstance(expected,bytes) else str(expected)
   if sha(b)!=expected:raise ValueError('Frame SHA mismatch')
  meta=header['csr_meta'];m,n=meta['m'],meta['n']
+ if spec.get('sample_encoding','absolute')!=meta.get('sample_encoding','absolute'):raise ValueError('Frame sample encoding differs from container binding')
  if m!=int(row['m']) or n!=spec['n'] or header['counts_raw_bytes']!=m*24 or header['counts_compressed_bytes']!=len(cp) or sha(cp)!=header['counts_compressed_sha256']:raise ValueError('Frame dimensions/count metadata mismatch')
  arrays=csr.decode_compact(payload,meta)
  if codec._zstd().frame_content_size(cp)!=m*24:raise ValueError('Counts frame content size mismatch')
@@ -218,10 +250,11 @@ class Container:
   if (self.path/'COMPLETE').read_text()!=sha(b):raise ValueError('Missing/invalid completed marker')
   self.manifest=json.loads(b);s=self.manifest
   if s['format']!=FORMAT or s['state_encoding']!=codec.STATE_ENCODING or type(s['chunk']) is not int or not 1<=s['chunk']<=CHUNK:raise ValueError('Container semantic mismatch')
+  if s.get('sample_encoding','absolute') not in ('absolute','row-delta'):raise ValueError('Container sample encoding mismatch')
   chunk=s['chunk']  # Readers accept committed smaller frames; Writer stays at CHUNK.
   if expected_source_binding is not None and s['binding']!=expected_source_binding:raise ValueError('Source binding mismatch')
   self.samples=np.load(self.path/'samples.npy',allow_pickle=False)
-  index_mode='r' if s.get('journal_format')=='jsonl-v1' and s.get('binding',{}).get('synthetic') is True else None
+  index_mode='r' if s.get('journal_format')=='jsonl-v1' else None
   self.index=np.load(self.path/'index.npy',allow_pickle=False,mmap_mode=index_mode)
   if self.samples.dtype!=np.int64 or self.samples.shape!=(s['n'],) or sha(self.samples.astype('<i8').tobytes())!=s['sample_sha256']:raise ValueError('Sample binding mismatch')
   if expected_samples is not None and not np.array_equal(self.samples,expected_samples):raise ValueError('Requested sample axis differs')

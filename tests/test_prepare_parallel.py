@@ -17,7 +17,7 @@ from fudan_wgs_toolkit.prepare import (
     prepare_WGS_data, _preparation_schedule, _annotation_sources,
     _source_descriptor, _preflight_chromosome, _convert_chromosome,
 )
-from test_plink_prepare import source_fixture, dense_cache
+from test_plink_prepare import source_fixture, dense_cache, interrupt_root_publication
 
 
 def multiple_sources(tmp_path):
@@ -93,7 +93,12 @@ def test_single_cpu_and_multicpu_preserve_states_counts_and_annotation_bytes(tmp
         assert_states_counts_identical(left, right)
         with PortableMetadataReader(left / "metadata", left) as a, PortableMetadataReader(right / "metadata", right) as b:
             assert a.manifest["analysis"] == b.manifest["analysis"]
-            assert a.manifest["files"] == b.manifest["files"]
+            # The exact source witness includes independent preflight progress
+            # timings; array/annotation payloads must still be byte-identical.
+            assert {name: proof for name, proof in a.manifest["files"].items()
+                    if name != "annotation.source.json"} == {
+                   name: proof for name, proof in b.manifest["files"].items()
+                    if name != "annotation.source.json"}
             assert a.manifest["fields"] == b.manifest["fields"]
             assert a.manifest["annotation_coverage"] == b.manifest["annotation_coverage"]
 
@@ -151,7 +156,8 @@ def test_global_frame_checkpoint_is_exact_and_resumes_with_processes(tmp_path, f
     assert checkpoint["parallel_execution"]["conversion_workers"] == 1
     assert "global_frame_checkpoint_serial_conversion" in checkpoint["parallel_execution"]["limiting_reasons"]
     assert not (output / "dataset.json").exists()
-    journals = [json.loads(path.read_text()) for path in output.glob("chr*/journal.json")]
+    journals = [[json.loads(line) for line in path.read_text().splitlines()]
+                for path in output.glob("chr*/journal.jsonl")]
     assert sum(map(len, journals)) == frame_limit
     final = prepare_WGS_data(source, output, resume=True, **options)
     assert final["completed"] and final["committed_frames"] == 4 - frame_limit
@@ -203,13 +209,11 @@ def test_single_chromosome_keeps_total_budget_for_threaded_decode(tmp_path):
 
 
 @pytest.mark.parametrize("damaged_axis", ["sample_pairs.npy", "sample_ids.npy"])
-def test_resume_rejects_changed_root_axis_before_republishing(tmp_path, damaged_axis):
+def test_resume_rejects_changed_root_axis_before_republishing(tmp_path, monkeypatch, damaged_axis):
     source, annotations, _, _ = source_fixture(tmp_path)
     output = tmp_path / "prepared"
     options = dict(annotation_directory=annotations, chunk_size=2, cpu_threads=1)
-    prepare_WGS_data(source, output, **options)
-    (output / "dataset.json").unlink()
-    (output / "COMPLETE").unlink()
+    interrupt_root_publication(monkeypatch, source, output, **options)
     path = output / damaged_axis
     axis = np.load(path, allow_pickle=False)
     axis[[0, 1]] = axis[[1, 0]]
@@ -223,13 +227,11 @@ def test_resume_rejects_changed_root_axis_before_republishing(tmp_path, damaged_
 
 
 @pytest.mark.parametrize("damaged_stream", ["data.bin", "counts.bin", "headers.bin"])
-def test_resume_checks_all_completed_stream_hashes_before_root_commit(tmp_path, damaged_stream):
+def test_resume_checks_all_completed_stream_hashes_before_root_commit(tmp_path, monkeypatch, damaged_stream):
     source, annotations, _, _ = source_fixture(tmp_path)
     output = tmp_path / "prepared"
     options = dict(annotation_directory=annotations, chunk_size=2, cpu_threads=1)
-    prepare_WGS_data(source, output, **options)
-    (output / "dataset.json").unlink()
-    (output / "COMPLETE").unlink()
+    interrupt_root_publication(monkeypatch, source, output, **options)
     path = output / "chr21" / damaged_stream
     content = bytearray(path.read_bytes())
     content[len(content) // 2] ^= 1

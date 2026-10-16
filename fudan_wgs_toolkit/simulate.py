@@ -19,6 +19,8 @@ import time
 
 import numpy as np
 
+from .storage_plan import directory_storage
+
 
 def _positive_int(value, name, minimum=1):
     if type(value) is not int or value < minimum:
@@ -91,7 +93,7 @@ def _nearest_existing_parent(path):
 
 def _resource_preflight(root, profile, chromosomes, n, variant_scale, binary_count,
                         continuous_count, cpu_threads, chunk_size, memory_limit_gib,
-                        storage_limit_gib, prepared_plan):
+                        storage_limit_gib, prepared_plan, *, dry_run=False):
     """Bound active vectors/frames; estimate full metadata and payload on disk.
 
     No n-by-whole-chromosome allocation is admitted. The stored metadata size
@@ -112,45 +114,40 @@ def _resource_preflight(root, profile, chromosomes, n, variant_scale, binary_cou
     memory_budget = int(memory_limit_gib * 2**30)
     if minimum_peak > memory_budget:
         raise ValueError("memory_limit_gib is too small for estimated sample vectors, metadata block and one sparse frame")
-    # Count total metadata explicitly. Frequency bins predict sparse exceptions
-    # under diploid random sampling; full annotation text and indices receive
-    # additional per-variant headroom. Compression is not assumed to save bytes.
-    genotype_bytes = 0
     total_m = sum(counts.values())
-    for entry in selected:
-        bins = entry.get("frequency_bins", [])
-        total = sum(int(record["count"]) for record in bins)
-        nonzero_rate = sum(int(record["count"]) * (
-            float(record.get("missing_rate", 0)) + (1 - float(record.get("missing_rate", 0))) *
-            (2 * float(record["maf"]) - float(record["maf"]) ** 2)) for record in bins) / max(1, total)
-        sample_width = 2 if n < 65536 else 4
-        genotype_bytes += int(math.ceil(counts[str(entry["name"])] * n * nonzero_rate * (sample_width + 1)))
-    metadata_disk_bytes = total_m * 64
-    prepared_disk_bytes = max(int(prepared_plan["estimated_prepared_bytes"]),
-        max(len(selected) * 2**20, genotype_bytes + metadata_disk_bytes) + n * 160)
+    # The builder owns the on-disk format and compression estimate. A second
+    # raw-CSR formula here previously replaced its estimate with a multi-TiB
+    # worst-case bound; all callers now consume this single component plan.
+    prepared_disk_bytes = int(prepared_plan["estimated_prepared_bytes"])
+    prepared_peak_bytes = int(prepared_plan["estimated_prepared_peak_bytes"])
     csv_disk_bytes = n * (binary_count + continuous_count + 22) * 32 + n * 128
     estimated_disk_bytes = prepared_disk_bytes + csv_disk_bytes
+    estimated_peak_bytes = prepared_peak_bytes+csv_disk_bytes
     parent = _nearest_existing_parent(root)
     free_bytes = shutil.disk_usage(parent).free
     reserve_bytes = min(2**30, max(64 * 2**20, free_bytes // 20))
     usable_bytes = max(0, free_bytes - reserve_bytes)
-    if estimated_disk_bytes > usable_bytes:
+    if not dry_run and estimated_peak_bytes > usable_bytes:
         raise ValueError("estimated synthetic data storage exceeds available disk space with reserve")
     if storage_limit_gib is not None:
         requested = int(storage_limit_gib * 2**30)
-        if requested < prepared_disk_bytes:
-            raise ValueError("storage_limit_gib is smaller than the estimated prepared genetic storage")
-        if requested + csv_disk_bytes > usable_bytes:
+        if requested < prepared_peak_bytes:
+            raise ValueError("storage_limit_gib is smaller than the prepared peak planning upper estimate")
+        if not dry_run and requested + csv_disk_bytes > usable_bytes:
             raise ValueError("storage_limit_gib exceeds available disk space with reserve")
         storage_limit_bytes = requested
     else:
-        storage_limit_bytes = min(usable_bytes - csv_disk_bytes, max(prepared_disk_bytes * 2, len(selected) * 4 * 2**20))
+        storage_limit_bytes = prepared_peak_bytes
     return dict(memory_limit_gib=memory_limit_gib, memory_budget_kind="estimated scheduling budget, not a hard RSS quota",
         estimated_frontend_vector_bytes=int(global_bytes), estimated_metadata_block_bytes=int(metadata_block_bytes),
         estimated_catalog_bytes=int(catalog_bytes), estimated_sparse_frame_bytes=int(frame_bytes),
         estimated_minimum_host_bytes=int(minimum_peak), total_variants=int(total_m),
         variants_per_chromosome=counts, estimated_prepared_disk_bytes=int(prepared_disk_bytes),
-        estimated_total_disk_bytes=int(estimated_disk_bytes), available_disk_bytes=int(free_bytes),
+        estimated_prepared_peak_bytes=prepared_peak_bytes,
+        estimated_total_disk_bytes=int(estimated_disk_bytes), estimated_total_peak_bytes=int(estimated_peak_bytes),
+        generation_fits_available_disk=estimated_peak_bytes <= usable_bytes,
+        storage_estimate_kind="compressed final estimate plus explicit temporary peak and planning margins; not a measured full dataset",
+        available_disk_bytes=int(free_bytes),
         disk_reserve_bytes=int(reserve_bytes), storage_limit_bytes=int(storage_limit_bytes),
         cpu_threads=cpu_threads)
 
@@ -237,7 +234,7 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
                             seed=1729, phenotype_missing_rate=0.02,
                             covariate_missing_rate=0.0, case_fraction=0.2,
                             causal_effect=0.35, chunk_size=256, cpu_threads=8,
-                            memory_limit_gib=8, storage_limit_gib=None):
+                            memory_limit_gib=8, storage_limit_gib=None, dry_run=False):
     """Generate direct prepared inputs and independent numeric phenotype CSVs.
 
     Reference calibration consumes aggregate statistics only and is required
@@ -256,6 +253,8 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
     The frontend and direct builder estimate memory/disk before publication.
     ``cpu_threads`` controls generation workers, not already initialized BLAS
     threads. No analysis or background run is started by this function.
+    ``dry_run=True`` returns the bounded compression/storage plan without
+    creating output files and may inspect a scale larger than free disk.
     """
     _positive_int(cpu_threads, "cpu_threads")
     _positive_int(chunk_size, "chunk_size")
@@ -268,6 +267,8 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
         _finite_positive(storage_limit_gib, "storage_limit_gib")
     if n is not None:
         _positive_int(n, "n", 128)
+    if type(dry_run) is not bool:
+        raise ValueError("dry_run must be a boolean")
     if preset not in ("reference", "small"):
         raise ValueError("preset must be reference or small")
     if phenotype_type not in ("binary", "continuous", "both"):
@@ -281,7 +282,7 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
     if isinstance(causal_effect, bool) or not isinstance(causal_effect, (int, float)) or not math.isfinite(causal_effect):
         raise ValueError("causal_effect must be finite")
     root = Path(output_directory).expanduser().resolve()
-    if root.exists():
+    if root.exists() and not dry_run:
         raise FileExistsError("synthetic output directory already exists; choose a fresh directory")
     from .simulation_profile import resolve_profile
     from .simulate_prepared import build_simulated_prepared, plan_simulated_prepared
@@ -295,7 +296,8 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
         None if storage_limit_gib is None else int(storage_limit_gib * 2**30),
         variant_scale=variant_scale)
     resources = _resource_preflight(root, profile, selected, n, variant_scale, binary_count,
-        continuous_count, cpu_threads, chunk_size, memory_limit_gib, storage_limit_gib, prepared_plan)
+        continuous_count, cpu_threads, chunk_size, memory_limit_gib, storage_limit_gib,
+        prepared_plan, dry_run=dry_run)
     resources["prepared_preflight"] = {key: value for key, value in prepared_plan.items() if key != "entries"}
     del prepared_plan
     configuration = dict(n=n, preset=preset, chromosomes=selected, variant_scale=variant_scale,
@@ -304,6 +306,11 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
         covariate_missing_rate=covariate_missing_rate, case_fraction=case_fraction,
         causal_effect=causal_effect, chunk_size=chunk_size, cpu_threads=cpu_threads,
         memory_limit_gib=memory_limit_gib, storage_limit_gib=storage_limit_gib)
+    if dry_run:
+        return dict(completed=False, dry_run=True, synthetic=True, n_samples=n,
+            configuration=configuration, calibration=provenance, resource_plan=resources,
+            output_created=False,
+            scope="bounded invented compression probes only; no genotype dataset, phenotype or analysis was written")
     root.mkdir(parents=True, mode=0o700)
     (root / "inputs").mkdir(mode=0o700)
     started = time.perf_counter()
@@ -347,6 +354,7 @@ def generate_simulated_data(output_directory, *, n=None, calibration_profile=Non
         preparation=prepared, resource_plan=resources,
         ground_truth_definition="eta = intercept + effect_per_dosage_sd * (ALT_dosage - dosage_mean) / dosage_sd + age_effect * age + sex_effect * sex + PC1_effect * PC1; binary: Bernoulli(logistic(eta)); continuous: eta + N(0,1)",
         generation_seconds=time.perf_counter() - started, total_seconds=time.perf_counter() - started,
+        measured_storage=directory_storage(root, exclude=("simulation.pending.json", "simulation.json")),
         limitations=["Coordinates, samples, calls, gene labels and weights are synthetic; calibration uses aggregate statistics only.",
             "Target MAF is retained when n changes; integer MAC and observed mask membership can change.",
             "Synthetic comparison cannot replace same-input scientific validation against an official implementation.",
@@ -396,6 +404,8 @@ def main():
                         help="positive host-memory admission estimate in GiB, not a kernel quota (default: 8)")
     parser.add_argument("--storage-limit-gib", type=float,
                         help="optional explicit prepared-data byte budget in GiB; full metadata and free disk are checked")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="only report bounded compression/final/peak storage estimates; create no output")
     arguments = vars(parser.parse_args())
     if arguments["chromosomes"] == ["all"]:
         arguments["chromosomes"] = "all"

@@ -7,7 +7,7 @@
 | 数据准备 | [数据准备：验证与 benchmark](../docs/wgs_data_preparation.md#验证与-benchmark) | 原始 PLINK 的局部真实转换、独立 BED 回读、注释转换和 1 / 8 CPU 对照 |
 | 二分类 WGS | [二分类：验证与 benchmark](../docs/wgs_binary.md#验证与-benchmark) | 最新六表型同输入官方统计核心对照、128 表型有限端到端与 CSV 核查；唯一官方 Single 求根回退差异另列。历史双 GPU / 两种缺失策略的入口验证保留各自范围 |
 | 连续表型 WGS | [连续表型：验证与 benchmark](../docs/wgs_continuous.md#验证与-benchmark) | 成熟关联内核的真实局部对照；独立连续入口的样本、字段、排序和恢复检查另行区分 |
-| 合成测试输入 | [合成数据生成器：验证与 benchmark](../docs/generate_simulated_data.md#7-验证与-benchmark) | 当前direct prepared版267项CPU测试及8,192位点有界校准；GPU关联not_assessed，全参考规模未生成；[当前匿名汇总](simulated_prepared_20261016.anonymous.json)。 |
+| 合成测试输入与存储 | [合成数据生成器：验证与 benchmark](../docs/generate_simulated_data.md#7-验证与-benchmark) | 存储标准化修订307项CPU测试；8,192位点实际生成 / 普通prepare及两版各4种GPU入口，120份CSV解压字节相同；全参考规模未生成。[当前匿名汇总](storage_standard_20261016.anonymous.json)。 |
 
 ## 精度
 
@@ -34,6 +34,10 @@
 
 `generate_simulated_data` 从私有汇总校准或显式的 small 人工预设直接生成生产格式 prepared，再由正常关联入口读取。它适用于不访问真实数据的代码回归、速度比较、内存压力测试及同输入优化前后 `−log10(P)` 比较。生成系数不是 oracle P 值，合成输入上的数值一致不替代真实数据或官方同输入精度验证。合成与真实 benchmark 分别记录数据来源、规模、实际 mask M、阶段和资源。
 
-默认 reference 的逐染色体位点数、频谱和官方15类mask目标来源于私有汇总，不发布原始身份、坐标或基因结果。改变 n 时保持目标 MAF，MAC 及实际合格 M 可因整数化和样本筛选变化，应保存目标 / 实际审计。已发布 mask 行匹配与未发布类别的推断行分开记录，未知类别不能当成 M=0，也不能把额外推断行算作已发布目标的重复。完整数量校准、资源准入、有限规模生成与完整GPU关联分别报告。当前修订267项CPU测试通过；8,192位点有界输入在参考n下15条目标M匹配，n缩小后的低MAC取整与M变化另行报告。[当前匿名记录](simulated_prepared_20261016.anonymous.json)将这些检查与GPU关联分开：GPU为 `not_assessed`，共享设备繁忙时的自动批准拒绝未转为运行证据；全参考规模只做资源预检，未生成。
+默认 reference 的逐染色体位点数、频谱和官方15类mask目标来源于私有汇总，不发布原始身份、坐标或基因结果。改变 n 时保持目标 MAF，MAC 及实际合格 M 可因整数化和样本筛选变化，应保存目标 / 实际审计。已发布 mask 行匹配与未发布类别的推断行分开记录，未知类别不能当成 M=0，也不能把额外推断行算作已发布目标的重复。完整数量校准、资源准入、有限规模生成与完整GPU关联分别报告。
+
+[当前存储标准化记录](storage_standard_20261016.anonymous.json)包含307项CPU测试、真实文件大小只读核查、有限真实帧无损重编码、8,192位点实际生成 / 普通prepare，以及用户批准后在共享GPU上完成的旧 / 新两版各4种入口验证；120份CSV解压字节相同。完整参考只做2,112个人工位点的压缩探测外推，未生成全部数据，预测和磁盘实测分开报告。旧13.2 TiB数值是宽松未压缩预留被误标为输出预测，已在功能文档中更正。
+
+[前一direct prepared记录](simulated_prepared_20261016.anonymous.json)保留当时267项测试、参考n下15条目标M匹配，以及n缩小时低MAC取整 / M变化和当时GPU未运行的历史状态；不作为当前存储布局与GPU验证的记录。
 
 [历史 PLINK 版记录](simulated_data_20261016.anonymous.json)对应提交 `9ae80ba3eafc9d24a9635f332170f398bbb6a7a7`：149项回归、1024名人工样本和两条染色体的四次GPU入口，以及10万人 / 1024变异的输入生成及准备。该记录不属于当前 direct prepared 实现，不用于当前版速度结论。

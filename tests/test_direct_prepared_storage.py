@@ -302,14 +302,148 @@ def test_streaming_empty_physical_axis_still_has_an_ordinary_valid_index(tmp_pat
     assert len(reader.index) == 0 and reader.verify_streams()
 
 
-@pytest.mark.parametrize("binding,streaming", [({}, True), ({"synthetic": False}, True),
-    ({"synthetic": "true"}, True), ({"synthetic": True}, 1), ({"synthetic": True}, "true")])
-def test_streaming_path_is_synthetic_only_and_does_not_override_production_budget(tmp_path, binding, streaming):
+@pytest.mark.parametrize("binding,streaming", [(None, True), ({"synthetic": True}, 1),
+    ({"synthetic": True}, "true")])
+def test_streaming_path_requires_explicit_binding_and_boolean_option(tmp_path, binding, streaming):
     path = tmp_path / "unadmitted"
     with pytest.raises(ValueError, match="streaming|Streaming|synthetic"):
         store.Writer(path, binding, np.arange(7, dtype=np.int64), 2,
                      source_bytes=100_000_000, streaming=streaming)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("n", [7, 65535, 65536, 2**32])
+def test_row_delta_roundtrip_preserves_absolute_indices_states_and_counts(n):
+    dtype = "<u2" if n < 65536 else "<u4"
+    offsets = np.asarray([0, 0, 3, 3, 4, 7], dtype="<u4")
+    indices = np.asarray([0, 2, n-1, n-1, 1, 3, n-1], dtype=dtype)
+    states = np.asarray([1, 2, 3, 4, 5, 1, 2], dtype=np.uint8)
+    originals = [value.copy() for value in (offsets, indices, states)]
+    payload, header = csr.encode_compact(offsets, indices, states, 5, n,
+                                         sample_encoding="row-delta")
+    assert header["version"] == 2 and header["sample_encoding"] == "row-delta"
+    actual = csr.decode_compact(payload, header)
+    for result, expected, source in zip(actual, originals, (offsets, indices, states)):
+        np.testing.assert_array_equal(result, expected)
+        np.testing.assert_array_equal(source, expected)
+        assert not result.flags.writeable
+    expected = csr.integer_counts(*originals, 5, n)
+    for name, counts in csr.integer_counts(*actual, 5, n).items():
+        np.testing.assert_array_equal(counts, expected[name])
+
+
+def test_row_delta_is_optional_and_reduces_a_frequent_variant_index_stream():
+    n, m = 100000, 4
+    rng = np.random.default_rng(1729)
+    indices = np.concatenate([np.sort(rng.choice(n, size=20000, replace=False))
+                              for _ in range(m)]).astype("<u4")
+    offsets = np.arange(m+1, dtype="<u4")*20000
+    states = np.ones(len(indices), dtype=np.uint8)
+    old, original = csr.encode_compact(offsets, indices, states, m, n, level=3)
+    new, transformed = csr.encode_compact(offsets, indices, states, m, n, level=3,
+                                         sample_encoding="row-delta")
+    assert original["version"] == 1 and "sample_encoding" not in original
+    assert len(new) < len(old)
+    for first, second in zip(csr.decode_compact(old, original),
+                             csr.decode_compact(new, transformed)):
+        np.testing.assert_array_equal(first, second)
+
+
+@pytest.mark.parametrize("damage", ["zero_delta", "wrapped_index", "bad_offsets", "unknown_encoding"])
+def test_row_delta_rejects_authenticated_but_semantically_invalid_payload(damage):
+    offsets = np.asarray([0, 3], dtype="<u4")
+    indices = np.asarray([0, 2, 6], dtype="<u2")
+    states = np.asarray([1, 4, 5], dtype=np.uint8)
+    payload, header = csr.encode_compact(offsets, indices, states, 1, 7,
+                                         sample_encoding="row-delta")
+    raw = bytearray(codec._zstd().ZstdDecompressor().decompress(payload))
+    if damage == "zero_delta":
+        raw[10:12] = np.asarray([0], dtype="<u2").tobytes()
+    elif damage == "wrapped_index":
+        raw[10:12] = np.asarray([65535], dtype="<u2").tobytes()
+    elif damage == "bad_offsets":
+        raw[:4] = np.asarray([1], dtype="<u4").tobytes()
+    else:
+        header["sample_encoding"] = "invented-lossy-format"
+    payload = codec._zstd().ZstdCompressor(level=1, write_content_size=True).compress(raw)
+    header.update(raw_sha256=hashlib.sha256(raw).hexdigest(),
+                  compressed_sha256=hashlib.sha256(payload).hexdigest(),
+                  compressed_bytes=len(payload))
+    header["header_sha256"] = csr._header_sha(header)
+    with pytest.raises(ValueError):
+        csr.decode_compact(payload, header)
+
+
+def test_real_source_streaming_row_delta_preserves_fraction_cap_and_resume(tmp_path):
+    calls, path = six_state_calls(), tmp_path / "real_source"
+    binding = dict(source_format="invented retained source for test")
+    samples = np.arange(calls.shape[1], dtype=np.int64)
+    options = dict(source_bytes=100_000_000, streaming=True,
+                   sample_encoding="row-delta", chunk=2)
+    writer = store.Writer(path, binding, samples, len(calls), **options)
+    writer.append(calls[:2], independent_counts(calls[:2]))
+    assert writer.rows is None and writer.spec["storage_cap_bytes"] == 10_000_000
+    assert "storage_budget_kind" not in writer.spec
+    with pytest.raises(ValueError, match="binding"):
+        store.Writer(path, binding, samples, len(calls), source_bytes=100_000_000,
+                     streaming=True, chunk=2)
+    resumed = store.Writer(path, binding, samples, len(calls), **options)
+    assert resumed.next_start == 2
+    resumed.append_compact(*csr.compact(calls[2:]), independent_counts(calls[2:]))
+    manifest = resumed.finish()
+    assert manifest["sample_encoding"] == "row-delta"
+    reader = store.Container(path, expected_source_binding=binding,
+                             expected_samples=samples)
+    assert isinstance(reader.index, np.memmap) and reader.verify_streams()
+    for frame in range(2):
+        expected = independent_counts(calls[2*frame:2*frame+2])
+        for name, value in expected.items():
+            np.testing.assert_array_equal(reader.read_frame(frame)[name], value)
+    report = resumed.storage_report()
+    assert report["current"] == store.usage(path)
+    assert all(report["peak_observed"][name] >= value
+               for name, value in report["current"].items())
+    (path / "metadata").mkdir()
+    (path / "metadata" / "separate-scope.bin").write_bytes(b"metadata")
+    assert resumed.storage_report()["current"] == report["current"]
+
+
+def test_legacy_pending_writer_still_resumes_original_binding_and_absolute_layout(tmp_path):
+    calls, path = six_state_calls(), tmp_path / "legacy"
+    binding, samples = {}, np.arange(7, dtype=np.int64)
+    options = dict(source_bytes=100_000_000, chunk=2)
+    writer = store.Writer(path, binding, samples, len(calls), **options)
+    writer.append(calls[:2], independent_counts(calls[:2]))
+    pending = json.loads((path / "manifest.pending.json").read_text())
+    assert "sample_encoding" not in pending and "journal_format" not in pending
+    writer = store.Writer(path, binding, samples, len(calls), **options)
+    writer.append(calls[2:], independent_counts(calls[2:]))
+    assert "sample_encoding" not in writer.finish()
+    assert store.Container(path).verify_streams()
+
+
+def test_disk_free_reserve_rejects_before_creation_and_preserves_committed_frames(tmp_path, monkeypatch):
+    from collections import namedtuple
+    usage = namedtuple("DiskUsage", "total used free")
+    path, calls = tmp_path / "disk_admission", six_state_calls()
+    samples, binding = np.arange(7, dtype=np.int64), dict(synthetic=True)
+    options = dict(storage_limit_bytes=8*2**20, streaming=True, chunk=2,
+                   free_disk_reserve_bytes=64*2**20)
+    monkeypatch.setattr(store.shutil, "disk_usage", lambda path: usage(2**30, 2**30, 0))
+    with pytest.raises(OSError, match="reserved free"):
+        store.Writer(path, binding, samples, len(calls), **options)
+    assert not path.exists()
+    monkeypatch.setattr(store.shutil, "disk_usage", lambda path: usage(2**30, 0, 2**30))
+    writer = store.Writer(path, binding, samples, len(calls), **options)
+    writer.append(calls[:2], independent_counts(calls[:2]))
+    committed = (path / "journal.jsonl").read_bytes()
+    sizes = store.usage(path)
+    monkeypatch.setattr(store.shutil, "disk_usage", lambda path: usage(2**30, 2**30, 0))
+    with pytest.raises(OSError, match="reserved free"):
+        writer.append(calls[2:], independent_counts(calls[2:]))
+    assert writer.next_start == 2 and store.usage(path) == sizes
+    assert (path / "journal.jsonl").read_bytes() == committed
+    assert not (path / "COMPLETE").exists()
 
 
 class SyntheticMetadata:

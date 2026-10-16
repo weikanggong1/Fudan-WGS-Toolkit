@@ -13,6 +13,7 @@ from fudan_wgs_toolkit.prepare import prepare_WGS_data
 from fudan_wgs_toolkit.cache_runtime.store import Container
 from fudan_wgs_toolkit.cache_runtime.portable import PortableMetadataReader
 from fudan_wgs_toolkit.identity import sample_keys
+import fudan_wgs_toolkit.prepare as prepare_module
 
 
 def source_fixture(tmp_path, *, archive=False):
@@ -75,6 +76,22 @@ def dense_cache(path):
     return result
 
 
+def interrupt_root_publication(monkeypatch, source, output, **options):
+    """Leave the genuine pre-publication crash state, including resume inputs."""
+    atomic = prepare_module.store.atomic
+    def fail_publication(path, content):
+        if Path(path) == output / "dataset.json":
+            raise InterruptedError("injected root publication interruption")
+        return atomic(path, content)
+    with monkeypatch.context() as patch:
+        patch.setattr(prepare_module.store, "atomic", fail_publication)
+        with pytest.raises(InterruptedError, match="root publication interruption"):
+            prepare_WGS_data(source, output, **options)
+    assert not (output / "dataset.json").exists()
+    assert not (output / "COMPLETE").exists()
+    assert (output / ".raw_annotations").is_dir()
+
+
 @pytest.mark.parametrize("archive", [False, True])
 def test_original_tables_orientation_identity_and_missingness(tmp_path, archive):
     source, annotations, pairs, expected = source_fixture(tmp_path, archive=archive)
@@ -95,7 +112,7 @@ def test_original_tables_orientation_identity_and_missingness(tmp_path, archive)
         weight = reader.read_field("annotation/cadd")
         np.testing.assert_equal(weight, [12.25, 20.0, 30.0, np.nan])
         assert list(reader.read_field("annotation/qc")) == ["PASS", "PASS", "FAIL", "PASS"]
-    assert all(path.suffix in (".json", ".npy", ".bin", ".utf8", "")
+    assert all(path.suffix in (".json", ".jsonl", ".npy", ".bin", ".utf8", "")
                for path in output.rglob("*") if path.is_file())
 
 
@@ -120,16 +137,12 @@ def test_partial_checkpoint_resume_and_sample_variant_subsets(tmp_path):
 
 
 @pytest.mark.parametrize("corruption", [None, "completion_marker", "field_bytes"])
-def test_resume_verifies_previously_committed_metadata(tmp_path, corruption):
+def test_resume_verifies_previously_committed_metadata(tmp_path, monkeypatch, corruption):
     source, annotations, _, _ = source_fixture(tmp_path)
     output = tmp_path / "prepared"
     options = dict(annotation_directory=annotations, chunk_size=2,
                    hardlink_annotations=False)
-    prepare_WGS_data(source, output, **options)
-    # An interruption between per-chromosome metadata commitment and root
-    # publication leaves this exact state for a legitimate resume request.
-    (output / "dataset.json").unlink()
-    (output / "COMPLETE").unlink()
+    interrupt_root_publication(monkeypatch, source, output, **options)
     metadata = output / "chr21/metadata"
     if corruption is None:
         result = prepare_WGS_data(source, output, resume=True, **options)
@@ -193,10 +206,10 @@ def test_selected_annotation_axis_does_not_require_unselected_variants(tmp_path)
                               variant_indices=np.asarray([0, 2]), chunk_size=2)
     np.testing.assert_array_equal(dense_cache(output / "chr21"), expected[[0, 2]])
     assert result["chromosomes"][0]["source_n_variants"] == 4
-    metadata = json.loads((output / ".raw_annotations/chr21/manifest.json").read_text())
-    assert metadata["n_variants"] == 2 and metadata["source_variants"] == 4
-    assert metadata["axis_validation"]["full_variant_axis_checked"]
-    assert not metadata["axis_validation"]["full_annotation_axis_checked"]
+    validation = result["chromosomes"][0]["axis_validation"]
+    assert validation["variants"] == 2 and validation["source_variants"] == 4
+    assert validation["full_variant_axis_checked"]
+    assert not validation["full_annotation_axis_checked"]
     with PortableMetadataReader(output / "chr21/metadata", output / "chr21") as reader:
         np.testing.assert_array_equal(reader.read_field("variant.id"), [1, 3])
         np.testing.assert_array_equal(reader.read_field("position"), [10, 20])

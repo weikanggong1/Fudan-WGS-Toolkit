@@ -47,3 +47,5 @@ Conda 环境包含 CUDA 11.8、PyTorch 2.5.1 和本包的 editable 安装。数�
 4. 按文档核对 `completed`、worker 退出、已提交块和最终 CSV；恢复时使用同一输出目录和输入配置。
 
 两种表型分析的标签处理和模型不同，应分别调用相应入口。实测速度、精度及覆盖范围分别记录在各功能文档的“验证与 benchmark”中；[验证口径](validation/README.md)说明如何解读这些指标。
+
+生成大规模合成输入前可用 `generate_simulated_data(..., dry_run=True)` 或 CLI `--dry-run` 查看压缩后最终大小、临时峰值规划和磁盘准入；该模式不创建输出目录。生成器和普通 `prepare_WGS_data` 的新缓存采用无损样本索引差分，reader兼容旧格式；实际逻辑大小、分配块和暂存分别统计。原13.2 TiB预留曾误标为输出预测，现已更正；全参考规模的新最终大小估计约1.34 TiB，尚未全量生成。[存储核查与有界GPU回归](validation/storage_standard_20261016.anonymous.json)记录307项CPU测试、实际准备及同输入两版关联结果的验证范围。

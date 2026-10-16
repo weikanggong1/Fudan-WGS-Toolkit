@@ -5,7 +5,8 @@ No dense decode, genotype, GPU, or allele-code reconstruction. Root mapping v1:
 Output compact arrays are offsets[m+1], sample indices[nnz], states[nnz].
 Validation stays in both decode/count APIs; vector checks replace Python row
 loops, so no caller can claim prevalidated mutable arrays. Integer prefix
-counts and compressed bytes/header semantics are unchanged.
+counts are unchanged. Version one retains the absolute-index byte layout;
+optional version two stores lossless per-row sample-index differences.
 Uncompressed-byte limit excludes input, masks/nonzero temporaries, compressor
 scratch and decompressed arrays' validation scratch; it is not a total RAM cap.
 """
@@ -69,34 +70,49 @@ def integer_counts(offsets,samples,values,m,n):
  half=half_prefix[offsets[1:]]-half_prefix[offsets[:-1]]
  return dict(reference_alleles=ref,called_alleles=called,half_missing_samples=half)
 
-def encode(states,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES):
+def encode(states,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES,sample_encoding='absolute'):
  if type(level) is not int or level not in (1,3):raise ValueError('Sparse probe levels are1/3')
  s=codec._states(states);m,n=map(int,s.shape);offsets,samples,values=compact(s,max_raw_bytes=max_raw_bytes)
- return encode_compact(offsets,samples,values,m,n,level,max_raw_bytes=max_raw_bytes)
+ return encode_compact(offsets,samples,values,m,n,level,max_raw_bytes=max_raw_bytes,sample_encoding=sample_encoding)
 
-def encode_compact(offsets,samples,values,m,n,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES):
+def encode_compact(offsets,samples,values,m,n,level=1,*,max_raw_bytes=DEFAULT_MAX_BYTES,sample_encoding='absolute'):
  """Encode validated sparse exceptions without allocating an m-by-n matrix.
 
- The payload and header are identical to ``encode`` for the same states.
+ The default payload and header retain the original version-one byte layout.
+ Optional row-delta encoding changes only stored sample indices: each row's
+ first index is absolute and later indices are positive differences. Decode
+ reconstructs the same absolute CSR arrays before validation/counting.
  Caller-owned arrays are never trusted as prevalidated or modified in place.
  """
  if type(level) is not int or level not in (1,3):raise ValueError('Sparse probe levels are1/3')
+ if sample_encoding not in ('absolute','row-delta'):raise ValueError('Unknown CSR sample encoding')
  if any(not isinstance(value,np.ndarray) for value in (offsets,samples,values)):raise ValueError('CSR inputs must be NumPy arrays')
  validate(offsets,samples,values,m,n)
  if len(values)>2**32-1:raise ValueError('CSR offset exceeds uint32 capacity')
  _budget(_size(m,n,len(values)),max_raw_bytes)
- raw=offsets.tobytes()+samples.tobytes()+values.tobytes()
+ encoded_samples=samples
+ if sample_encoding=='row-delta':
+  encoded_samples=samples.copy()
+  # Per-row operations avoid a chromosome/frame-sized repeated row vector.
+  # Input arrays remain untouched; only the on-disk reversible representation
+  # changes, preserving state meanings, sample order and integer summaries.
+  for first,last in zip(offsets[:-1],offsets[1:]):
+   first,last=int(first),int(last)
+   if last-first>1:encoded_samples[first+1:last]=samples[first+1:last]-samples[first:last-1]
+ raw=offsets.tobytes()+encoded_samples.tobytes()+values.tobytes()
  payload=codec._zstd().ZstdCompressor(level=level,write_content_size=True).compress(raw)
  meta=dict(format=FORMAT,version=1,state_encoding=codec.STATE_ENCODING,state_mapping=[v.copy() for v in codec.MAPPING],default_state=0,m=m,n=n,nnz=len(values),offset_dtype='<u4',sample_dtype=_sample_dtype(n).str,value_dtype='|u1',array_order=['offsets','samples','states'],codec='zstd',level=level,raw_bytes=len(raw),compressed_bytes=len(payload),raw_sha256=_sha(raw),compressed_sha256=_sha(payload))
+ if sample_encoding=='row-delta':meta.update(version=2,sample_encoding='row-delta')
  meta['header_sha256']=_header_sha(meta)
  _header(meta,max_raw_bytes)
  return payload,meta
 
 def _header(meta,limit):
  keys={'format','version','state_encoding','state_mapping','default_state','m','n','nnz','offset_dtype','sample_dtype','value_dtype','array_order','codec','level','raw_bytes','compressed_bytes','raw_sha256','compressed_sha256','header_sha256'}
+ if isinstance(meta,dict) and meta.get('version')==2:keys.add('sample_encoding')
  if not isinstance(meta,dict) or set(meta)!=keys:raise ValueError('CSR header keys mismatch')
  if meta['header_sha256']!=_header_sha(meta):raise ValueError('Header checksum mismatch')
- if meta['format']!=FORMAT or type(meta['version']) is not int or meta['version']!=1 or meta['state_encoding']!=codec.STATE_ENCODING or meta['state_mapping']!=codec.MAPPING or type(meta['default_state']) is not int or meta['default_state']!=0 or meta['array_order']!=['offsets','samples','states'] or meta['codec']!='zstd' or type(meta['level']) is not int or meta['level'] not in (1,3):raise ValueError('CSR semantic header mismatch')
+ if meta['format']!=FORMAT or type(meta['version']) is not int or meta['version'] not in (1,2) or (meta['version']==2 and meta['sample_encoding']!='row-delta') or meta['state_encoding']!=codec.STATE_ENCODING or meta['state_mapping']!=codec.MAPPING or type(meta['default_state']) is not int or meta['default_state']!=0 or meta['array_order']!=['offsets','samples','states'] or meta['codec']!='zstd' or type(meta['level']) is not int or meta['level'] not in (1,3):raise ValueError('CSR semantic header mismatch')
  m=codec._integer(meta['m'],'m');n=codec._integer(meta['n'],'n');nnz=codec._integer(meta['nnz'],'nnz')
  if n>2**32 or nnz>2**32-1 or nnz>m*n:raise ValueError('CSR dimension/index capacity exceeded')
  if meta['offset_dtype']!='<u4' or meta['sample_dtype']!=_sample_dtype(n).str or meta['value_dtype']!='|u1':raise ValueError('CSR header dtype mismatch')
@@ -116,6 +132,15 @@ def decode_compact(payload,meta,*,max_raw_bytes=DEFAULT_MAX_BYTES):
  if len(raw)!=size or _sha(raw)!=meta['raw_sha256']:raise ValueError('Raw size/checksum mismatch')
  start=4*(m+1);end=start+nnz*_sample_dtype(n).itemsize
  offsets=np.frombuffer(raw,dtype='<u4',count=m+1);samples=np.frombuffer(raw,dtype=_sample_dtype(n),count=nnz,offset=start);values=np.frombuffer(raw,dtype=np.uint8,count=nnz,offset=end)
+ if meta['version']==2:
+  # Validate row boundaries before using them for slicing. Full validation
+  # follows reconstruction, rejecting zero deltas, wraps and out-of-axis IDs.
+  if offsets[0]!=0 or int(offsets[-1])!=nnz or np.any(offsets[1:]<offsets[:-1]):raise ValueError('Invalid CSR offsets')
+  samples=samples.copy()
+  for first,last in zip(offsets[:-1],offsets[1:]):
+   first,last=int(first),int(last)
+   if last>first:np.cumsum(samples[first:last],dtype=samples.dtype,out=samples[first:last])
+  samples.flags.writeable=False
  # Views keep the decompressed bytes alive and are intentionally read-only.
  validate(offsets,samples,values,m,n)
  return offsets,samples,values

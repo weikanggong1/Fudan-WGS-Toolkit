@@ -173,6 +173,7 @@ def test_direct_container_is_complete_without_raw_genotypes(direct_prepared):
     assert container.verify_streams()
     assert container.manifest["source_bytes"] is None
     assert container.manifest["storage_budget_kind"] == "explicit_synthetic_bytes"
+    assert container.manifest["sample_encoding"] == "row-delta"
     assert container.manifest["m"] == 1024 and container.manifest["n"] == 1000
     observed = []
     for i in range(len(container.index)):
@@ -184,6 +185,33 @@ def test_direct_container_is_complete_without_raw_genotypes(direct_prepared):
     assert causal.shape == (1000,) and np.isfinite(causal).all() and causal.std() > 0
     chromosome_report = report["chromosome_reports"][0]
     assert chromosome_report["maf_rounding_max_absolute_error"] == 0
+
+
+def test_storage_plan_separates_compressed_final_peak_and_raw_bounds(direct_prepared):
+    _, report = direct_prepared
+    plan = report["resource_plan"]
+    estimate = report["chromosome_reports"][0]["storage_estimate"]
+    measured = report["measured_prepared_storage"]
+    assert 0 < plan["estimated_prepared_bytes"] < plan["estimated_prepared_peak_bytes"]
+    assert plan["estimated_prepared_peak_bytes"] >= plan["estimated_prepared_planning_upper_bytes"]
+    assert measured["logical_bytes"] < plan["estimated_prepared_planning_upper_bytes"]
+    assert estimate["encoding"] == "row-delta" and 0 < estimate["probe_variants"] <= 96
+    assert estimate["estimated_genotype_bytes"] < estimate["genotype_cap_bytes"]
+    assert estimate["metadata_final_bytes"] > 100*1024
+    assert "not a confidence interval" in estimate["sensitivity"]
+
+
+def test_large_plan_is_read_only_and_does_not_call_available_disk_a_measured_size(tmp_path, monkeypatch):
+    import fudan_wgs_toolkit.simulate_prepared as implementation
+    profile = small_profile()
+    # Repeated invented frequencies remain public/artificial. A read-only
+    # plan may inspect a layout larger than this deliberately tiny disk.
+    monkeypatch.setattr(implementation.shutil, "disk_usage", lambda _: type("Disk", (), {"free": 1})())
+    plan = plan_simulated_prepared(tmp_path/"not-created", profile, 1000, ["21"])
+    assert plan["estimated_prepared_bytes"] > 1
+    assert plan["budgets_are_estimates"] and not (tmp_path/"not-created").exists()
+    with pytest.raises(OSError, match="reserve"):
+        build_simulated_prepared(tmp_path/"not-created", profile, 1000, ["21"])
 
 
 def test_eleven_invented_numeric_weight_channels_are_exported(direct_prepared):

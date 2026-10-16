@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "implementation": "lossless_prepared_storage_standardization",
+  "baseline_commit": "3143cc55d29db4542ca847d43f3e34ff7d9b3f37",
+  "scope": "Read-only real-file inventory and bounded real-frame recompression, CPU regression tests, bounded synthetic generation and PLINK preparation, plus old/new synthetic GPU public-entry regression. No full reference-scale generation or conversion.",
+  "tests": {
+    "passed": 307,
+    "failed": 0,
+    "pytest_seconds": 57.89,
+    "cpu_affinity_count": 8,
+    "native_blas_threads": 2,
+    "cuda_visible_devices_empty": true
+  },
+  "reference_file_inventory": {
+    "measurement": "file_stat",
+    "autosomes": 22,
+    "original_gds_files": 22,
+    "reference_samples": 345967,
+    "physical_variants": 1023836503,
+    "original_gds": {
+      "logical_bytes": 1372012487282,
+      "allocated_bytes": 1372012568576
+    },
+    "existing_prepared_genotypes": {
+      "logical_bytes": 1595610260804,
+      "allocated_bytes": 1595610668032
+    },
+    "existing_prepared_metadata": {
+      "logical_bytes": 277586941100,
+      "allocated_bytes": 277591289856
+    },
+    "existing_outputs_modified_or_converted": false,
+    "interpretation": "Existing real files measured independently of new synthetic generation. Metadata, retained original input and genotype cache are separate storage components."
+  },
+  "historical_estimate_correction": {
+    "previous_reported_bytes": 14517782875204,
+    "previous_label": "conservative output storage estimate",
+    "correct_interpretation": "Loose doubled uncompressed CSR exception upper bound plus 768 bytes per variant metadata allowance; neither measured output nor compressed final-size prediction.",
+    "actual_full_synthetic_output_size": "not_assessed"
+  },
+  "full_reference_dry_run": {
+    "n": 345967,
+    "variants": 1023836503,
+    "synthetic_probe_variants": 2112,
+    "seconds": 52.783,
+    "estimated_prepared_final_logical_bytes": 1472623306503,
+    "prepared_final_planning_upper_bytes": 2406054002370,
+    "prepared_peak_planning_bytes": 2407410990930,
+    "separate_uncompressed_upper_bound_bytes": 7103173582560,
+    "method": "At most twelve expected-exception strata per chromosome and eight synthetic variants per stratum, with requested n and integer AC/AN unchanged. Probe row-delta sample indices with Zstd level 3; account metadata, catalogs, sample axes, journal/index/headers/counts and metadata raw-to-NPY staging separately.",
+    "margins": "Genotype probe estimate times 1.75 plus fixed allowance, metadata times 1.05 plus fixed allowance; sensitivity margins are not confidence intervals or a completion guarantee.",
+    "output_directory_created": false,
+    "full_reference_data_generated": false,
+    "limitations": "Independent synthetic calls do not reconstruct biological LD or guarantee the real-data compression ratio. No measured whole-dataset disk peak."
+  },
+  "bounded_real_frame_recompression": {
+    "real_data": true,
+    "source_read_only": true,
+    "frames": 110,
+    "physical_variants": 102743,
+    "old_payload_bytes": 171540528,
+    "new_payload_bytes": 125723312,
+    "payload_reduction_percent": 26.709266045864098,
+    "old_sample_encoding": "absolute",
+    "new_sample_encoding": "row-delta",
+    "zstd_level_both": 3,
+    "csr_arrays_exact": true,
+    "existing_cache_rewritten": false,
+    "scope": "Bounded frame sample only; not a measured whole-genome saving or speed benchmark."
+  },
+  "bounded_synthetic_generator": {
+    "synthetic": true,
+    "n": 345967,
+    "variants": 8192,
+    "published_mask_targets": 15,
+    "published_mask_targets_matched": 15,
+    "raw_plink_written": false,
+    "old": {
+      "payload_bytes": 26548484,
+      "prepared_logical_bytes": 197424842,
+      "prepared_allocated_bytes": 124256256,
+      "seconds": 35.912
+    },
+    "new": {
+      "payload_bytes": 9507871,
+      "prepared_logical_bytes": 180385828,
+      "prepared_allocated_bytes": 183312384,
+      "seconds": 35.514
+    },
+    "payload_reduction_percent": 64.18676486386191,
+    "genetic_states_exact": true,
+    "integer_counts_exact": true,
+    "metadata_exact": true,
+    "sample_axis_exact": true,
+    "phenotype_csv_bytes_exact": true,
+    "new_estimated_final_logical_bytes": 181270753,
+    "new_peak_planning_bytes": 212557914,
+    "final_logical_estimate_relative_error_percent": 0.4905734612366554,
+    "allocation_interpretation": "Unchanged SHA-identical sample-axis files had different physical allocation between runs; the whole-directory allocation difference cannot be attributed to the codec. Payload reduction and logical sizes are reported separately.",
+    "timing_scope": "Single shared-node pair with uncontrolled cache state; no speedup claim."
+  },
+  "bounded_plink_preparation": {
+    "synthetic_source": true,
+    "n": 345967,
+    "variants": 8192,
+    "annotation_channels": 11,
+    "cpu_threads": 2,
+    "chunk_size": 64,
+    "source_inputs_logical_bytes": 722577600,
+    "source_bed_bytes": 708542467,
+    "genotype_cache_cap_bytes_both": 70854246,
+    "cache_admission": "Existing ten-percent retained BED rule, metadata excluded from genotype cap and measured separately.",
+    "old": {
+      "payload_bytes": 26672608,
+      "prepared_logical_bytes": 199428271,
+      "prepared_unique_allocated_bytes": 206970880,
+      "seconds": 63.622,
+      "process_peak_rss_bytes": 785739776
+    },
+    "new": {
+      "payload_bytes": 9573753,
+      "prepared_logical_bytes": 180488807,
+      "prepared_unique_allocated_bytes": 183836672,
+      "seconds": 63.4,
+      "process_peak_rss_bytes": 773902336
+    },
+    "unique_allocated_reduction_percent": 11.177518305956857,
+    "compared_genetic_states": 2834161664,
+    "compared_metadata_values": 196608,
+    "genetic_states_exact": true,
+    "integer_counts_exact": true,
+    "metadata_values_exact": true,
+    "sample_axis_exact": true,
+    "compressed_stream_checksums_verified": true,
+    "old_raw_annotation_staging": {
+      "logical_bytes": 1862564,
+      "allocated_bytes": 2539520
+    },
+    "new_cleanup": {
+      "after_root_complete_verification": true,
+      "raw_annotation_staging_removed": true,
+      "preflight_staging_removed": true,
+      "source_provenance_bytes_and_sha_retained": true,
+      "original_inputs_retained": true
+    },
+    "storage_report": "Separates logical lengths, allocated blocks, inode-deduplicated allocation, source, genotype cache, metadata and temporary directories. Phase-boundary measurements are not a measured disk high-water mark.",
+    "timing_scope": "Single warm shared-node pair; no speedup claim."
+  },
+  "gpu_public_entry_regression": {
+    "synthetic_same_input": true,
+    "user_approved_shared_gpu": true,
+    "modes": [
+      "binary_available",
+      "binary_impute",
+      "continuous_available",
+      "continuous_mean_imputed"
+    ],
+    "public_entry_calls_per_version": 4,
+    "csv_files_per_version": 120,
+    "rows_per_mode": 831,
+    "total_rows_per_version": 3324,
+    "all_decompressed_csv_bytes_exact": true,
+    "finite_p_gene_categories": 15,
+    "own_process_gpu_memory_peak_bytes_less_than": 62914560,
+    "gpu_admission_budget_bytes": 12884901888,
+    "board_memory_not_attributed_to_own_process": true,
+    "scope": "Bounded same-input storage compatibility and association-output regression, not an official same-input accuracy comparison or full-scale GPU run.",
+    "label_policies": {
+      "binary_available": "impute_missing=False: use the available samples for each phenotype after covariate matching.",
+      "binary_impute": "impute_missing=True: fill missing binary labels as controls after covariate matching.",
+      "continuous_available": "rm_nan=False: use the available samples for each phenotype after covariate matching.",
+      "continuous_mean_imputed": "rm_nan=True: after covariate matching, fill missing continuous labels using the mean of the available values for that phenotype."
+    }
+  },
+  "format_and_statistics": {
+    "old_absolute_v1_readable": true,
+    "new_row_delta_v2_readable": true,
+    "legacy_pending_resume_preserves_encoding": true,
+    "new_files_require_updated_reader": true,
+    "existing_completed_files_not_rewritten": true,
+    "sample_order_and_six_state_semantics_unchanged": true,
+    "mac_maf_and_mask_targets_not_changed_for_compression": true,
+    "numerical_annotation_channels": 11,
+    "numerical_annotation_dtype_unchanged": "float64",
+    "variant_mode": "Synthetic Indel/PTV retained; mature association variant mode does not apply numerical annotation weighting.",
+    "snv_mode": "Explicit SNV mode exercises numerical annotation weights and changes non-SNV eligibility."
+  },
+  "scientific_limits": {
+    "full_reference_generation": false,
+    "full_existing_cache_conversion": false,
+    "official_same_input_p_value_validation": "not_assessed",
+    "biological_ld_or_original_variant_intersections_reproduced": false,
+    "oracle_p_values_provided": false,
+    "controlled_speedup_benchmark": false
+  },
+  "privacy": {
+    "original_identifiers_loci_genes_and_trait_names_included": false,
+    "per_chromosome_reference_vectors_or_mask_tables_included": false,
+    "private_calibration_hashes_or_server_paths_included": false
+  },
+  "tested_runtime_binding": {
+    "python_files": 103,
+    "sha256_manifest_format": "SHA256 of canonical JSON mapping sorted package-relative Python path to file SHA256",
+    "manifest_sha256": "30d81dcb5227bcd46325486fb727b722777231f1b3058a651c70c7cbb5de421b"
+  }
+}

@@ -28,6 +28,7 @@ import numpy as np
 
 from .identity import sample_keys, validate_sample_pairs
 from .cache_runtime import store
+from .storage_plan import directory_storage, source_storage
 from .cache_runtime.portable import (
     FORMAT as METADATA_FORMAT, PortableMetadataReader, _export_field, _sha,
     _value_writer,
@@ -732,6 +733,11 @@ def _write_metadata(annotations, container_directory, pairs, source_rows,
                     or existing["analysis"] != annotations.manifest["analysis"]
                     or existing["preparation"]["original_annotation_input"] != annotations.manifest["input_binding"]):
                 raise ValueError("existing metadata belongs to another prepared source/sample/annotation axis")
+            proof = existing["preparation"].get("raw_annotation_manifest")
+            if proof is not None:
+                container = json.loads((Path(container_directory) / "manifest.json").read_text())
+                if _sha(reader._verify(proof)) != container["binding"]["raw_annotation_manifest_sha256"]:
+                    raise ValueError("retained annotation preflight manifest differs from genotype binding")
             return existing
     staging = directory.with_name(directory.name + ".partial")
     if staging.exists():
@@ -773,6 +779,13 @@ def _write_metadata(annotations, container_directory, pairs, source_rows,
                 else:
                     shutil.copyfile(source, target)
         container = json.loads((Path(container_directory) / "manifest.json").read_text())
+        # Retain the small preflight witness while releasing its large field
+        # staging after root commitment. Its exact bytes close the provenance
+        # hash chain named by the genotype container's source binding.
+        annotation_manifest = (annotations.directory / "manifest.json").read_bytes()
+        if hashlib.sha256(annotation_manifest).hexdigest() != container["binding"]["raw_annotation_manifest_sha256"]:
+            raise ValueError("annotation preflight manifest differs from genotype binding")
+        (staging / "annotation.source.json").write_bytes(annotation_manifest)
         files = {path.name: dict(sha256=_sha(path), size=path.stat().st_size)
                  for path in staging.iterdir() if path.is_file()}
         metadata = dict(schema_version=1, format=METADATA_FORMAT,
@@ -792,7 +805,8 @@ def _write_metadata(annotations, container_directory, pairs, source_rows,
                 available_field="annotation_available"),
             preparation=dict(source_format="PLINK-BED-BIM-FAM", annotation_source_format=RAW_ANNOTATION_FORMAT,
                              original_annotation_input=annotations.manifest["input_binding"], variant_subset=variant_subset,
-                             half_missing_source_supported=False, hardlink_annotations=hardlink_annotations))
+                             half_missing_source_supported=False, hardlink_annotations=hardlink_annotations,
+                             raw_annotation_manifest="annotation.source.json"))
         raw = _canonical(metadata)
         (staging / "manifest.json").write_bytes(raw)
         (staging / "COMPLETE").write_text(hashlib.sha256(raw).hexdigest())
@@ -836,6 +850,89 @@ def _check_sources(context):
     for key, proof in binding.get("reference_files", {}).items():
         if _identity(context["annotation_spec"][key]) != proof["identity"]:
             raise RuntimeError("independent gene/promoter reference changed during preparation")
+
+
+def _source_storage_paths(contexts):
+    """Original inputs remain external; count shared tables only once."""
+    paths = set()
+    for context in contexts:
+        for extension in context["source_before"]:
+            paths.add(_plink_file(context["prefix"], extension))
+        paths.update(Path(name) for name in context.get("annotation_input_binding", {}).get("files", {}))
+        for key in context.get("annotation_input_binding", {}).get("reference_files", {}):
+            paths.add(Path(context["annotation_spec"][key]))
+    return sorted(paths)
+
+
+def _preparation_storage(output, contexts, *, completed, before_cleanup=None,
+                         cleanup=None):
+    """Report measured file bytes separately from source and cache admission.
+
+    The sidecar excludes itself, so its byte counts have a precise stable
+    scope. Phase-boundary measurements are not claimed to be a disk high-water
+    mark: atomic temporary files can coexist between those measurements.
+    """
+    output = Path(output)
+    def owned_directory(path):
+        if path.is_symlink():
+            raise ValueError("prepared component directory must not be a symlink")
+        return directory_storage(path) if path.exists() else source_storage([])
+    retained = directory_storage(output, exclude=("storage.report.json",))
+    components = dict(
+        genotype_cache=source_storage([path for context in contexts
+            for path in (output / ("chr" + context["chromosome"])).glob("*") if path.is_file()]),
+        metadata=source_storage([path for context in contexts
+            if (path := output / ("chr" + context["chromosome"]) / "metadata").exists()]),
+        catalogs=owned_directory(output / "catalogs"),
+        raw_annotation_staging=owned_directory(output / ".raw_annotations"),
+        sample_and_variant_staging=owned_directory(output / ".preflight"))
+    caps = [dict(chromosome=context["chromosome"],
+                 retained_bed_bytes=context["source_before"][".bed"]["size"],
+                 genotype_cache_limit_bytes=max(int(context["source_before"][".bed"]["size"] * .10), 2**20))
+            for context in contexts]
+    boundaries = [retained] + ([] if before_cleanup is None else [before_cleanup])
+    basis = ("unique_allocated_bytes" if all(item["unique_allocated_bytes"] is not None
+                                           for item in boundaries) else "unique_logical_bytes")
+    report = dict(schema_version=1, format="wgs-preparation-storage-v1",
+        completed=bool(completed), unit="bytes", measurement="file_stat",
+        scope="prepared output excluding storage.report.json; symlinks are not traversed",
+        original_inputs_retained=True, source=source_storage(_source_storage_paths(contexts)),
+        prepared=retained, components=components,
+        genotype_cache_admission=dict(kind="retained_bed_fraction", fraction=.10,
+            minimum_bytes_per_chromosome=2**20, chromosomes=caps,
+            includes_metadata=False, includes_retained_original_inputs=False),
+        phase_boundary_before_cleanup=before_cleanup,
+        peak=dict(actual_bytes=None, observed_phase_boundary_at_least_bytes=max(item[basis] for item in boundaries),
+            basis=basis,
+            reason="phase-boundary file measurements do not observe every atomic temporary file"),
+        cleanup=cleanup or dict(completed=False, removed=[], errors=[]))
+    store.atomic(output / "storage.report.json", _canonical(report))
+    return report
+
+
+def _cleanup_committed_staging(output, dataset_bytes):
+    """Remove only private staging after the exact root commit is durable."""
+    output = Path(output)
+    if ((output / "dataset.json").read_bytes() != dataset_bytes or
+            (output / "COMPLETE").read_text() != hashlib.sha256(dataset_bytes).hexdigest()):
+        raise ValueError("root dataset commitment differs before staging cleanup")
+    committed_root = output.resolve(strict=True)
+    removed, errors = [], []
+    for name in (".preflight", ".raw_annotations"):
+        path = output / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.is_symlink():
+            errors.append(dict(directory=name, error="symlink_staging_retained"))
+            continue
+        if not path.resolve(strict=True).is_relative_to(committed_root):
+            raise ValueError("preparation staging escapes the committed output directory")
+        try:
+            shutil.rmtree(path)
+            removed.append(name)
+        except OSError as error:
+            errors.append(dict(directory=name, error=type(error).__name__, errno=error.errno))
+    return dict(completed=not errors, removed=removed, errors=errors)
 
 
 def _source_descriptor(chromosome, prefix, specification, output, sample_selection,
@@ -980,9 +1077,17 @@ def _convert_chromosome(context, *, cpu_threads, hardlink_annotations, chunk_siz
                 raise ValueError("completed chromosome has another variant selection")
             existing.verify_streams()
         else:
+            pending_manifest = directory / "manifest.pending.json"
+            # Existing checkpoints keep their original journal contract. New
+            # real-source conversions use the bounded append-only journal,
+            # without relaxing the retained-BED storage fraction.
+            pending_spec = json.loads(pending_manifest.read_text()) if pending_manifest.exists() else None
+            streaming = pending_spec is None or pending_spec.get("journal_format") == "jsonl-v1"
+            sample_encoding = "row-delta" if pending_spec is None else pending_spec.get("sample_encoding", "absolute")
             writer = store.Writer(directory, context["binding"], rows, len(selected),
                 source_bytes=context["source_before"][".bed"]["size"],
-                minimum_storage_bytes=2**20, chunk=chunk_size)
+                minimum_storage_bytes=2**20, chunk=chunk_size, streaming=streaming,
+                sample_encoding=sample_encoding)
             with _plink_file(prefix, ".bed").open("rb") as stream:
                 while writer.next_start < len(selected):
                     if max_frames is not None and written_frames >= max_frames:
@@ -1093,6 +1198,14 @@ def prepare_WGS_data(source_directory=None, output_directory=None, *, prefixes=N
     manifest until all selected chromosomes are complete. ``resume=True`` checks
     the exact preparation/source/sample binding before continuing.
 
+    New caches use an append-only frame journal and a mapped final index.
+    The ordinary genotype-cache limit remains 10% of retained BED bytes,
+    with a 1 MiB minimum per chromosome; it does not include annotation
+    metadata or original input files. ``storage.report.json`` distinguishes
+    logical bytes, allocated bytes, unique hardlinked storage, retained
+    sources and temporary staging. Staging is removed only after the final
+    root dataset and completion marker have been written and verified.
+
     BED supplies complete diploid calls or fully missing calls only. Partial
     allele calls cannot be reconstructed from this format. The six-state format
     remains unchanged and every written CSR frame is checked by roundtrip.
@@ -1182,9 +1295,10 @@ def prepare_WGS_data(source_directory=None, output_directory=None, *, prefixes=N
             written_frames += result["committed_frames"]
             if not result["completed"]:
                 schedule["conversion_seconds"] = time.perf_counter() - conversion_started
+                storage = _preparation_storage(output, contexts, completed=False)
                 return dict(completed=False, dataset=None, committed_frames=written_frames,
                     seconds=time.perf_counter()-started, checkpoint_directory=str(output),
-                    cpu_threads=cpu_threads, parallel_execution=schedule)
+                    cpu_threads=cpu_threads, parallel_execution=schedule, storage=storage)
             converted.append(result)
     schedule["conversion_seconds"] = time.perf_counter() - conversion_started
     for context in contexts:
@@ -1197,16 +1311,21 @@ def prepare_WGS_data(source_directory=None, output_directory=None, *, prefixes=N
         qc_path=analysis["qc_path"], preparation=dict(source_format="PLINK-BED-BIM-FAM",
             completed=True, variant_subset=any(context["variant_subset"] for context in contexts),
             cpu_threads=cpu_threads, memory_limit_gib=memory_limit_gib, chunk_size=chunk_size,
-            seconds=time.perf_counter()-started, chromosomes=metrics, parallel_execution=schedule))
+            seconds=time.perf_counter()-started, chromosomes=metrics, parallel_execution=schedule,
+            storage_report="storage.report.json"))
     raw = _canonical(dataset)
     # The caller process alone publishes the cross-chromosome commit. Each
     # child has already committed and validated its independent immutable files.
     store.atomic(output / "dataset.json", raw)
     store.atomic(output / "COMPLETE", hashlib.sha256(raw).hexdigest().encode())
-    shutil.rmtree(output / ".preflight", ignore_errors=True)
+    before_cleanup = directory_storage(output, exclude=("storage.report.json",))
+    cleanup = _cleanup_committed_staging(output, raw)
+    storage = _preparation_storage(output, contexts, completed=True,
+        before_cleanup=before_cleanup, cleanup=cleanup)
     return dict(completed=True, dataset=str(output / "dataset.json"), n_samples=len(population),
         chromosomes=metrics, seconds=time.perf_counter()-started,
-        committed_frames=written_frames, cpu_threads=cpu_threads, parallel_execution=schedule)
+        committed_frames=written_frames, cpu_threads=cpu_threads, parallel_execution=schedule,
+        storage=storage)
 
 
 def main():

@@ -227,6 +227,8 @@ if __name__ == "__main__":
     )
     print(preparation_report["completed"])
     print(preparation_report["seconds"])
+    # 文件逻辑长度与文件系统实际分配块分别记录；单位均为字节。
+    print(preparation_report["storage"]["prepared"]["unique_allocated_bytes"])
 ```
 
 多染色体准备使用 `spawn`，独立脚本应保留 `if __name__ == "__main__"`。只准备一条染色体时把 `chromosomes` 改为 `[21]`；`None` 表示自动发现的全部常染色体。准备入口不使用关联入口的 `chromosomes="all"` 写法。
@@ -287,6 +289,7 @@ prepared_genetics/
   dataset.json                         # 选择的全部染色体完成后发布
   COMPLETE                             # dataset.json 原始字节的 SHA-256
   preparation.pending.json             # 原始输入、样本、变异与 chunk_size 绑定
+  storage.report.json                  # 实测源文件、缓存、元数据与临时空间分项
   sample_pairs.npy                     # [n,2] 完整 FID/IID 字符串
   sample_ids.npy                       # 身份双列生成的无歧义内部键
   catalogs/
@@ -296,18 +299,19 @@ prepared_genetics/
     samples.npy                        # 原始 FAM 行号，确定遗传帧样本轴
     data.bin / headers.bin / counts.bin # 压缩 CSR、帧说明与整数计数
     index.npy                          # 每帧起点、变异数、偏移、尺寸和 SHA
-    journal.json                       # 已提交的连续遗传帧
+    journal.jsonl                      # 新目录逐帧追加 ACK；旧检查点仍用 journal.json
     manifest.pending.json              # 未完成容器的固定绑定
     manifest.json / COMPLETE           # 完成容器及其 SHA
     metadata/
       manifest.json / COMPLETE         # 元数据文件、轴、来源与覆盖绑定
+      annotation.source.json           # 保留注释预检清单原始字节，串联基因型来源 SHA
       sample_pairs.npy / sample_ids.npy
       source_sample_rows.npy           # 输出样本对应的原始 FAM 行号
       source_variant_rows.npy          # 输出变异对应的原始 BIM 行号
       field_*                          # 数值列或原始字符串的独立数组
 ```
 
-未完成时还有 `.preflight/` 中的轴文件、原始注释整理与进度记录；全部完成后准备器清理这段临时预检工作目录。完成的遗传容器、元数据和整体清单各有独立完成标记，不能用某一条染色体的 `COMPLETE` 代替整体完成。
+未完成时保留 `.preflight/` 中的轴文件，以及 `.raw_annotations/` 中经过验证的注释与进度记录，供同输入恢复使用。全部选定染色体完成、根目录 `dataset.json` 与 `COMPLETE` 原始字节再次核对后，才清理这两处内部临时目录。最终 metadata 的硬链接继续保有数据；复制模式或跨文件系统回退产生的临时副本也在此时释放。原始 BED/BIM/FAM、下载注释和参考表不删除。完成的遗传容器、元数据和整体清单各有独立完成标记，不能用某一条染色体的 `COMPLETE` 代替整体完成。
 
 ### 7.2 字段含义与精确保存
 
@@ -315,9 +319,30 @@ prepared_genetics/
 
 遗传帧按 REF 方向保存六状态编码：`0=REF/REF`、`1=REF/ALT`、`2=ALT/ALT`、`3=完全缺失`、`4=单个已知REF`、`5=单个已知ALT`。原始 BED 只有前三种完整调用与完全缺失，不能恢复半调用；该来源的 `half_missing_samples` 为零。准备不把基因型 NaN 填成剂量，也不执行表型填补；关联入口再按每个表型的样本与既有规则计算 AF/MAF/MAC、填补及资格过滤。
 
-每帧保存 REF 等位基因数、已调用等位基因数、半缺失样本数的整数摘要，CSR 编码后解码与原状态及摘要精确比对。`index.npy` 和完成清单保存帧、数据流与文件校验值。容器存储准入以实际原始 BED 字节数的 10% 为上限，小型验证有最多 1 MiB 的最小容器额度；此限制针对压缩容器，不代表整份注释或原始数据总磁盘占用。
+每帧保存 REF 等位基因数、已调用等位基因数、半缺失样本数的整数摘要，CSR 编码后解码与原状态及摘要精确比对。新目录采用无损行内样本序号差分编码，读出时恢复完全相同的绝对序号和六状态；旧 v1 帧仍可读取。新目录逐帧追加 `journal.jsonl`，最终通过映射数组生成 `index.npy`，避免每新增一帧重写整个日志及在内存中保存整条染色体的日志列表。旧 `journal.json` 检查点按原格式恢复，不转换已提交帧。
 
-### 7.3 报告与断点恢复
+`index.npy` 和完成清单保存帧、数据流与文件校验值。容器存储准入仍以实际保留的原始 **BED 字节数** 的 10% 为上限，小型验证有每条染色体 1 MiB 的最小容器额度。该限制覆盖基因型容器文件，不包括独立 annotation metadata、临时注释目录或原始输入；也不把已压缩 GDS 当作等尺寸的 BED。`prepare_WGS_data` 本身的原始遗传输入为 PLINK，已有 GDS 来源的完成目录由关联入口直接复用。
+
+### 7.3 磁盘统计口径
+
+返回值 `storage` 与 `storage.report.json` 保存同一份统计；`dataset.json` 的 `preparation.storage_report` 指向该诊断文件。统计不含报告自身，不跟随内部目录符号链接，读取或权限错误不会计作零空间。它使用文件长度和文件系统块数，不是配额或可保证的压缩率。
+
+| `storage` 字段 | 意义 |
+| --- | --- |
+| `source` | 仍保留在外部的原始三文件、注释和参考表；共享路径及硬链接只计一次 |
+| `prepared` | 本次调用结束时输出目录的实测大小，排除 `storage.report.json` 自身 |
+| `components` | 基因型容器、最终 metadata、任务参考索引、注释暂存和样本轴暂存分别统计 |
+| `logical_bytes` / `allocated_bytes` | 文件名对应的逻辑长度总和与文件系统分配块总和；硬链接的多个目录项会重复计入 |
+| `unique_logical_bytes` / `unique_allocated_bytes` | 按设备号和 inode 去重后的长度与分配块；文件系统未提供块数时后者为 `null` |
+| `hardlink_duplicate_bytes` | 重复目录项对应的逻辑长度，不代表重复占用的数据块 |
+| `genotype_cache_admission` | 每条染色体保留 BED 的大小、10% 缓存准入及最小额度；不与最终整目录大小混算 |
+| `phase_boundary_before_cleanup` | 提交完整数据、清理内部暂存之前的实测快照；未完成时为 `null` |
+| `peak` | `actual_bytes=null`；仅给已观测阶段边界的最低规模，不能称为整个准备过程的实测峰值 |
+| `cleanup` | 是否成功删除内部暂存、删除的目录名及失败原因；检查点不执行删除 |
+
+最终占用与准备时暂存共存的空间不同。尤其在 `hardlink_annotations=False` 或硬链接回退为复制时，清理前两份注释可能同时存在；完成后只保留供关联入口读取的最终 metadata。查看可用空间时，应同时考虑外部原始输入、准备输出与原子提交时短暂存在的文件，不能只拿基因型缓存额度作为整次运行需求。
+
+### 7.4 报告与断点恢复
 
 | preparation_report 字段 | 含义 |
 | --- | --- |
@@ -329,6 +354,7 @@ prepared_genetics/
 | committed_frames | 本次新提交帧数，不是历史累计帧总数 |
 | cpu_threads / parallel_execution | 请求的总 CPU 预算及实际并发配置 |
 | checkpoint_directory | 达到 max_frames 返回未完成时的恢复目录 |
+| storage | 与 `storage.report.json` 一致的文件分配、去重、暂存与准入口径 |
 
 `resume=True` 验证原始三文件、原始注释、参考资源、样本双列、选择行和 chunk_size 绑定；已完成染色体重新验证数据流和元数据 SHA，未完成容器验证已提交连续帧后继续。输入或已提交内容不一致时报错，不覆盖完成数据。`max_frames` 只发布可恢复检查点，不能把它当作可做全量关联的完成目录。
 
@@ -367,7 +393,11 @@ Rscript /data/reference_scripts/FAVORannotator_csv/gds2agds.R
 
 ## 验证与 benchmark
 
-现有准备记录直接读取原始 BED/BIM/FAM 与独立 FAVOR Essential GRCh38 文件，未用人工数据代替 benchmark。下面只保留与当前准备编码和 CPU 调度有关的实测；原始样本与位点标识、实际基因表和详细路径均不公开。
+2026-10-16 的存储标准化版在目标计算节点通过307项CPU测试，并以345,967名人工样本、8,192个位点、11个注释通道实际运行普通准备入口。相同输入、2CPU、chunk_size=64下，旧 / 新基因型payload分别为26,672,608 / 9,573,753字节，完整prepared目录去重后的实际分配为206,970,880 / 183,836,672字节，减少11.18%。2,834,161,664个遗传状态、整数计数、196,608个metadata值及样本顺序精确一致；源PLINK不能表示半缺失，测试输入已明确将其转为完全缺失。
+
+旧 / 新准备墙时为63.622 / 63.400秒，单次共享节点对照且缓存冷热未严格控制，不据此宣称加速。新版完成清单核验后移除内部暂存、保留注释来源清单及原始输入。真实prepared的110帧只读压缩检查另得到26.71%的payload减少；没有转换全部真实缓存。详细存储分项和后续binary / continuous GPU回归见[本轮匿名记录](../validation/storage_standard_20261016.anonymous.json)及[生成器验证](generate_simulated_data.md#7-验证与-benchmark)。
+
+下列是此前 v1 编码与 CPU 调度的真实数据记录，直接读取原始 BED/BIM/FAM 与独立 FAVOR Essential GRCh38 文件；它们不代表新版样本序号差分编码、追加日志与完成后清理的耗时。新版存储路径通过整数状态、计数与注释逐值检查验证，真实数据端到端速度尚未重测。原始样本与位点标识、实际基因表和详细路径均不公开。
 
 | 检查 | 真实范围与结果 |
 | --- | --- |

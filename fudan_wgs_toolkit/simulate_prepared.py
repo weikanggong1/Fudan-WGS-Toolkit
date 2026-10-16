@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -17,6 +18,7 @@ from .cache_runtime.portable import export_metadata
 from .identity import sample_keys
 from .masks import CODING_CATEGORIES_INCL_PTV, NONCODING_CATEGORIES
 from .simulation_profile import normalize_profile
+from .storage_plan import directory_storage
 
 ANNOTATION_CATALOG = {
     "CADD": "annotation/cadd", "aPC.LocalDiversity": "annotation/local_diversity",
@@ -239,7 +241,7 @@ def plan_simulated_prepared(root, profile, n, chromosomes, seed=1729, cpu_thread
     if csr._size(actual_chunk, n, actual_chunk*n) > raw_budget:
         raise MemoryError("memory_limit_gib cannot admit one worst-case sparse variant")
     entries = []
-    total_disk = 0
+    final_estimate = final_lower = final_upper = raw_upper = 0
     has_variable_locus = False
     for chromosome in selected:
         entry = source[chromosome]
@@ -264,30 +266,49 @@ def plan_simulated_prepared(root, profile, n, chromosomes, seed=1729, cpu_thread
         missing_samples = (2*n-called+1)//2
         nnz_bound = sum(int(count)*min(n, int(ac+missing)) for count, ac, missing in zip(frequency_counts, minor, missing_samples))
         frames = (m+actual_chunk-1)//actual_chunk
-        genotype_cap = 8*n + nnz_bound*(5 if n >= 65536 else 3)*2 + frames*16384 + 2*2**20
-        metadata_cap = 768*m + 384*n + 2048*len(masks["jobs"]) + 8*2**20
-        total_disk += genotype_cap+metadata_cap
+        estimate = _estimate_chromosome_storage(entry, masks, n, m, called, minor,
+            frequency_counts, actual_chunk)
+        final_estimate += estimate["estimated_final_bytes"]
+        final_lower += estimate["sensitivity_lower_bytes"]
+        final_upper += estimate["planning_upper_bytes"]
+        raw_upper += estimate["uncompressed_upper_bound_bytes"]
         entries.append(dict(name=chromosome, variants=m, scale=m/entry["variants"], position_span=span,
-            genotype_storage_limit_bytes=int(genotype_cap), estimated_metadata_bytes=int(metadata_cap),
+            genotype_storage_limit_bytes=estimate["genotype_cap_bytes"],
+            estimated_metadata_bytes=estimate["metadata_final_bytes"], storage_estimate=estimate,
             estimated_nnz_upper_bound=int(nnz_bound), mask_plan=masks,
             frequency_counts=frequency_counts.tolist(), called=called.tolist(), minor=minor.tolist()))
     if not has_variable_locus:
         raise ValueError("profile and n yield no nonconstant locus for phenotype generation")
+    root_axis_bytes = _sample_axis_bytes(n, include_source_rows=False)+2**20
+    final_estimate += root_axis_bytes
+    final_lower += root_axis_bytes
+    final_upper += root_axis_bytes
+    # Metadata writes one field at a time and copies .raw behind an NPY header
+    # before unlinking it. At most one largest field per active chromosome is
+    # duplicated. Genotypes stream directly to their final append-only files.
+    staging_upper = sum(sorted((value["storage_estimate"]["metadata_temporary_upper_bytes"]
+                                for value in entries), reverse=True)[:workers])
+    peak_upper = final_upper+staging_upper
     if storage_limit_bytes is not None:
         if type(storage_limit_bytes) is not int or storage_limit_bytes <= 0:
             raise ValueError("storage_limit_bytes must be a positive integer")
-        if total_disk > storage_limit_bytes:
-            raise MemoryError("synthetic prepared storage estimate exceeds storage_limit_bytes")
-    ancestor = Path(root).expanduser().resolve()
-    while not ancestor.exists():
-        ancestor = ancestor.parent
-    if total_disk > shutil.disk_usage(ancestor).free:
-        raise OSError("insufficient free disk space for the synthetic prepared estimate")
+        if peak_upper > storage_limit_bytes:
+            raise MemoryError("synthetic prepared planning upper estimate exceeds storage_limit_bytes")
     return dict(entries=entries, cpu_threads=cpu_threads, chromosome_workers=int(workers),
         frame_chunk_size=int(actual_chunk), estimated_global_sample_bytes=sample_bytes,
         estimated_global_catalog_plan_bytes=int(plan_bytes),
         estimated_per_worker_bytes=int(metadata_work+64*2**20+raw_budget*8),
-        estimated_prepared_bytes=int(total_disk), storage_limit_bytes=storage_limit_bytes,
+        estimated_prepared_bytes=int(final_estimate),
+        estimated_prepared_sensitivity_lower_bytes=int(final_lower),
+        estimated_prepared_planning_upper_bytes=int(final_upper),
+        estimated_prepared_peak_bytes=int(peak_upper),
+        estimated_metadata_staging_upper_bytes=int(staging_upper),
+        uncompressed_upper_bound_bytes=int(raw_upper+root_axis_bytes),
+        genotype_encoding="row-delta",
+        compression_probe_total_variants=sum(value["storage_estimate"]["probe_variants"] for value in entries),
+        storage_estimate_basis="bounded stratified synthetic CSR compression probes at requested n, exact metadata layout, separate final/temporary files",
+        storage_estimate_limitations="Planning intervals are sensitivity margins, not confidence intervals or measured whole-dataset sizes; synthetic independent calls need not compress like real LD-correlated calls.",
+        storage_limit_bytes=storage_limit_bytes,
         memory_limit_gib=float(memory_limit_gib), budgets_are_estimates=True)
 
 
@@ -327,6 +348,10 @@ class _FrequencyStream:
 
 def _variant_exceptions(n, called, minor, rng):
     """Construct MAC/called exactly, retaining complete and half-missing calls."""
+    if called == 0 and minor == 0:
+        # There is only one possible all-missing call vector. Sampling and
+        # sorting a full random permutation cannot change it.
+        return np.arange(n, dtype=csr._sample_dtype(n)), np.full(n, 3, dtype=np.uint8)
     missing_alleles = 2*n-int(called)
     full, half = divmod(missing_alleles, 2)
     missing = rng.choice(n, size=full+half, replace=False) if full+half else np.empty(0, dtype=np.int64)
@@ -390,6 +415,149 @@ class _Metadata:
         return result
 
 
+def _sample_axis_bytes(n, *, include_source_rows):
+    width = max(9, len(str(n-1)))
+    identifier = 4+width
+    # Standard NPY unicode arrays: two IDs, their compact JSON key, and the
+    # optional original physical sample rows. No object pickle is used.
+    return n*(8*identifier+4*(2*identifier+7)+(8 if include_source_rows else 0))+384
+
+
+@lru_cache(maxsize=512)
+def _compression_probe(n, called, minor, variants, encoding):
+    """Compress a bounded invented frame, without changing n/AC/AN.
+
+    Probe RNG is separate from generation. Only scalar sizes are cached; no
+    cohort-sized arrays, genotypes, participant identities or real calls are
+    kept in this estimator.
+    """
+    offsets = np.zeros(variants+1, dtype="<u4")
+    indices, states = [], []
+    for ordinal in range(variants):
+        rows, values = _variant_exceptions(n, called, minor,
+            np.random.default_rng(np.random.SeedSequence([n, called, minor, ordinal, 53817])))
+        indices.append(rows)
+        states.append(values)
+        offsets[ordinal+1] = int(offsets[ordinal])+len(rows)
+    rows, values = np.concatenate(indices), np.concatenate(states)
+    payload, meta = csr.encode_compact(offsets, rows, values, variants, n,
+                                      level=3, sample_encoding=encoding)
+    return dict(variants=variants, raw_bytes=meta["raw_bytes"], compressed_bytes=len(payload),
+                nnz=len(rows), header_bytes=len(store.canonical(meta)))
+
+
+def _estimate_metadata_bytes(entry, masks, n, m):
+    """Account the current lossless dense/UTF8 metadata layout by segments."""
+    segments = masks["segments"]
+    # Each segment has constant text. Intergenic background has no gene or
+    # regulatory labels. Unique synthetic IDs have a known decimal width.
+    samples = np.empty((0, 2), dtype="U1")
+    reader = _Metadata(entry["name"], m, samples, segments, 0, max(m, 2*m))
+    locations = [value["start"] for value in segments]
+    weights = [value["stop"]-value["start"] for value in segments]
+    if masks["assigned_variants"] < m:
+        locations.append(masks["assigned_variants"])
+        weights.append(m-masks["assigned_variants"])
+    fields = ["position", "chromosome", "variant.id", "allele", QC_PATH,
+              "annotation_available", *ANNOTATION_CATALOG.values()]
+    total = largest_temporary = 0
+    for name in fields:
+        if name == "variant.id":
+            text_bytes = sum((len(f"SIMV{entry['name']}_{start:012d}"))*count
+                             for start, count in zip(locations, weights))
+            field_bytes = text_bytes+9*m+8+256
+            temporary = 8*(m+1)
+        else:
+            values = reader.read_field(name, locations)
+            if values.dtype.kind in "OUS":
+                text_bytes = sum(len(str(value).encode("utf-8"))*count
+                                 for value, count in zip(values, weights))
+                field_bytes = text_bytes+9*m+8+256
+                temporary = 8*(m+1)
+            else:
+                field_bytes = m*values.dtype.itemsize+128
+                temporary = m*values.dtype.itemsize
+        total += field_bytes
+        largest_temporary = max(largest_temporary, temporary)
+    catalog_bytes = len(store.canonical(dict(jobs=masks["jobs"], synthetic=True)))
+    # Promoter coordinate JSON and per-field/checksum manifests have small,
+    # finite overhead. Their conservative allowance is explicitly visible.
+    overhead = 128*2**10+128*len(masks["jobs"])
+    total += _sample_axis_bytes(n, include_source_rows=True)+catalog_bytes+overhead
+    return int(total), int(largest_temporary+8*2**20)
+
+
+def _estimate_chromosome_storage(entry, masks, n, m, called, minor, frequency_counts, chunk):
+    """Estimate compressed payload independently from raw safety bounds.
+
+    Up to 12 strata are ordered by expected exception count and partitioned
+    by raw-byte contribution, so a rare but dense tail is represented. Each
+    stratum compresses up to 8 invented variants with the requested sample
+    axis and exact integer allele counts. Extrapolation uses all bin weights;
+    its sensitivity range does not claim a statistical confidence interval.
+    """
+    complete = called//2
+    half = called % 2
+    full_missing = n-complete-half
+    denominator = called.astype(np.float64)
+    reference = (called-minor).astype(np.float64)
+    probability_reference = np.divide(reference*(reference-1),
+        denominator*(denominator-1), out=np.ones(len(called), dtype=np.float64),
+        where=denominator > 1)
+    expected_nnz = full_missing+half+complete*(1-probability_reference)
+    raw_per_variant = 4+expected_nnz*(5 if n >= 65536 else 3)
+    active = np.flatnonzero(frequency_counts)
+    order = active[np.argsort(expected_nnz[active], kind="stable")]
+    contributions = frequency_counts[order]*raw_per_variant[order]
+    strata = np.minimum(11, ((np.cumsum(contributions)-contributions/2)*12/
+                            max(1, contributions.sum())).astype(np.int64))
+    probe_m = min(chunk, 8)
+    payload_estimate = 0.
+    probes = []
+    for stratum in np.unique(strata):
+        positions = np.flatnonzero(strata == stratum)
+        members = order[positions]
+        weights = contributions[positions]
+        representative = members[np.searchsorted(np.cumsum(weights), weights.sum()/2)]
+        probe = _compression_probe(n, int(called[representative]), int(minor[representative]),
+                                   probe_m, "row-delta")
+        # Row offsets are per physical column, even when every call is REF.
+        ratio = probe["compressed_bytes"]/max(1, probe["raw_bytes"])
+        projected = float(np.sum(frequency_counts[members]*raw_per_variant[members]))*ratio
+        payload_estimate += projected
+        probes.append(dict(bin=int(representative), bins=len(members),
+            represented_variants=int(frequency_counts[members].sum()),
+            compressed_to_raw_ratio=float(ratio), **probe))
+    frames = (m+chunk-1)//chunk
+    rng = np.random.default_rng(1729)
+    bins = rng.choice(len(called), size=chunk, p=frequency_counts/frequency_counts.sum())
+    count_raw = np.column_stack((called[bins]-minor[bins], called[bins],
+                                 (2*n-called[bins]) % 2)).astype("<i8").tobytes()
+    count_probe = len(csr.codec._zstd().ZstdCompressor(level=3, write_content_size=True).compress(count_raw))
+    # Header/index/journal have independent physical files and are not hidden
+    # in the payload compression ratio. The retained JSONL ACK is counted.
+    per_frame = count_probe+2048+store.INDEX.itemsize+768
+    genotype_estimate = int(math.ceil(payload_estimate+frames*per_frame+8*n+65536))
+    metadata, temporary = _estimate_metadata_bytes(entry, masks, n, m)
+    genotype_cap = int(math.ceil(genotype_estimate*1.75))+8*2**20
+    metadata_upper = int(math.ceil(metadata*1.05))+2**20
+    nnz_upper = sum(int(count)*min(n, int(ac+(2*n-an+1)//2))
+                    for count, ac, an in zip(frequency_counts, minor, called))
+    uncompressed_upper = (nnz_upper*(5 if n >= 65536 else 3)+4*(m+frames)+24*m+
+                          frames*(2048+store.INDEX.itemsize+768)+8*n+metadata)
+    return dict(encoding="row-delta", codec="zstd level 3", method="stratified synthetic frames at unchanged n/AC/AN",
+        probe_frames=len(probes), probe_variants=sum(value["variants"] for value in probes),
+        probe_details=probes, estimated_genotype_bytes=genotype_estimate,
+        estimated_genotype_payload_bytes=int(math.ceil(payload_estimate)),
+        estimated_genotype_nonpayload_bytes=int(genotype_estimate-math.ceil(payload_estimate)),
+        metadata_final_bytes=metadata, metadata_temporary_upper_bytes=temporary,
+        estimated_final_bytes=genotype_estimate+metadata,
+        sensitivity_lower_bytes=int(genotype_estimate*.5)+metadata,
+        planning_upper_bytes=genotype_cap+metadata_upper,
+        genotype_cap_bytes=genotype_cap, uncompressed_upper_bound_bytes=int(uncompressed_upper),
+        sensitivity="50% to 175% of probed genotype estimate plus metadata; not a confidence interval or a guaranteed completion bound")
+
+
 def _generate_one(prepared, inputs, source, entry, pairs, n, reference_n, seed, chunk):
     started = time.perf_counter()
     chromosome, m = entry["name"], entry["variants"]
@@ -400,7 +568,7 @@ def _generate_one(prepared, inputs, source, entry, pairs, n, reference_n, seed, 
                    chromosome=chromosome, profile_sha256=hashlib.sha256(store.canonical(source)).hexdigest())
     writer = store.Writer(directory, binding, np.arange(n, dtype=np.int64), m,
         source_bytes=None, storage_limit_bytes=entry["genotype_storage_limit_bytes"],
-        chunk=chunk, streaming=True)
+        chunk=chunk, streaming=True, sample_encoding="row-delta")
     called, minor = np.asarray(entry["called"], dtype=np.int64), np.asarray(entry["minor"], dtype=np.int64)
     target_maf = np.asarray([value["maf"] for value in source["frequency_bins"]])
     allowed = (target_maf > 0) & (target_maf < .01)
@@ -504,6 +672,7 @@ def _generate_one(prepared, inputs, source, entry, pairs, n, reference_n, seed, 
         alternate_alleles=alt_total, causal_variant=causal,
         causal_dosage_path=str(causal_path) if causal_path else None,
         storage_bytes=store.usage(directory)["logical_bytes"],
+        storage_estimate=entry["storage_estimate"],
         storage_limit_bytes=entry["genotype_storage_limit_bytes"], seconds=time.perf_counter()-started)
     result_entry = dict(name=chromosome, container_directory="chr"+chromosome,
         metadata_directory="chr"+chromosome+"/metadata",
@@ -521,6 +690,11 @@ def build_simulated_prepared(root, profile, n, chromosomes, seed=1729, cpu_threa
     plan = plan_simulated_prepared(root, profile, n, chromosomes, seed, cpu_threads,
         memory_limit_gib, chunk_size, storage_limit_bytes, variant_scale, variants_per_chromosome)
     root = Path(root).expanduser().resolve()
+    ancestor = root
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    if plan["estimated_prepared_peak_bytes"]+64*2**20 > shutil.disk_usage(ancestor).free:
+        raise OSError("insufficient free disk space for synthetic prepared peak planning estimate and reserve")
     prepared, inputs = root/"prepared", root/"inputs"
     if prepared.exists():
         raise FileExistsError("synthetic prepared data already exists")
@@ -561,5 +735,6 @@ def build_simulated_prepared(root, profile, n, chromosomes, seed=1729, cpu_threa
         additional_inferred_eligible_mask_rows=sum(report["additional_inferred_eligible_mask_rows"] for report in reports),
         frequency_counts_exact=all(report["frequency_counts_exact"] for report in reports),
         resource_plan=public_plan, seconds=time.perf_counter()-started,
+        measured_prepared_storage=directory_storage(prepared),
         frequency_policy="preserve profile MAF; integer MAC/called rounding changes low-count eligibility when n changes",
         mask_policy="published marginal M and feasible within-coding overlaps are calibrated; absent published masks are inferred unknowns and may emit additional rows; noncoding atoms are disjoint; biological LD and original variant intersections are not reproduced")

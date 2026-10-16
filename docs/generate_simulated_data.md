@@ -114,13 +114,31 @@ if __name__ == "__main__":
 
 示例路径由使用者替换；参考文件不随包分发。省略 `n` 时使用文件中的 `reference_n`，省略 `chromosomes` 和 `variant_scale` 时保留完整参考位点规模。全规模输出可能需要很大磁盘与生成时间；函数先检查估算工作集和可用空间，不能容纳时在创建输出目录前拒绝，不自动缩减为小数据。`variant_scale=0.001` 等显式比例可用于缩小测试，同时按比例缩小位点数和 mask 目标；它不再是完整参考规模。
 
+首次生成前可只查看计划。`dry_run=True` 使用目标 n 和整数 AC / AN 构造少量人工帧，测量压缩后外推，**不创建输出目录**，也不要求磁盘已能容纳完整输出：
+
+```python
+from fudan_wgs_toolkit import generate_simulated_data
+
+storage_plan_report = generate_simulated_data(
+    output_directory="work/simulated_reference",
+    calibration_profile="/private/calibration/simulation_profile.json",
+    cpu_threads=2,
+    memory_limit_gib=8,
+    dry_run=True,
+)
+resource_plan = storage_plan_report["resource_plan"]
+print(resource_plan["estimated_prepared_disk_bytes"])  # 压缩后最终文件的估计。
+print(resource_plan["estimated_prepared_peak_bytes"])  # 含规划余量和临时文件的准入值。
+print(resource_plan["generation_fits_available_disk"])
+```
+
 ## 3. 参数与校准文件
 
 ### 全部参数
 
 | 参数 | 默认值 | 意义与格式 |
 | --- | --- | --- |
-| `output_directory` | 必填 | 字符串或 `Path`，必须是不存在的新目录；不覆盖已有输入或恢复半成品。 |
+| `output_directory` | 必填 | 字符串或 `Path`；生成时必须是不存在的新目录，不覆盖已有输入或恢复半成品。dry_run 只定位目标文件系统，不写入。 |
 | `n` | `None` | 整数且至少 128。None 使用校准文件的 `reference_n`；small 使用 1,000。 |
 | `calibration_profile` | `None` | 私有校准 JSON 路径或 Python 字典。reference 模式可由环境变量或用户配置指定，small 不接受该参数。 |
 | `preset` | `"reference"` | reference 使用私有汇总；small 为完全人工的 22 条染色体、每条 1,024 位点及 15 类 mask 测试预设。 |
@@ -137,7 +155,8 @@ if __name__ == "__main__":
 | `chunk_size` | `256` | 请求每个遗传帧的最大位点数，整数 1–1,024；根据主存预算可自动减小。 |
 | `cpu_threads` | `8` | 染色体生成 worker 的上限，同时作为后续返回调用参数的 CPU 调度预算。 |
 | `memory_limit_gib` | `8` | 生成阶段的主存估算预算，正有限数；1 GiB=`2**30` 字节。不代表 GPU 预算或操作系统 RSS 硬配额。 |
-| `storage_limit_gib` | `None` | 可选正有限数，限定生成的 prepared 遗传存储预算；None 按估算及剩余磁盘决定。CSV 空间另行预留。低于估算或大于可用空间时拒绝。 |
+| `storage_limit_gib` | `None` | 可选正有限数，限定 prepared 的规划字节预算；None 使用峰值规划估计。CSV 空间另行预留；正式生成还检查可用磁盘及保留空间。低于峰值规划值时拒绝。 |
+| `dry_run` | `False` | 布尔值。True 只返回资源计划，不生成 prepared / CSV；完整规模空间不足时仍可查看估计。主存和显式预算等参数仍须有效。 |
 
 `cpu_threads` 不会重设已经初始化的 BLAS 线程池。需要限制 NumPy 原生线程时，在启动 Python 前设置，例如：
 
@@ -145,7 +164,11 @@ if __name__ == "__main__":
 OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2 python run_simulated_example.py
 ```
 
-内存估算覆盖样本向量、有限大小的 metadata 块、并发 worker 和紧凑遗传帧，不分配 `n × 整条染色体位点数` 的稠密矩阵。磁盘估算包含 genotype、metadata、catalog 和输入 CSV，不依赖理想压缩率。生产 prepared writer 对本生成器的合成数据使用明确字节预算；真实源数据的既有压缩容量约束保留原规则。
+内存估算覆盖样本向量、有限大小的 metadata 块、并发 worker 和紧凑遗传帧，不分配 `n × 整条染色体位点数` 的稠密矩阵。磁盘估计对每条染色体最多取12个稀疏度分层、每层最多8个人工位点，保持目标 n、AC 和 AN，以实际 row-delta / Zstd 编码测量并按频谱库存外推；metadata 按真实字段布局核算。人工独立调用与真实 LD 数据的压缩率可以不同。
+
+最终大小估计、规划余量、临时峰值和未压缩上界分开报告。基因型规划上限采用探测估计的175%加固定余量，metadata 另加5%及固定余量；这些是准入余量，不是统计置信区间或完成保证。峰值还包括并发 metadata 字段从 `.raw` 复制为 NPY 时的临时共存。writer 逐帧检查实际字节预算及剩余磁盘；超出时保留未完成现场，不能把它作为完成数据读取。真实源数据准备的源 BED 10%基因型缓存规则保留，metadata 与原始输入另计。
+
+新生成的六状态 CSR 帧对每个位点的有序样本索引做无损差分，再使用 Zstd level 3。它只改变存储表示，解码后样本索引、六状态、MAC、AN 和数值注释均保持原值。新版 reader 同时读取旧 absolute 帧 v1 和新 row-delta 帧 v2；新目录须配套新版安装。已有完成目录不就地改写，旧断点按原绑定格式恢复。prepared 根目录和 metadata 的 schema 不变，11个数值注释通道仍保留原来的 float64 表示。
 
 ### 私有文件解析顺序
 
@@ -257,6 +280,12 @@ simulated_small/
 | `chromosome_reports[].inferred_mask_audit`, `preparation.additional_inferred_eligible_mask_rows` | 未发布类别的人工推断 M、实际稀有 M，以及额外可能输出的合格 mask 行数。 |
 | `trait_reports`, `complete_covariate_samples` | 各列表型可用 / 缺失 / 病例 / 对照数，以及22列协变量均完整的人数。 |
 | `resource_plan`, `preparation` | 内存 / 磁盘准入估算、实际 worker / 帧大小与 direct prepared 子报告。 |
+| `resource_plan.estimated_prepared_disk_bytes` | genotype、metadata、catalog 和样本轴的最终逻辑文件大小估计，不含表型 / 协变量 CSV。 |
+| `resource_plan.estimated_prepared_peak_bytes` | prepared 规划余量加 metadata 临时共存的空间准入值，不是实测峰值。 |
+| `resource_plan.estimated_total_disk_bytes`, `estimated_total_peak_bytes` | 在上述最终 / 峰值估计中分别加入输入 CSV 等空间。 |
+| `resource_plan.generation_fits_available_disk` | 目标文件系统剩余空间扣除保留量后，是否可容纳峰值规划值；dry_run 时可为 False。 |
+| `resource_plan.prepared_preflight` | 统一的构建计划，含压缩探测范围、敏感性余量和单独的 `uncompressed_upper_bound_bytes`；不把未压缩上界当作最终文件预测。 |
+| `measured_storage`, `preparation.measured_prepared_storage` | 已生成文件的逻辑字节、分配块字节及硬链接去重值。前者统计输出树，排除 `simulation.json` 和 pending 自报告；后者统计 prepared。均不是磁盘高水位。 |
 | `generation_seconds`, `total_seconds` | 完整生成调用的时间，不含关联；不再有原始 PLINK 生成与转换两个阶段。 |
 | `files` | inputs 文件的相对路径、大小及 SHA；prepared 使用自身逐帧与清单校验。 |
 
@@ -264,7 +293,7 @@ simulated_small/
 
 ## 6. 命令行与原软件对应
 
-所有生成参数使用对应的 `--连字符` 选项。可用安装后的 `generate_simulated_data` 或 `python -m fudan_wgs_toolkit.simulate`；报告同时保存到文件并打印到标准输出。
+所有生成参数使用对应的 `--连字符` 选项。可用安装后的 `generate_simulated_data` 或 `python -m fudan_wgs_toolkit.simulate`；正式生成的报告同时保存到文件并打印到标准输出，`--dry-run` 只打印计划。
 
 ```bash
 export OMP_NUM_THREADS=2
@@ -299,12 +328,14 @@ run-WGS-continuous \
   --gene-variant-type variant --no-rm-nan --grm none
 
 # 完整参考规模：省略 n 使用 reference_n，省略 chromosomes 使用全部22条。
-# 先由生成器执行资源准入；空间不足时不会启动缩小版替代。
+# 先只查看存储计划；不创建目录。
 generate_simulated_data \
   --output-directory work/simulated_reference \
   --calibration-profile /private/calibration/simulation_profile.json \
   --phenotype-type binary --n-binary-traits 16 \
-  --cpu-threads 8 --memory-limit-gib 8
+  --cpu-threads 2 --memory-limit-gib 8 --dry-run
+
+# 核对空间后去掉 --dry-run，才会执行同规模生成。
 ```
 
 本生成器输出的是本包 prepared 格式，没有直接对应的官方模拟 prepared 命令。官方 STAAR 流程读取 GDS/aGDS，再调用 `Individual_Analysis_PheWAS`、`Gene_Centric_Coding_PheWAS`、`Gene_Centric_Noncoding_PheWAS` 和 `ncRNA_PheWAS`；相同输入的官方 R 调用见[二分类原软件调用](wgs_binary.md#原-staar-软件调用)。本功能不启动 R、PLINK 或官方程序。
@@ -313,31 +344,81 @@ generate_simulated_data \
 
 ## 7. 验证与 benchmark
 
-2026-10-16 的当前 direct prepared 修订完成 **267项CPU测试，全部通过，pytest计时24.83秒**。进程限定8个CPU的 affinity，原生BLAS线程数为2，CUDA设备不可见。测试覆盖紧凑六状态编码与计数回读、生产 metadata / 完成清单、成熟selector的15类mask、合成数据流式journal、显式存储预算、有界metadata复制、两类公开入口的输入参数契约及SHA缓存回归。测试耗时不是完整关联速度；[当前匿名记录](../validation/simulated_prepared_20261016.anonymous.json)保存相应范围和资源。
+2026-10-16 的存储标准化修订在目标 GPU 计算节点完成 **307项CPU测试，全部通过，pytest计时57.89秒**。测试进程的 CPU affinity 为8，原生 BLAS 线程为2，CUDA设备不可见。覆盖六状态 / 整数计数、v1/v2 编码、损坏检测与旧断点恢复、空间不足保护、metadata、15类mask、prepared输入及两类公开入口契约。测试耗时不作为完整关联速度。[本轮匿名验证记录](../validation/storage_standard_20261016.anonymous.json)保存存储和实际GPU验证的范围。
 
-另从私有参考汇总构造8,192个位点、15条已知mask目标的有界输入。它检验参考频谱及mask构造，不代表整条参考染色体。生成后核对压缩流SHA，且没有写出原始PLINK：
+### 真实文件大小与原13.2 TiB估计的更正
 
-| 样本数 | 生成耗时 | 已知目标M匹配 | 频谱bin位点库存 | 按位点数加权平均绝对MAF误差 | bin最大绝对MAF误差 |
-| --- | --- | --- | --- | --- | --- |
-| 345,967，参考n | 35.912秒 | 15/15 | 精确相同 | 2.657×10⁻⁸ | 7.644×10⁻⁷ |
-| 4,096，缩放n | 1.567秒 | 0/15 | 精确相同 | 5.469×10⁻⁶ | 6.095×10⁻⁵ |
+只读核对22份原始GDS及对应既有prepared，样本轴为345,967、物理位点合计1,023,836,503。以下是文件长度与文件系统分配块的分别测量；既有目录未重编码：
 
-MAF误差比较生成bin的实际MAF与目标bin均值。样本缩小后，该有界输入中的低MAC变异按MAF保持规则取整为零，15条目标的稀有资格M随之改变。这是已报告的样本量缩放结果，没有提高MAC来制造相同M；不能将频谱bin库存一致解释为每个位点MAF完全相同。
+| 已有文件范围 | 逻辑字节 | 实际分配字节 |
+| --- | ---: | ---: |
+| 22份原始GDS | 1,372,012,487,282 | 1,372,012,568,576 |
+| 既有prepared基因型容器 | 1,595,610,260,804 | 1,595,610,668,032 |
+| 对应metadata | 277,586,941,100 | 277,591,289,856 |
 
-完整参考的22条染色体、1,023,836,503个位点、233,589条已发布mask目标和18,308个coding组已做汇总核对；所有已知coding边际数量可用人工交集表达。官方缺失的类别仍是未知，额外推断的合格mask行单独记录，未声称运行时总mask行数完全一致。完整输出的保守磁盘估算为14,517,782,875,204字节，约13.2TiB；预检时可用310,284,124,160字节，约289GiB。实际调用在创建输出目录前以OSError拒绝，**未生成全参考规模数据**。
+此前报告的14,517,782,875,204字节、约13.2 TiB，来自**两倍宽松未压缩CSR上界和768 B/位点的metadata预留**，被错误标为输出大小预测。它不是实际生成结果，也不是GDS转prepared的实测膨胀率。metadata现在依据约234 B/位点的实际字段布局、样本轴及catalog核算；基因型改用压缩探测估计，未压缩上界单列。
 
-当前修订的GPU关联验证为 **`not_assessed`**：执行时共享GPU利用率约92%–95%，自动批准审核拒绝启动本次验证。当前修订没有复用历史版本的四次GPU调用作为完成证据，也没有执行官方同输入P值对照。
+新版本在完整参考n和位点库存上执行2,112个人工位点的只读压缩探测，耗时52.783秒，得到：
 
-本轮复用成熟的 portable metadata 校验时发现一个已有问题：部分共享文件系统的ctime粒度较粗，同大小文件在同一时间刻度改写并恢复mtime后，旧SHA缓存可能误命中。修复为对mtime / ctime尚未稳定2秒的文件重新计算内容SHA；稳定的不可变文件保留缓存快路径，prepared格式与关联公式保持原行为。该修复的回归包含在上述267项测试中。
+| 全规模计划项 | 字节 | 约TiB（2⁴⁰字节） |
+| --- | ---: | ---: |
+| prepared最终逻辑大小估计 | 1,472,623,306,503 | 1.339 |
+| 含余量的最终规划值 | 2,406,054,002,370 | 2.188 |
+| 含临时共存的峰值规划值 | 2,407,410,990,930 | 2.190 |
+| 单列的未压缩上界 | 7,103,173,582,560 | 6.460 |
 
-历史原始PLINK生成版的[匿名记录](../validation/simulated_data_20261016.anonymous.json)固定于提交 `9ae80ba3eafc9d24a9635f332170f398bbb6a7a7`，不作为本版direct prepared的通过记录或速度结果。
+这些是新布局下的外推与准入值；合成独立位点不重建真实LD，不能把真实GDS的压缩率直接套用。此次没有创建全规模输出目录，**未生成全参考规模数据**，也没有把2.190 TiB规划值称为实测磁盘峰值。
+
+另对真实prepared中的110帧、102,743个位点做有界只读重编码：相同Zstd level 3下，基因型payload从171,540,528降至125,723,312字节，减少26.71%，解码后的CSR数组逐项精确相同。该检查不修改已有缓存，也不外推成全量实测节省率。
+
+### 目标节点上的有界生成与准备
+
+以相同参考n=345,967和8,192个人工位点，对照旧absolute与新row-delta存储。已发布的15个mask目标全部匹配；所有遗传状态、整数计数、metadata、样本轴和表型CSV精确相同，没有写出原始PLINK：
+
+| 直接生成 | 旧版 | 新版 |
+| --- | ---: | ---: |
+| 基因型payload字节 | 26,548,484 | 9,507,871 |
+| prepared逻辑字节 | 197,424,842 | 180,385,828 |
+| prepared实际分配字节 | 124,256,256 | 183,312,384 |
+| 调用耗时 | 35.912秒 | 35.514秒 |
+
+payload减少64.19%。该对照中，SHA相同且未改变内容的样本轴文件具有不同的物理分配量，因此**不能据此宣称直接生成的整个目录实际分配空间减少**。新版最终逻辑大小估计为181,270,753字节，实测180,385,828字节，本有界样例的误差约0.49%；峰值规划值为212,557,914字节，未测量完整磁盘高水位。
+
+再将同一人工数据写成BED，实际运行普通 `prepare_WGS_data`，固定2CPU、chunk=64和11个注释通道。源输入逻辑大小为722,577,600字节，其中BED为708,542,467字节；两版基因型缓存的正常准入上限均为70,854,246字节，metadata另计：
+
+| 普通prepare | 旧版 | 新版 |
+| --- | ---: | ---: |
+| 基因型payload字节 | 26,672,608 | 9,573,753 |
+| prepared逻辑字节 | 199,428,271 | 180,488,807 |
+| 去重后实际分配字节 | 206,970,880 | 183,836,672 |
+| 调用耗时 | 63.622秒 | 63.400秒 |
+| 进程峰值RSS字节 | 785,739,776 | 773,902,336 |
+
+本样例实际分配空间减少11.18%。2,834,161,664个遗传状态、所有整数计数、196,608个metadata值及样本顺序精确相同，完成的压缩流均通过SHA核验。新版在根完成清单验证后移除 `.raw_annotations` 和 `.preflight` 暂存，并保留注释来源字节与SHA；旧版保留的raw annotation暂存为1,862,564逻辑字节、2,539,520分配字节。`storage.report.json` 对源输入、基因型缓存、metadata、暂存、硬链接去重和阶段快照分别计量，阶段快照不冒充真实峰值。
+
+上述时间均来自共享节点上的一次有界对照，缓存冷热未严格控制；它们用于记录执行范围，不构成速度提升结论。
+
+### 实际GPU入口回归
+
+用户批准共享GPU上的小规模验证后，两版分别实际执行4种入口 / 缺失策略：binary available、binary impute、continuous available和continuous mean-imputed。二分类 `impute_missing=True` 将缺失标签填为对照；连续 `rm_nan=True` 在协变量匹配后，按各表型可用值的均值填补缺失标签，`rm_nan=False` 使用各表型的可用样本。每版共120份CSV、每种831行，合计3,324行；全部120份CSV解压后的字节逐一相同，15类gene类别均有有限P值。自有进程显存峰值小于60 MiB，关联显存准入预算为12 GiB；整卡共享占用不计入该进程的自有峰值。
+
+该结果建立同一合成输入的旧 / 新存储兼容性和有限范围关联输出一致；本轮没有执行官方软件同输入P值对照，也没有运行十亿位点的完整GPU分析。
+
+### 历史记录
+
+[前一direct prepared修订记录](../validation/simulated_prepared_20261016.anonymous.json)对应267项CPU测试及原先GPU尚未获批的状态；其中13.2 TiB条目按上述原因更正，不再作为当前输出预测。该版本还记录了n缩小至4,096时低MAC取整为零、15个目标M随之改变的有界样例，未提高MAC制造相同M。
+
+本轮保留已有metadata SHA缓存修复：共享文件系统mtime / ctime尚未稳定2秒时重新计算内容SHA，避免同大小、同时间刻度改写误命中；稳定的不可变文件仍可复用缓存。相关回归包含在本轮307项测试中。
+
+[历史原始PLINK生成版](../validation/simulated_data_20261016.anonymous.json)固定于提交 `9ae80ba3eafc9d24a9635f332170f398bbb6a7a7`，不作为当前direct prepared版的通过记录或速度结果。
 
 ## 8. 更新记录
 
 | 日期 | 更新与验证范围 |
 | --- | --- |
-| 2026-10-16 | 改为直接生成 prepared；默认使用私有参考位点数 / 频谱 / 官方15类mask校准，n 改变时保持 MAF、缩放 MAC；增加11个人工数值注释通道、已发布目标 / 未知推断类别与实际 M 审计、内存 / 磁盘准入；修复 metadata SHA 缓存的同时间刻度改写误命中；267项CPU测试与8,192位点有界校准通过，GPU关联为not_assessed。 |
-| 2026-10-16，历史版 | 提交 `9ae80ba` 采用原始 PLINK + 独立人工注释再准备；149项回归、4次小规模GPU入口及10万人输入准备记录仅适用于该实现，已被当前生成路径替代。 |
+| 2026-10-16，存储标准化 | 无损row-delta帧与追加日志；统一最终 / 峰值 / 未压缩上界及实际块大小统计，增加dry_run；普通prepare清理已提交暂存并保留来源。307项CPU测试、真实帧有界重编码、参考n的8,192位点生成 / BED准备及两版各4种GPU入口通过；120份结果CSV解压字节相同。全参考规模未生成。 |
+| 2026-10-16，前一direct版 | 直接生成prepared；私有参考规模 / MAF与15类mask校准；11个人工数值注释通道，已发布 / 推断mask审计及SHA缓存修复。267项CPU测试与有界校准通过，当时GPU未运行；磁盘预留曾误标为输出估计，本版已更正。 |
+| 2026-10-16，历史PLINK版 | 提交 `9ae80ba` 采用原始PLINK和独立人工注释再准备；149项回归、4次小规模GPU入口及10万人输入准备记录仅适用于该实现。 |
 
 ## 9. 参考与源码
 
