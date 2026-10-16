@@ -227,6 +227,61 @@ print(json.dumps(dict(rows=result['rows'],files=result['files'],file_descriptors
     assert evidence['rows']['coding']==evidence['files']==799
     assert evidence['verified'] is True
     assert evidence['file_descriptors']['soft_limit_before']==1024
-    assert evidence['file_descriptors']['soft_limit']>=8192
+    admission=evidence['file_descriptors']
+    assert admission['minimum_required_soft_limit']==2*799+2048
+    assert admission['preferred_soft_limit']==8192
+    assert admission['soft_limit']>=admission['minimum_required_soft_limit']
+    assert admission['hard_limit_constrained']==(admission['hard_limit'] is not None and admission['hard_limit']<8192)
+    if not admission['hard_limit_constrained']:
+        assert admission['soft_limit']>=8192
+    else:
+        assert admission['soft_limit']==admission['hard_limit']
     assert evidence['file_descriptors']['maximum_observed_open_files']>1024
     assert evidence['file_descriptors']['observed_minimum_headroom']>0
+
+
+def test_small_trait_writer_accepts_4096_hard_limit_without_changing_parent(tmp_path):
+    before=resource.getrlimit(resource.RLIMIT_NOFILE)
+    if before[1]!=resource.RLIM_INFINITY and before[1]<4096:
+        pytest.skip('isolated test needs permission to lower its own hard limit to 4096')
+    source=r'''
+import json, os, resource, sys
+from fudan_wgs_toolkit.chromosome_csv import ChromosomeCheckpointCSVWriter
+from fudan_wgs_toolkit.worker_file_resources import configure_worker_file_capacity
+resource.setrlimit(resource.RLIMIT_NOFILE,(1024,4096))
+admission=configure_worker_file_capacity(3)
+handles=[os.open('/dev/null',os.O_RDONLY) for _ in range(256)]
+binding=dict(source_implementation_sha256='source',input_manifest_sha256='inputs',configuration_sha256='ordered',models={'0':'bound'})
+writer=ChromosomeCheckpointCSVWriter(sys.argv[1],binding=binding,chromosomes=['21'],file_descriptor_admission=admission)
+writer.write_tile('coding','21',[(i,[dict(Chr='21',P=.25)]) for i in range(3)],job_index=0)
+result=writer.finish()
+for handle in handles: os.close(handle)
+print(json.dumps(dict(rows=result['rows'],files=result['files'],file_descriptors=result['file_descriptors'],verified=result['committed_range_checksums_verified'],limits=list(resource.getrlimit(resource.RLIMIT_NOFILE)))))
+'''
+    result=subprocess.run([sys.executable,'-c',source,str(tmp_path/'small_descriptor_fixture')],
+        text=True,capture_output=True,check=True,timeout=120)
+    evidence=json.loads(result.stdout.strip().splitlines()[-1])
+    assert resource.getrlimit(resource.RLIMIT_NOFILE)==before
+    assert evidence['rows']['coding']==evidence['files']==3
+    assert evidence['verified'] is True
+    assert evidence['limits']==[4096,4096]
+    admission=evidence['file_descriptors']
+    assert admission['minimum_required_soft_limit']==2054
+    assert admission['preferred_soft_limit']==8192
+    assert admission['required_soft_limit']==4096
+    assert admission['hard_limit_constrained'] is True
+    assert admission['raised'] is True
+    assert 256<admission['maximum_observed_open_files']<4096
+    assert admission['observed_minimum_headroom']>0
+
+
+@pytest.mark.parametrize('trait_count', [0,3,16])
+def test_restrictive_hard_limit_still_rejects_actual_trait_minimum(monkeypatch,trait_count):
+    from fudan_wgs_toolkit import worker_file_resources as files
+    minimum=2*trait_count+2048
+    monkeypatch.setattr(files.resource,'getrlimit',lambda which:(1024,minimum-1))
+    changed=[]
+    monkeypatch.setattr(files.resource,'setrlimit',lambda *args:changed.append(args))
+    with pytest.raises(RuntimeError,match=f'at least {minimum}'):
+        configure_worker_file_capacity(trait_count)
+    assert changed==[]

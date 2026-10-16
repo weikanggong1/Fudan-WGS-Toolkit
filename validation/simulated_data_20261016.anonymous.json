@@ -1,0 +1,317 @@
+{
+  "completed": true,
+  "synthetic": true,
+  "n": 1024,
+  "chromosomes": 2,
+  "variants": 512,
+  "binary_traits": 3,
+  "continuous_traits": 3,
+  "generation_seconds": 0.1796590950107202,
+  "preparation_seconds": 4.919076953083277,
+  "generation_and_preparation_seconds": 5.146410200977698,
+  "large_n": {
+    "n": 100000,
+    "variants": 1024,
+    "total_seconds": 13.007679624017328,
+    "generation_seconds": 6.042263142997399,
+    "preparation_seconds": 6.841790581005625
+  },
+  "versions": {
+    "torch": "2.5.1"
+  },
+  "scope": "Synthetic input compatibility and full public GPU entry execution; not official numerical equivalence or a real-cohort benchmark.",
+  "schema_version": 1,
+  "date": "2026-10-16",
+  "source_base_commit": "ce6aa3e2e5dff0d8f7e6726427073a476c3b4a4f",
+  "source_files_sha256": {
+    "fudan_wgs_toolkit/__init__.py": "19d5647570ccb39f65ddf27b8b1e5caca0001014a56005e2b187c9412b22be1a",
+    "fudan_wgs_toolkit/simulate.py": "0d5cd35f68eb01f04701e90a9c0ac7beed4acb83ad852e51575b6ac6b8de67dc",
+    "fudan_wgs_toolkit/worker_file_resources.py": "3bc9d686890f6e856367c18b7437a0c8c4beeb929fc5617ff384edc09f4c7032",
+    "pyproject.toml": "08d6f42ac5d2ef85397c51db5223128aeeea5eb0f8de135618f696f7162598cd",
+    "tests/test_binary_chromosome_dispatch.py": "7f4725d5a6e5b1f2e60e3ccaf98fed433cd87990ad67d6e41f732b1a4ddbfc9a",
+    "tests/test_simulated_data.py": "73e487b1138150a0065744fc955c7e4f6b65f19ae7b41ceeed1559801ed2682e"
+  },
+  "validation_resources": {
+    "cpu_threads": 2,
+    "OMP_NUM_THREADS": 2,
+    "MKL_NUM_THREADS": 2,
+    "OPENBLAS_NUM_THREADS": 2,
+    "association_gpu_budget_gib": 12,
+    "association_host_budget_gib": 8,
+    "generation_host_estimate_gib": 4,
+    "shared_gpu": true,
+    "precision": "unchanged public API defaults; synthetic compatibility only"
+  },
+  "tests": {
+    "passed": 149,
+    "failed": 0,
+    "summary": "149 passed in 98.08s (0:01:38)",
+    "wall_seconds": 98.70082165696658,
+    "files": [
+      "tests/test_simulated_data.py",
+      "tests/test_plink_prepare.py",
+      "tests/test_prepare_parallel.py",
+      "tests/test_continuous_prepared.py",
+      "tests/test_prepared_association.py",
+      "tests/test_binary_chromosome_dispatch.py"
+    ]
+  },
+  "console": {
+    "installed_console_entry": true,
+    "completed": true,
+    "n": 131,
+    "variants": 1024,
+    "rare_fraction": 0.999,
+    "raw_only": true
+  },
+  "calls": [
+    {
+      "label": "binary_available",
+      "seconds": 23.550022776937112,
+      "completed": true,
+      "association_rows": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "worker_count": 1,
+      "gpu_peak_allocated_bytes": 37675008,
+      "gpu_peak_reserved_bytes": 58720256,
+      "csv_files": 30,
+      "rows_by_kind": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "categories": {
+        "individual": [],
+        "coding": [
+          "disruptive_missense",
+          "missense",
+          "plof",
+          "plof_ds",
+          "synonymous"
+        ],
+        "noncoding": [
+          "UTR",
+          "downstream",
+          "enhancer_CAGE",
+          "enhancer_DHS",
+          "promoter_CAGE",
+          "promoter_DHS",
+          "upstream"
+        ],
+        "ncrna": [
+          "ncRNA"
+        ]
+      },
+      "finite_probability_fields": 2064,
+      "nonfinite_probability_fields": 0,
+      "finite_log10_fields": 12,
+      "gzip_crc_and_rows_and_sha_verified": true,
+      "trait_chromosome_kind_combinations": 24,
+      "single_trait_sample_counts_verified": true,
+      "binary_sample_counts": [
+        {
+          "samples": 936,
+          "cases": 191,
+          "controls": 745,
+          "available_cases": 191,
+          "available_controls": 745,
+          "imputed_controls": 0
+        },
+        {
+          "samples": 924,
+          "cases": 176,
+          "controls": 748,
+          "available_cases": 176,
+          "available_controls": 748,
+          "imputed_controls": 0
+        },
+        {
+          "samples": 950,
+          "cases": 193,
+          "controls": 757,
+          "available_cases": 193,
+          "available_controls": 757,
+          "imputed_controls": 0
+        }
+      ]
+    },
+    {
+      "label": "binary_imputed",
+      "seconds": 10.482233857968822,
+      "completed": true,
+      "association_rows": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "worker_count": 1,
+      "gpu_peak_allocated_bytes": 37499392,
+      "gpu_peak_reserved_bytes": 58720256,
+      "csv_files": 30,
+      "rows_by_kind": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "categories": {
+        "individual": [],
+        "coding": [
+          "disruptive_missense",
+          "missense",
+          "plof",
+          "plof_ds",
+          "synonymous"
+        ],
+        "noncoding": [
+          "UTR",
+          "downstream",
+          "enhancer_CAGE",
+          "enhancer_DHS",
+          "promoter_CAGE",
+          "promoter_DHS",
+          "upstream"
+        ],
+        "ncrna": [
+          "ncRNA"
+        ]
+      },
+      "finite_probability_fields": 2064,
+      "nonfinite_probability_fields": 0,
+      "finite_log10_fields": 12,
+      "gzip_crc_and_rows_and_sha_verified": true,
+      "trait_chromosome_kind_combinations": 24,
+      "single_trait_sample_counts_verified": true,
+      "binary_sample_counts": [
+        {
+          "samples": 978,
+          "cases": 191,
+          "controls": 787,
+          "available_cases": 191,
+          "available_controls": 745,
+          "imputed_controls": 42
+        },
+        {
+          "samples": 978,
+          "cases": 176,
+          "controls": 802,
+          "available_cases": 176,
+          "available_controls": 748,
+          "imputed_controls": 54
+        },
+        {
+          "samples": 978,
+          "cases": 193,
+          "controls": 785,
+          "available_cases": 193,
+          "available_controls": 757,
+          "imputed_controls": 28
+        }
+      ]
+    },
+    {
+      "label": "continuous_available",
+      "seconds": 36.68311668105889,
+      "completed": true,
+      "association_rows": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "worker_count": 1,
+      "gpu_peak_allocated_bytes": 34649600,
+      "gpu_peak_reserved_bytes": 58720256,
+      "csv_files": 30,
+      "rows_by_kind": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "categories": {
+        "individual": [],
+        "coding": [
+          "disruptive_missense",
+          "missense",
+          "plof",
+          "plof_ds",
+          "synonymous"
+        ],
+        "noncoding": [
+          "UTR",
+          "downstream",
+          "enhancer_CAGE",
+          "enhancer_DHS",
+          "promoter_CAGE",
+          "promoter_DHS",
+          "upstream"
+        ],
+        "ncrna": [
+          "ncRNA"
+        ]
+      },
+      "finite_probability_fields": 6012,
+      "nonfinite_probability_fields": 0,
+      "finite_log10_fields": 12,
+      "gzip_crc_and_rows_and_sha_verified": true,
+      "trait_chromosome_kind_combinations": 24,
+      "single_trait_sample_counts_verified": true
+    },
+    {
+      "label": "continuous_imputed",
+      "seconds": 20.933262779959477,
+      "completed": true,
+      "association_rows": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "worker_count": 1,
+      "gpu_peak_allocated_bytes": 34508800,
+      "gpu_peak_reserved_bytes": 58720256,
+      "csv_files": 30,
+      "rows_by_kind": {
+        "individual": 12,
+        "coding": 60,
+        "noncoding": 84,
+        "ncrna": 12
+      },
+      "categories": {
+        "individual": [],
+        "coding": [
+          "disruptive_missense",
+          "missense",
+          "plof",
+          "plof_ds",
+          "synonymous"
+        ],
+        "noncoding": [
+          "UTR",
+          "downstream",
+          "enhancer_CAGE",
+          "enhancer_DHS",
+          "promoter_CAGE",
+          "promoter_DHS",
+          "upstream"
+        ],
+        "ncrna": [
+          "ncRNA"
+        ]
+      },
+      "finite_probability_fields": 6012,
+      "nonfinite_probability_fields": 0,
+      "finite_log10_fields": 12,
+      "gzip_crc_and_rows_and_sha_verified": true,
+      "trait_chromosome_kind_combinations": 24,
+      "single_trait_sample_counts_verified": true
+    }
+  ]
+}

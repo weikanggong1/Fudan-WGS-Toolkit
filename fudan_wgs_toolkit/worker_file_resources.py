@@ -10,23 +10,29 @@ import time
 def configure_worker_file_capacity(trait_count=0):
     """Raise only this process' soft limit before opening model/output owners.
 
-    One active chromosome can own one lock per trait, bounded CSV append
-    streams and a model mapping cache. The 8,192 floor leaves room beyond the
-    common Linux soft default of 1,024; larger trait banks scale this reserve.
-    A restrictive hard limit fails admission before association begins.
+    One active chromosome can own one lock and one sample-axis mapping per
+    trait. An additional 2,048 descriptors cover bounded CSV append streams,
+    metadata, CUDA and transient IO owners. Prefer at least 8,192 when the
+    existing hard limit permits it. A lower hard limit is accepted only when
+    it still satisfies that trait-dependent minimum; the hard limit is never
+    raised. This changes resource admission, not an association calculation.
     """
     if type(trait_count) is not int or trait_count < 0:
         raise ValueError('file descriptor admission requires a nonnegative trait count')
     before, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    required = max(8192, trait_count+2048)
+    minimum = 2*trait_count+2048
+    preferred = max(8192, minimum)
+    if hard != resource.RLIM_INFINITY and hard < minimum:
+        raise RuntimeError(f'worker needs at least {minimum} file descriptors; hard limit is {hard}')
+    required = preferred if hard == resource.RLIM_INFINITY else min(preferred, hard)
     if before != resource.RLIM_INFINITY and before < required:
-        if hard != resource.RLIM_INFINITY and hard < required:
-            raise RuntimeError(f'worker needs at least {required} file descriptors; hard limit is {hard}')
         resource.setrlimit(resource.RLIMIT_NOFILE, (required, hard))
     effective, effective_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if effective != resource.RLIM_INFINITY and effective < required:
         raise RuntimeError('worker file descriptor soft limit did not satisfy admission')
     return dict(pid=os.getpid(), required_soft_limit=required,
+        minimum_required_soft_limit=minimum, preferred_soft_limit=preferred,
+        hard_limit_constrained=hard!=resource.RLIM_INFINITY and hard<preferred,
         soft_limit_before=None if before==resource.RLIM_INFINITY else before,
         soft_limit=None if effective==resource.RLIM_INFINITY else effective,
         hard_limit=None if effective_hard==resource.RLIM_INFINITY else effective_hard,

@@ -9,8 +9,9 @@ Fudan WGS Toolkit 使用 PyTorch GPU 完成多个二分类或连续表型的全�
 | 数据准备 | `prepare_WGS_data` | 原始 PLINK BED/BIM/FAM 与独立功能注释，生成有校验和的遗传目录 | [数据准备](docs/wgs_data_preparation.md) |
 | 二分类 WGS | `run_WGS_all_binanry` | 至少两个 0/1/缺失表型；默认缺失标签填为 0，可选各列 available 样本 | [二分类分析](docs/wgs_binary.md) |
 | 连续表型 WGS | `run_WGS_continuous` | 至少两个连续数值表型；默认逐列均值填补，可选各列 available 样本 | [连续表型分析](docs/wgs_continuous.md) |
+| 合成测试数据 | `generate_simulated_data` | 生成虚构表型、协变量、PLINK 与独立注释，默认完成数据准备，可直接进入两类关联入口 | [合成数据生成器](docs/generate_simulated_data.md) |
 
-三份文档分别介绍功能与流程图、输入格式、全部参数、Python 和 CLI 调用、输出与恢复、原软件对应调用、真实 benchmark 及参考文献。`run_WGS_all_binanry` 是当前公开函数名，调用时保留这一拼写。
+各功能文档介绍流程图、输入格式、全部参数、Python 和 CLI 调用、原软件对应调用、验证范围及参考文献。`run_WGS_all_binanry` 是当前公开函数名，调用时保留这一拼写。
 
 ```mermaid
 flowchart LR
