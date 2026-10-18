@@ -3,6 +3,7 @@
 Score/covariance products keep native TF32. No component reconstruction or
 FP64 dense multiplication is performed.
 """
+from ._cuda_memory import allocator_bytes
 from contextlib import contextmanager
 from copy import deepcopy
 import math
@@ -44,7 +45,7 @@ def guard_workspace(left,right,*,limit_bytes=None,reserve_bytes=None):
     _METRICS['max_output_bytes']=max(_METRICS['max_output_bytes'],estimate['output_bytes'])
     if not estimate['required_bytes']:return
     start=time.perf_counter()
-    allocated=torch.cuda.memory_allocated(left.device);reserved=torch.cuda.memory_reserved(left.device)
+    allocated, reserved = allocator_bytes(left.device)
     with torch.cuda.device(left.device):free,_=torch.cuda.mem_get_info()
     _METRICS['query_host_seconds']+=time.perf_counter()-start
     _METRICS['live_workspace_queries']+=1

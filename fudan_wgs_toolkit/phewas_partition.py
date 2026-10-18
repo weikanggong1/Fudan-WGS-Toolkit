@@ -7,6 +7,7 @@ Continuous-only runs assign each complete chromosome to exactly one worker;
 all traits stay available through the existing bounded model repository.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 import hashlib
 import json
@@ -56,7 +57,7 @@ def gpu_model_cache_capacity(gpu_ids,*,memory_limit_gib=None,reserve_bytes=2**30
     for index in gpu_ids:
         device = torch.device(f'cuda:{index}')
         free,total = torch.cuda.mem_get_info(device)
-        allocated,reserved = torch.cuda.memory_allocated(device),torch.cuda.memory_reserved(device)
+        allocated, reserved = allocator_bytes(device)
         cap = total if explicit is None else min(total,explicit)
         available.append(max(0,min(cap-allocated,free+max(0,reserved-allocated))-reserve_bytes))
     return int(min(available)*cache_fraction) if available else None

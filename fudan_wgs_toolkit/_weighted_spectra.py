@@ -4,6 +4,7 @@ The sequential full path retries only a failed FP32 convergence solve, using
 the same represented H32 upper triangle converted exactly to FP64. Full
 spectra remain unmodified; a retry is bounded and explicitly reported.
 """
+from ._cuda_memory import allocator_bytes
 from contextlib import contextmanager,nullcontext
 import copy
 import math
@@ -137,8 +138,7 @@ def _batch_capacity(covariance,remaining):
         if covariance.is_cuda:
             from fudan_wgs_toolkit import tf32
             start=time.perf_counter()
-            allocated=torch.cuda.memory_allocated(covariance.device)
-            reserved=torch.cuda.memory_reserved(covariance.device)
+            allocated, reserved = allocator_bytes(covariance.device)
             with torch.cuda.device(covariance.device):free,_=torch.cuda.mem_get_info()
             _METRICS['workspace_query_host_seconds']+=time.perf_counter()-start
             _METRICS['live_workspace_queries']+=1
@@ -365,8 +365,7 @@ def _full_batch_capacity(covariance, remaining, maximum):
     if covariance.is_cuda:
         from . import tf32
         start = time.perf_counter()
-        allocated = torch.cuda.memory_allocated(covariance.device)
-        reserved = torch.cuda.memory_reserved(covariance.device)
+        allocated, reserved = allocator_bytes(covariance.device)
         with torch.cuda.device(covariance.device):
             free, _ = torch.cuda.mem_get_info()
         available = tf32._product_workspace_availability(allocated=allocated,

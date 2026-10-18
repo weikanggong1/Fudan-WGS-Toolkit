@@ -5,6 +5,7 @@ Keys bind ordered samples and complete input contents. Only designs, exact GRM
 subsets and spectra belong here; weights, precision, beta and tau do not.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -25,8 +26,7 @@ def available_cuda_bytes(device):
         return None
     from . import tf32
     policy = tf32.execution_metadata()["tf32_memory_guard"]
-    allocated = torch.cuda.memory_allocated(device)
-    reserved = torch.cuda.memory_reserved(device)
+    allocated, reserved = allocator_bytes(device)
     limit = policy["process_allocated_limit_bytes"]
     reserve = policy["live_cuda_reserve_bytes"]
     with torch.cuda.device(device):

@@ -5,6 +5,7 @@ Algorithm attribution is recorded in NOTICE.md.
 Preserves the original saddlepoint and fourth-moment fallback choices."""
 
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 import copy
 import math
@@ -234,7 +235,23 @@ def _cauchy_sf_tensor(statistic: torch.Tensor) -> torch.Tensor:
 
 def _cct_tensor(pvalues, weights=None, *, internal: bool = False, sync_light: bool = False, _normal_transform=None) -> torch.Tensor:
     p = _double(pvalues).reshape(-1)
+    has_small = None
     if sync_light:
+        from ._statistics_sync import host_flags
+    if p.is_cuda and 0 < p.numel() <= 4096:
+        from ._cct_flags import cct_flags
+        finite, out_of_range, has_zero, has_one, has_small = cct_flags(p)
+        if not finite or out_of_range:
+            raise ValueError("pvalues must be a nonempty finite vector in [0, 1]")
+        if not internal:
+            if has_zero and has_one:
+                raise ValueError("cannot combine both exact 0 and exact 1 pvalues")
+            if has_zero:
+                return p.new_tensor(0.)
+            if has_one:
+                warnings.warn("there are pvalues that are exactly 1", RuntimeWarning, stacklevel=3)
+                return p.new_tensor(1.)
+    elif sync_light:
         from ._statistics_sync import host_flags
         if not p.numel():
             raise ValueError("pvalues must be a nonempty finite vector in [0, 1]")
@@ -282,11 +299,18 @@ def _cct_tensor(pvalues, weights=None, *, internal: bool = False, sync_light: bo
             if not bool(torch.isfinite(mass)) or bool(mass <= 0):
                 raise DegenerateTestError("CCT requires a positive finite weight sum")
         w = w / mass
-    small = p < 1e-16
-    statistic = (w[small] / p[small] / math.pi).sum()
-    normal_transform = (torch.tan((0.5 - p[~small]) * math.pi)
-                        if _normal_transform is None else _normal_transform[~small])
-    statistic = statistic + (w[~small] * normal_transform).sum()
+    if has_small is False:
+        # All elements use the normal branch: omit Boolean compaction, but
+        # retain identical elementwise arithmetic, Torch sum and final +0.
+        normal_transform = (torch.tan((0.5 - p) * math.pi)
+                            if _normal_transform is None else _normal_transform)
+        statistic = p.new_zeros(()) + (w * normal_transform).sum()
+    else:
+        small = p < 1e-16
+        statistic = (w[small] / p[small] / math.pi).sum()
+        normal_transform = (torch.tan((0.5 - p[~small]) * math.pi)
+                            if _normal_transform is None else _normal_transform[~small])
+        statistic = statistic + (w[~small] * normal_transform).sum()
     if sync_light:
         is_nan, large, nonpositive = host_flags(torch.isnan(statistic), statistic > 1e15, statistic <= 0)
         if is_nan:
@@ -619,8 +643,7 @@ def _liu_hutchinson_pvalues(q_values, covariance, skat_weights, *, rank=512,
     if covariance.is_cuda:
         from . import tf32
         limit_bytes = int(tf32._memory_limit_bytes)
-        allocated = int(torch.cuda.memory_allocated(covariance.device))
-        reserved = int(torch.cuda.memory_reserved(covariance.device))
+        allocated, reserved = allocator_bytes(covariance.device)
         free_bytes, _ = torch.cuda.mem_get_info(covariance.device)
         # v is already resident.  Account for the temporary and final
         # weighted matrices, LOBPCG basis/work vectors, and probes before
@@ -934,8 +957,7 @@ def _fastskat_hybrid_pvalues(q_values, covariance, skat_weights, *, rank=512,
         if covariance.is_cuda:
             from . import tf32
             limit_bytes = int(tf32._memory_limit_bytes)
-            allocated = int(torch.cuda.memory_allocated(covariance.device))
-            reserved = int(torch.cuda.memory_reserved(covariance.device))
+            allocated, reserved = allocator_bytes(covariance.device)
             free_bytes, _ = torch.cuda.mem_get_info(covariance.device)
             estimate_bytes = 8 * m * m + 24 * m * k + int(tf32._memory_reserve_bytes)
             if (allocated + estimate_bytes > limit_bytes

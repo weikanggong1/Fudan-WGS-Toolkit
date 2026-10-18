@@ -49,9 +49,8 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 
 class DenseProductAudit(TorchDispatchMode):
-    _products = {"aten.mm.default", "aten.mv.default", "aten.bmm.default",
-                 "aten.addmm.default", "aten.addmv.default", "aten.baddbmm.default",
-                 "aten.dot.default", "aten._scaled_mm.default"}
+    _products = frozenset(getattr(torch.ops.aten, name).default for name in
+                          ("mm", "mv", "bmm", "addmm", "addmv", "baddbmm", "dot", "_scaled_mm"))
 
     def __init__(self, *, forced):
         super().__init__()
@@ -63,7 +62,7 @@ class DenseProductAudit(TorchDispatchMode):
         self.observed_products = 0
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        if str(func) in self._products:
+        if func in self._products:
             self.observed_products += 1
             if any(isinstance(value, torch.Tensor) and value.dtype == torch.float64 for value in args):
                 if _binary_fitted_projection.get():
