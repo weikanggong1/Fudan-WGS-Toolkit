@@ -1,0 +1,21 @@
+{
+  "schema": "fudan-preprocessing-gpu-source-v1",
+  "provider": "head-native-cuda-pairhmm-fp32-wavefront-packed-H2D-initfix-v1b",
+  "files": {
+    "assets/native/CMakeLists.txt": "dd690e441ade01a1a9f09317b7ed0d9ce10cd4d7cbc05ce1f48ae26949914ebf",
+    "assets/native/pairhmm_batch_regression.hpp": "8bfbfd55c0b684d102ba98fc16a2356d0fdb8f7fa16313e7b89d048b249d4775",
+    "assets/native/pairhmm_cuda.cu": "7f7df4f4b1cac8a25ecbef06bea2b6e45f413398630e9b00c36bf958fb64d4e7",
+    "assets/native/pairhmm_cuda.h": "85e00f1c262655a0fe4e9bd3b73189cf33eb25045e5a95a0d09d7889ea404f24",
+    "assets/native/pairhmm_internal.hpp": "f7094ba883ee0167f6bd5c240ae9597302d9358b3c4c56b9a8560a563e7587c5",
+    "assets/native/pairhmm_oracle.cpp": "24babb8ecb20829fb62030e26f77a3304fcfa590a7e998c2318b8f45aebbd49e",
+    "assets/native/pairhmm_public_fixture_test.cpp": "4a58c7df1f6ebbaf2258afc4307719800ef057d256844cb2cce3562a92e33025",
+    "assets/native/pairhmm_selftest.cpp": "4efac8eb201aadd0dd55ad85a815ac42ebe74a1d3e9c2281a22d37497c0f5b74",
+    "assets/integration/CMakeLists.txt": "1d4e16e93be9f8dcf7284b06aea752999e9f95fbfe8ae4c703586f8d06fd6e8d",
+    "assets/integration/pairhmm_jni.cpp": "a10e2a4b152bb84ddf6f8aac2766a48f48f974999c28c95a91c5016550d66d1a",
+    "assets/java/com/intel/gkl/pairhmm/IntelPairHmm.java": "027c59ec227c6305f0f4976291498982f2ec4b3efc51d1eb632d04f6397bc3e0",
+    "assets/java/com/intel/gkl/pairhmm/IntelPairHmmOMP.java": "1cc4197de6ab2b0b08ce74fed3f7663db6065c9053f9755ac557f40be28c7684",
+    "assets/java/org/fnit/wgs/WarmPairHmmReplay.java": "da06f51865432eef42ef4ed36a781ffeafa5e56587b9c0acd092388d00f48c89",
+    "assets/java/org/fnit/wgs/PairHmmBatchProbe.java": "63cb42803717c8cb583f0f4790d8954fedfa5ab2b99923c1c249a8a469a084ab"
+  },
+  "private_data_included": false
+}

@@ -4,6 +4,7 @@
 
 | 功能 | 验证记录 | 当前证据 |
 | --- | --- | --- |
+| 单样本原始预处理 | [单样本说明](../docs/single_subj_preprocessing.md#9-精度耗时与内存已完成范围)、[匿名汇总](single_subj_preprocessing_20261020.anonymous.json) | 真实十万对 FASTQ 前缀的三路完整流程、局部 calling 全字段及 PLINK 回读；完整原始 WGS 和长期稳定性未验收 |
 | 数据准备 | [数据准备：验证与 benchmark](../docs/wgs_data_preparation.md#验证与-benchmark) | 原始 PLINK 的局部真实转换、独立 BED 回读、注释转换和 1 / 8 CPU 对照 |
 | 二分类 WGS | [二分类：验证与 benchmark](../docs/wgs_binary.md#验证与-benchmark) | 最新六表型同输入官方统计核心对照、128 表型有限端到端与 CSV 核查；唯一官方 Single 求根回退差异另列。历史双 GPU / 两种缺失策略的入口验证保留各自范围 |
 | 连续表型 WGS | [连续表型：验证与 benchmark](../docs/wgs_continuous.md#验证与-benchmark) | 成熟关联内核的真实局部对照；独立连续入口的样本、字段、排序和恢复检查另行区分 |

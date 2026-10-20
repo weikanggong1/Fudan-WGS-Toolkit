@@ -1,0 +1,30 @@
+name: fudan-wgs-preprocessing
+channels:
+  - conda-forge
+  - bioconda
+  - nvidia
+dependencies:
+  - python=3.10
+  - pip
+  - setuptools>=68
+  - wheel
+  - fastp=0.20.0
+  - bwa=0.7.17
+  - sambamba=0.7.1
+  - samtools=1.10
+  - htslib=1.16
+  - bcftools=1.10.2
+  - gatk4=4.2.0.0
+  - plink2=2.0.0a.6.9
+  - openjdk=8
+  - r-base=4.1.1
+  - zlib=1.2.13
+  - gzip
+  - time
+  - gcc_linux-64=9.5.0
+  - gxx_linux-64=9.5.0
+  - make
+  - cmake=3.21.3
+  - ninja
+  - cuda-nvcc=12.4.131
+  - cuda-cudart=12.4.127

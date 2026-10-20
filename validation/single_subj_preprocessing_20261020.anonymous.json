@@ -1,0 +1,584 @@
+{
+  "schema": "single-subject-preprocessing-anonymous-v1",
+  "status": "real_prefix_workflow_complete_verified_not_full_WGS",
+  "date": "2026-10-20",
+  "base_main_commit": "d64de4968feb79c0dd8aa990ed531b01fcde2ca4",
+  "runtime_source_sha256": {
+    "fudan_wgs_toolkit/__init__.py": "9121ab6badbc2b01f1e520321a32690255ca037b9f0027aeb3ab24170009ef1b",
+    "fudan_wgs_toolkit/single_preprocessing.py": "e6b40cb4d274c2ada745c2fdf70629e639c26a611c21faffe3a6db5472a746b9",
+    "fudan_wgs_toolkit/_preprocessing_io.py": "cd7ef65be3e838f47824eb6b76c8c31b487ca08546bc48540c06e66d354fc6c8",
+    "fudan_wgs_toolkit/phewas_resources.py": "3364bb1a2730b6af098d6a898d5e3a4cb3b1d53c6324631f0ca6855d189ca7ab",
+    "fudan_wgs_toolkit/build_preprocessing_gpu.py": "5ca9642bbde5fec5999b5176568380888843c0987616638e79ac3525cc0047cf",
+    "fudan_wgs_toolkit/build_preprocessing_aligner.py": "afadf56de7ab91c3e56133d3218eb670231329d5b6d006f58754de0eda6a36f6",
+    "fudan_wgs_toolkit/_preprocessing_gpu/evidence.py": "645dfec1407bc3574c81c4617f42acfa1ad8c1713e83f7f9a8ff38ea2651721b",
+    "fudan_wgs_toolkit/_preprocessing_gpu/SOURCES.md": "6914aa39a1856678ed679a00f3d7b8fac072c959aacd86a06381666324d27b29",
+    "fudan_wgs_toolkit/_preprocessing_gpu/source_manifest.json": "80484043faf7326cecea3a07709903ca4b01649242a2053e24b06950c5d3ad97",
+    "fudan_wgs_toolkit/_preprocessing_gpu/THIRD_PARTY_NOTICES.md": "f5e449cbfb6036a006426bbe299c4d1df462bb8a8d484b21b1480d8c5f54240a",
+    "fudan_wgs_toolkit/_preprocessing_gpu/__init__.py": "43a2ab9eb625af5c2ad64de702d4914c587cb554378d337b2e7416d7653016e8",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/integration/CMakeLists.txt": "1d4e16e93be9f8dcf7284b06aea752999e9f95fbfe8ae4c703586f8d06fd6e8d",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/integration/pairhmm_jni.cpp": "a10e2a4b152bb84ddf6f8aac2766a48f48f974999c28c95a91c5016550d66d1a",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/java/com/intel/gkl/pairhmm/IntelPairHmm.java": "027c59ec227c6305f0f4976291498982f2ec4b3efc51d1eb632d04f6397bc3e0",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/java/com/intel/gkl/pairhmm/IntelPairHmmOMP.java": "1cc4197de6ab2b0b08ce74fed3f7663db6065c9053f9755ac557f40be28c7684",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/java/org/fnit/wgs/PairHmmBatchProbe.java": "63cb42803717c8cb583f0f4790d8954fedfa5ab2b99923c1c249a8a469a084ab",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/java/org/fnit/wgs/WarmPairHmmReplay.java": "da06f51865432eef42ef4ed36a781ffeafa5e56587b9c0acd092388d00f48c89",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/CMakeLists.txt": "dd690e441ade01a1a9f09317b7ed0d9ce10cd4d7cbc05ce1f48ae26949914ebf",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_batch_regression.hpp": "8bfbfd55c0b684d102ba98fc16a2356d0fdb8f7fa16313e7b89d048b249d4775",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_cuda.cu": "7f7df4f4b1cac8a25ecbef06bea2b6e45f413398630e9b00c36bf958fb64d4e7",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_cuda.h": "85e00f1c262655a0fe4e9bd3b73189cf33eb25045e5a95a0d09d7889ea404f24",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_internal.hpp": "f7094ba883ee0167f6bd5c240ae9597302d9358b3c4c56b9a8560a563e7587c5",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_oracle.cpp": "24babb8ecb20829fb62030e26f77a3304fcfa590a7e998c2318b8f45aebbd49e",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_public_fixture_test.cpp": "4a58c7df1f6ebbaf2258afc4307719800ef057d256844cb2cce3562a92e33025",
+    "fudan_wgs_toolkit/_preprocessing_gpu/assets/native/pairhmm_selftest.cpp": "4efac8eb201aadd0dd55ad85a815ac42ebe74a1d3e9c2281a22d37497c0f5b74"
+  },
+  "input_scope": {
+    "origin": "paired prefix from one real WGS subject",
+    "paired_FASTQ_records": 100000,
+    "calling_windows": 8,
+    "each_window_bp": 1000,
+    "full_reference_mapping_and_BQSR": true,
+    "full_reference_calling": false,
+    "whole_original_sample_processed": false,
+    "biological_truth_accuracy_assessed": false
+  },
+  "resource_scope": {
+    "allocated_CPU_count_each_case": 3,
+    "task_host_budget_GiB_each_case": 64,
+    "host_reserve_GiB_each_case": 10,
+    "cases_run_concurrently": 3,
+    "sampled_PSS_is_not_a_cgroup_hard_limit": true,
+    "long_duration_memory_stability_assessed": false,
+    "GPU_peak_is_native_owned_buffers_only_not_driver_context_or_whole_device": true
+  },
+  "baseline": "Original BWA/GKL and separate QC, same Conda tools, one fastp worker, same input/reference/known-sites/regions/CPU budget;not unmodified full ZIP run",
+  "optimized": "Source-built BWA-MEM2, shared alignment/insert QC, original CPU GKL",
+  "optional_GPU": "Same optimized workflow with project FP32 CUDA PairHMM",
+  "timing_scope": "API initialization, reference/gzip checking, scientific commands, resource sampling, output SHA, VCF scan and PLINK readback;existing indices/build artifacts;external comparison measured separately",
+  "cases": [
+    {
+      "label": "baseline",
+      "status": "complete_verified",
+      "receipt_sha256": "dcc338010226b5ea349252cc6d7c75bd5d69a1520d3ff05d226253a35b51243d",
+      "actual_exit": 0,
+      "committed_stages": 15,
+      "total_wall_seconds": 235.49623335013166,
+      "final_PLINK_readback_seconds": 1.069644341710955,
+      "peak_sampled_process_tree_PSS_bytes": 5942840320,
+      "stage_profiles": [
+        {
+          "stage": "reference_dictionary",
+          "wall_seconds": 13.375159647781402,
+          "command_and_resource_observer_seconds": 13.373392921872437,
+          "artifact_hashing_seconds": 0.0017599542625248432,
+          "peak_sampled_pss_bytes": 266088448,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "raw_gzip_integrity",
+          "wall_seconds": 0.25997707806527615,
+          "command_and_resource_observer_seconds": 0.2599705932661891,
+          "artifact_hashing_seconds": 2.0791776478290558e-06,
+          "peak_sampled_pss_bytes": 18722816,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "fastp",
+          "wall_seconds": 1.5676800310611725,
+          "command_and_resource_observer_seconds": 1.5512034371495247,
+          "artifact_hashing_seconds": 0.016469657886773348,
+          "peak_sampled_pss_bytes": 687034368,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "mapping_sort_index",
+          "wall_seconds": 31.69181093107909,
+          "command_and_resource_observer_seconds": 31.671775388065726,
+          "artifact_hashing_seconds": 0.02002572175115347,
+          "peak_sampled_pss_bytes": 5942840320,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "markdup",
+          "wall_seconds": 2.9329987103119493,
+          "command_and_resource_observer_seconds": 2.916565004270524,
+          "artifact_hashing_seconds": 0.016423414926975965,
+          "peak_sampled_pss_bytes": 536173568,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "cram",
+          "wall_seconds": 16.968736276961863,
+          "command_and_resource_observer_seconds": 16.96258130390197,
+          "artifact_hashing_seconds": 0.006147394888103008,
+          "peak_sampled_pss_bytes": 759856128,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "BaseRecalibrator",
+          "wall_seconds": 57.81379272416234,
+          "command_and_resource_observer_seconds": 57.81193658197299,
+          "artifact_hashing_seconds": 0.0018495055846869946,
+          "peak_sampled_pss_bytes": 3638768640,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "ApplyBQSR",
+          "wall_seconds": 15.249576169066131,
+          "command_and_resource_observer_seconds": 15.21798887476325,
+          "artifact_hashing_seconds": 0.03157752798870206,
+          "peak_sampled_pss_bytes": 1909604352,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 1
+          }
+        },
+        {
+          "stage": "recal_index",
+          "wall_seconds": 0.5239752810448408,
+          "command_and_resource_observer_seconds": 0.5196656780317426,
+          "artifact_hashing_seconds": 0.0043027689680457115,
+          "peak_sampled_pss_bytes": 18759680,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "HaplotypeCaller",
+          "wall_seconds": 3.1757565829902887,
+          "command_and_resource_observer_seconds": 3.173996012657881,
+          "artifact_hashing_seconds": 0.0017547961324453354,
+          "peak_sampled_pss_bytes": 853986304,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "wgs_metrics",
+          "wall_seconds": 7.6031960980035365,
+          "command_and_resource_observer_seconds": 7.602622922044247,
+          "artifact_hashing_seconds": 0.0005689463578164577,
+          "peak_sampled_pss_bytes": 1179087872,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "alignment_insert_metrics",
+          "wall_seconds": 78.73555657500401,
+          "command_and_resource_observer_seconds": 78.73401277093217,
+          "artifact_hashing_seconds": 0.0015393760986626148,
+          "peak_sampled_pss_bytes": 1292423168,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 1
+          }
+        },
+        {
+          "stage": "genotype",
+          "wall_seconds": 2.881401881109923,
+          "command_and_resource_observer_seconds": 2.8803073507733643,
+          "artifact_hashing_seconds": 0.0010905535891652107,
+          "peak_sampled_pss_bytes": 733641728,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "normalize",
+          "wall_seconds": 0.5235927170142531,
+          "command_and_resource_observer_seconds": 0.5225592469796538,
+          "artifact_hashing_seconds": 0.0010288096964359283,
+          "peak_sampled_pss_bytes": 25409536,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "plink",
+          "wall_seconds": 0.6837586779147387,
+          "command_and_resource_observer_seconds": 0.6819302081130445,
+          "artifact_hashing_seconds": 0.0018243859522044659,
+          "peak_sampled_pss_bytes": 20374528,
+          "pss_diagnostics": {}
+        }
+      ],
+      "actual_GPU_work": false,
+      "GPU_evidence": null,
+      "normalized_VCF_variants": 1,
+      "all_hard_calls_verified": true
+    },
+    {
+      "label": "optimized",
+      "status": "complete_verified",
+      "receipt_sha256": "8bd9187a25e1a3651736e5667ce86e3ee7cab1859094eeb03208d3ef29e0dc34",
+      "actual_exit": 0,
+      "committed_stages": 15,
+      "total_wall_seconds": 225.56152819283307,
+      "final_PLINK_readback_seconds": 0.9228972569108009,
+      "peak_sampled_process_tree_PSS_bytes": 18369549312,
+      "stage_profiles": [
+        {
+          "stage": "reference_dictionary",
+          "wall_seconds": 13.379195281304419,
+          "command_and_resource_observer_seconds": 13.377637081313878,
+          "artifact_hashing_seconds": 0.001552279107272625,
+          "peak_sampled_pss_bytes": 262467584,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "raw_gzip_integrity",
+          "wall_seconds": 0.25992116006091237,
+          "command_and_resource_observer_seconds": 0.2599148671142757,
+          "artifact_hashing_seconds": 1.7499551177024841e-06,
+          "peak_sampled_pss_bytes": 14499840,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "fastp",
+          "wall_seconds": 1.567138521000743,
+          "command_and_resource_observer_seconds": 1.5502496976405382,
+          "artifact_hashing_seconds": 0.016881108283996582,
+          "peak_sampled_pss_bytes": 683548672,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "mapping_sort_index",
+          "wall_seconds": 23.182751424144953,
+          "command_and_resource_observer_seconds": 23.156490799970925,
+          "artifact_hashing_seconds": 0.026250566821545362,
+          "peak_sampled_pss_bytes": 18369549312,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "markdup",
+          "wall_seconds": 3.764825013000518,
+          "command_and_resource_observer_seconds": 3.7474622749723494,
+          "artifact_hashing_seconds": 0.017356274649500847,
+          "peak_sampled_pss_bytes": 527382528,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "cram",
+          "wall_seconds": 18.24668402131647,
+          "command_and_resource_observer_seconds": 18.240446961019188,
+          "artifact_hashing_seconds": 0.006231414619833231,
+          "peak_sampled_pss_bytes": 756598784,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "BaseRecalibrator",
+          "wall_seconds": 54.41629057331011,
+          "command_and_resource_observer_seconds": 54.415479116141796,
+          "artifact_hashing_seconds": 0.0008048079907894135,
+          "peak_sampled_pss_bytes": 3631554560,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "ApplyBQSR",
+          "wall_seconds": 16.379306084942073,
+          "command_and_resource_observer_seconds": 16.346531748771667,
+          "artifact_hashing_seconds": 0.03276595287024975,
+          "peak_sampled_pss_bytes": 1932380160,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "recal_index",
+          "wall_seconds": 0.5258756070397794,
+          "command_and_resource_observer_seconds": 0.5213623968884349,
+          "artifact_hashing_seconds": 0.004506418947130442,
+          "peak_sampled_pss_bytes": 14673920,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "HaplotypeCaller",
+          "wall_seconds": 3.1470732539892197,
+          "command_and_resource_observer_seconds": 3.1459000310860574,
+          "artifact_hashing_seconds": 0.0011679749004542828,
+          "peak_sampled_pss_bytes": 894653440,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "wgs_metrics",
+          "wall_seconds": 7.336079935077578,
+          "command_and_resource_observer_seconds": 7.33542642602697,
+          "artifact_hashing_seconds": 0.0006483942270278931,
+          "peak_sampled_pss_bytes": 1169848320,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "alignment_insert_metrics",
+          "wall_seconds": 77.88509673858061,
+          "command_and_resource_observer_seconds": 77.88320685178041,
+          "artifact_hashing_seconds": 0.0018856516107916832,
+          "peak_sampled_pss_bytes": 1580534784,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 1
+          }
+        },
+        {
+          "stage": "genotype",
+          "wall_seconds": 3.1464285869151354,
+          "command_and_resource_observer_seconds": 3.145378142595291,
+          "artifact_hashing_seconds": 0.0010464261285960674,
+          "peak_sampled_pss_bytes": 676141056,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "normalize",
+          "wall_seconds": 0.5430176532827318,
+          "command_and_resource_observer_seconds": 0.5419181622564793,
+          "artifact_hashing_seconds": 0.0010937582701444626,
+          "peak_sampled_pss_bytes": 14680064,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "plink",
+          "wall_seconds": 0.2662168638780713,
+          "command_and_resource_observer_seconds": 0.26461322885006666,
+          "artifact_hashing_seconds": 0.0015989281237125397,
+          "peak_sampled_pss_bytes": 14974976,
+          "pss_diagnostics": {}
+        }
+      ],
+      "actual_GPU_work": false,
+      "GPU_evidence": null,
+      "normalized_VCF_variants": 1,
+      "all_hard_calls_verified": true
+    },
+    {
+      "label": "optional_CUDA",
+      "status": "complete_verified",
+      "receipt_sha256": "8e16f77c8ebe4fc45b61593de59cecce7e1fe3faac9da5d13ecdb2834fab3300",
+      "actual_exit": 0,
+      "committed_stages": 15,
+      "total_wall_seconds": 227.37043308187276,
+      "final_PLINK_readback_seconds": 0.9177984301932156,
+      "peak_sampled_process_tree_PSS_bytes": 18447686656,
+      "stage_profiles": [
+        {
+          "stage": "reference_dictionary",
+          "wall_seconds": 12.992573338095099,
+          "command_and_resource_observer_seconds": 12.991002555936575,
+          "artifact_hashing_seconds": 0.0015651332214474678,
+          "peak_sampled_pss_bytes": 262217728,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "raw_gzip_integrity",
+          "wall_seconds": 0.25970162684097886,
+          "command_and_resource_observer_seconds": 0.259694742038846,
+          "artifact_hashing_seconds": 1.855660229921341e-06,
+          "peak_sampled_pss_bytes": 14525440,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "fastp",
+          "wall_seconds": 1.3182841390371323,
+          "command_and_resource_observer_seconds": 1.3020897498354316,
+          "artifact_hashing_seconds": 0.016186572145670652,
+          "peak_sampled_pss_bytes": 680886272,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 1
+          }
+        },
+        {
+          "stage": "mapping_sort_index",
+          "wall_seconds": 23.710441356990486,
+          "command_and_resource_observer_seconds": 23.688988002948463,
+          "artifact_hashing_seconds": 0.021442452911287546,
+          "peak_sampled_pss_bytes": 18447686656,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 2
+          }
+        },
+        {
+          "stage": "markdup",
+          "wall_seconds": 3.723276851233095,
+          "command_and_resource_observer_seconds": 3.7055767169222236,
+          "artifact_hashing_seconds": 0.017691748216748238,
+          "peak_sampled_pss_bytes": 529832960,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "cram",
+          "wall_seconds": 17.73487590905279,
+          "command_and_resource_observer_seconds": 17.728459835983813,
+          "artifact_hashing_seconds": 0.006410525646060705,
+          "peak_sampled_pss_bytes": 754743296,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "BaseRecalibrator",
+          "wall_seconds": 54.43632216611877,
+          "command_and_resource_observer_seconds": 54.435083399992436,
+          "artifact_hashing_seconds": 0.0012271106243133545,
+          "peak_sampled_pss_bytes": 3577499648,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "ApplyBQSR",
+          "wall_seconds": 15.283942057285458,
+          "command_and_resource_observer_seconds": 15.24932166421786,
+          "artifact_hashing_seconds": 0.034612368792295456,
+          "peak_sampled_pss_bytes": 1862520832,
+          "pss_diagnostics": {
+            "transient_endpoint_retries": 1
+          }
+        },
+        {
+          "stage": "recal_index",
+          "wall_seconds": 0.5374160660430789,
+          "command_and_resource_observer_seconds": 0.5329041699878871,
+          "artifact_hashing_seconds": 0.004506115335971117,
+          "peak_sampled_pss_bytes": 14587904,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "HaplotypeCaller",
+          "wall_seconds": 8.032776804175228,
+          "command_and_resource_observer_seconds": 8.031560549046844,
+          "artifact_hashing_seconds": 0.0012109987437725067,
+          "peak_sampled_pss_bytes": 1016574976,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "wgs_metrics",
+          "wall_seconds": 7.071436266880482,
+          "command_and_resource_observer_seconds": 7.070629363879561,
+          "artifact_hashing_seconds": 0.0008019418455660343,
+          "peak_sampled_pss_bytes": 1180280832,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "alignment_insert_metrics",
+          "wall_seconds": 77.06762658897787,
+          "command_and_resource_observer_seconds": 77.06612362805754,
+          "artifact_hashing_seconds": 0.001498890109360218,
+          "peak_sampled_pss_bytes": 1557203968,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "genotype",
+          "wall_seconds": 2.353857960086316,
+          "command_and_resource_observer_seconds": 2.3527844762429595,
+          "artifact_hashing_seconds": 0.0010688770562410355,
+          "peak_sampled_pss_bytes": 683831296,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "normalize",
+          "wall_seconds": 0.5210337769240141,
+          "command_and_resource_observer_seconds": 0.5199426719918847,
+          "artifact_hashing_seconds": 0.0010793078690767288,
+          "peak_sampled_pss_bytes": 16018432,
+          "pss_diagnostics": {}
+        },
+        {
+          "stage": "plink",
+          "wall_seconds": 0.2607519878074527,
+          "command_and_resource_observer_seconds": 0.259180111810565,
+          "artifact_hashing_seconds": 0.0015668151900172234,
+          "peak_sampled_pss_bytes": 20233216,
+          "pss_diagnostics": {}
+        }
+      ],
+      "actual_GPU_work": true,
+      "GPU_evidence": {
+        "gpu_pairs": 36,
+        "gpu_kernel_launches": 2,
+        "cpu_double_fallback_pairs": 0,
+        "invalid_gpu_result_pairs": 0,
+        "completed_contexts": 1,
+        "owned_peak_bytes": 36625,
+        "actual_gpu_work_verified": true,
+        "native_provider": "head-native-cuda-pairhmm-fp32-wavefront-packed-H2D-initfix-v1b",
+        "driver_and_other_users_memory_included": false,
+        "audit_sha256": "b0a2cf111c3cacc1032aba34fae9f41feae37ba14703bf9b0d2147de8e5460da"
+      },
+      "normalized_VCF_variants": 1,
+      "all_hard_calls_verified": true
+    }
+  ],
+  "comparisons": [
+    {
+      "label": "optimized",
+      "sorted_BAM_scientific_records_and_order_equal": true,
+      "sorted_BAM_records": 200422,
+      "recalibration_all_table_cells_equal": true,
+      "WGS_metrics_all_values_and_histogram_equal": true,
+      "alignment_metrics_all_values_and_histogram_equal": true,
+      "insert_metrics_all_values_and_histogram_equal": true,
+      "fastp_QC_all_scientific_fields_equal": true,
+      "gVCF_records": 150,
+      "normalized_VCF_records": 1
+    },
+    {
+      "label": "optional_CUDA",
+      "sorted_BAM_scientific_records_and_order_equal": true,
+      "sorted_BAM_records": 200422,
+      "recalibration_all_table_cells_equal": true,
+      "WGS_metrics_all_values_and_histogram_equal": true,
+      "alignment_metrics_all_values_and_histogram_equal": true,
+      "insert_metrics_all_values_and_histogram_equal": true,
+      "fastp_QC_all_scientific_fields_equal": true,
+      "gVCF_records": 150,
+      "normalized_VCF_records": 1
+    }
+  ],
+  "all_gVCF_VCF_record_fields_and_order_equal": true,
+  "all_BED_BIM_FAM_bytes_equal": true,
+  "additional_external_readback_seconds": 2.39854773087427,
+  "observed_prefix_CPU_speedup": 1.0440443245658693,
+  "observed_optional_GPU_speedup_vs_optimized_CPU": 0.9920442387142381,
+  "speedup_is_single_prefix_observation_not_confident_whole_WGS_estimate": true,
+  "components": {
+    "BWA_MEM2": {
+      "real_pairs": 100000,
+      "interleaved_paired_repeats": 3,
+      "baseline_median_seconds": 30.0463,
+      "optimized_median_seconds": 22.0497,
+      "speedup": 1.36267,
+      "records_each_run": 200423,
+      "core_fields_non_PG_tags_and_order_equal": true,
+      "baseline_peak_sampled_PSS_GiB": 5.501,
+      "optimized_peak_sampled_PSS_GiB": 17.22
+    },
+    "shared_QC": {
+      "interleaved_paired_repeats": 3,
+      "baseline_median_seconds": 79.750255,
+      "optimized_median_seconds": 76.48805,
+      "all_table_values_and_histogram_bins_equal": true,
+      "scope": "two of three original QC programs;real pre-markdup/pre-BQSR BAM"
+    },
+    "fastp_reproducibility": {
+      "real_pairs": 1000000,
+      "total_runs": 8,
+      "measured_paired_repeats": 3,
+      "worker1_median_seconds": 10.202504241,
+      "worker3_median_seconds": 7.37686249,
+      "single_worker_percent_slower": 38.3,
+      "all_read_multisets_equal": true,
+      "worker1_order_and_all_scientific_QC_repeatable": true,
+      "worker3_order_and_some_QC_unstable": true,
+      "kept_pairs_each_run": 967774
+    },
+    "PairHMM_warm_real_batch": {
+      "captured_pairs": 34,
+      "measured_repeats": 128,
+      "max_log10_likelihood_difference": 0,
+      "native_owned_allocation_plateau_bytes": 37033,
+      "original_GKL_median_ms": 0.108407,
+      "GPU_median_ms": 0.1106975,
+      "full_HC_speedup_proved": false
+    }
+  },
+  "rejected_candidates": {
+    "plain_FASTQ_FIFO": "fastp pre-read closes/reopens input;gzip SIGPIPE;no outputs committed;not released",
+    "direct_BAM_BQSR": "core fields and recalibration tables agreed but CRAM-decoded typed AUX tags differ;original CRAM retained",
+    "decode_once_BQSR": "exact candidate in small window but net gain comparable to repeated timing spread;not default"
+  },
+  "full_original_data": {
+    "fastp_completed_seconds": 2131.6581,
+    "downstream_success_receipts_verified": false,
+    "end_to_end_speedup_assessed": false
+  },
+  "annotations_created": false,
+  "association_performed": false,
+  "not_assessed": [
+    "full original subject FASTQ to PLINK completion",
+    "whole WGS net speedup versus original ZIP",
+    "full-depth truth-set variant accuracy",
+    "long-duration host/GPU memory stability",
+    "other GPU architectures"
+  ],
+  "privacy": {
+    "real_identifiers_paths_server_connections_coordinates_and_genetic_results_included": false
+  }
+}

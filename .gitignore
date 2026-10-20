@@ -43,3 +43,15 @@ downloads/
 *.tsv
 *.tar.gz
 *.tgz
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+*.tbi
+*.csi
