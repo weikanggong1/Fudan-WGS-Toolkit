@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import copy
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -84,6 +85,30 @@ _SMAPS_HEADER = re.compile(r"^([0-9a-fA-F]+)-([0-9a-fA-F]+) [r-][w-][x-][ps] "
     r"[0-9a-fA-F]+ [0-9a-fA-F]+:[0-9a-fA-F]+ [0-9]+(?:\s+.*)?$")
 _PSS_COUNTERS = frozenset(("Rss", "Pss", "SwapPss"))
 _PSS_REQUIRED = frozenset(("Rss", "Pss"))
+_SMAPS_CAPTURE_LIMIT_BYTES = 32 * 1024**2
+_SMAPS_CAPTURE_CHUNK_BYTES = 1024**2
+
+
+def _capture_smaps(path):
+    """Capture through EOF before parsing; reject, never truncate, large files.
+
+    Fast binary reads reduce time between kernel reads. They do not turn the
+    kernel's endpoint into an atomic address-space snapshot: the same captured
+    bytes still have to pass every strict VMA and counter check below.
+    """
+    chunks, size = [], 0
+    with path.open("rb", buffering=0) as stream:
+        while True:
+            chunk = stream.read(min(_SMAPS_CAPTURE_CHUNK_BYTES,
+                                    _SMAPS_CAPTURE_LIMIT_BYTES + 1 - size))
+            if not isinstance(chunk, bytes):
+                raise ValueError("invalid smaps capture byte stream")
+            if not chunk:
+                return b"".join(chunks)
+            size += len(chunk)
+            if size > _SMAPS_CAPTURE_LIMIT_BYTES:
+                raise ValueError("smaps capture byte limit exceeded")
+            chunks.append(chunk)
 
 
 def _memory_kib(tail):
@@ -112,7 +137,7 @@ def _read_rollup_pss(path):
 
 
 def _read_smaps_pss(path):
-    """Stream all VMAs; one invalid/incomplete block invalidates every total.
+    """Parse one bounded capture; any invalid block invalidates every total.
 
     Older kernels expose PSS only here. Each complete mapping contributes
     exactly once. VMA path/type cannot reliably split proportional anonymous,
@@ -121,7 +146,8 @@ def _read_smaps_pss(path):
     totals = dict.fromkeys(_PSS_COUNTERS,0)
     swap_complete = True
     current, previous_end, count = None,0,0
-    with path.open(encoding="utf-8",errors="replace") as stream:
+    captured = _capture_smaps(path)
+    with io.StringIO(captured.decode("utf-8", errors="replace")) as stream:
         for line in stream:
             header = _SMAPS_HEADER.fullmatch(line.rstrip("\n"))
             if header is not None:
@@ -159,6 +185,26 @@ def _read_smaps_pss(path):
     return totals,count
 
 
+def _pss_read_error(source, error):
+    """Fixed private diagnostic categories; never copy paths or raw contents."""
+    if isinstance(error, (FileNotFoundError, ProcessLookupError)):
+        reason = "endpoint_unavailable"
+    elif isinstance(error, PermissionError):
+        reason = "endpoint_permission_denied"
+    elif isinstance(error, OSError):
+        reason = "endpoint_read_failed"
+    else:
+        known = {"memory counter must be nonnegative integer kB",
+            "invalid rollup field format", "duplicate rollup memory counter",
+            "incomplete rollup memory counters", "invalid smaps capture byte stream",
+            "smaps capture byte limit exceeded", "incomplete smaps VMA memory counters",
+            "invalid or overlapping smaps VMA addresses", "invalid smaps VMA or field format",
+            "duplicate smaps VMA memory counter", "empty or incomplete smaps memory counters"}
+        reason = str(error) if str(error) in known else "invalid_endpoint_data"
+    return dict(source=source, error_type=type(error).__name__,
+                errno=error.errno if isinstance(error, OSError) else None, reason=reason)
+
+
 def _process_memory_counters(pid, *, include_pss):
     """Read one endpoint; unavailable PSS remains unknown rather than zero."""
     status = {}
@@ -171,15 +217,18 @@ def _process_memory_counters(pid, *, include_pss):
         pass
     rollup = {}
     pss_source,smaps_vma_count = None,None
+    pss_read_errors = []
     if include_pss:
         try:
             rollup = _read_rollup_pss(Path(f"/proc/{pid}/smaps_rollup"))
             pss_source = "smaps_rollup"
-        except (OSError, ValueError, IndexError):
+        except (OSError, ValueError, IndexError) as error:
+            pss_read_errors.append(_pss_read_error("smaps_rollup", error))
             try:
                 rollup,smaps_vma_count = _read_smaps_pss(Path(f"/proc/{pid}/smaps"))
                 pss_source = "smaps"
-            except (OSError, ValueError, IndexError):
+            except (OSError, ValueError, IndexError) as error:
+                pss_read_errors.append(_pss_read_error("smaps", error))
                 # Never keep counters accumulated before a partial read or
                 # malformed later VMA; RSS may still be diagnostic status data.
                 rollup = {}
@@ -189,7 +238,8 @@ def _process_memory_counters(pid, *, include_pss):
         anonymous_pss_bytes=rollup.get("Pss_Anon"), mapped_file_pss_bytes=rollup.get("Pss_File"),
         shared_pss_bytes=rollup.get("Pss_Shmem"), swap_bytes=status.get("VmSwap"),
         swap_pss_bytes=rollup.get("SwapPss"),pss_source=pss_source,
-        pss_coverage_complete=pss_source is not None,smaps_vma_count=smaps_vma_count)
+        pss_coverage_complete=pss_source is not None,smaps_vma_count=smaps_vma_count,
+        pss_read_errors=pss_read_errors)
 
 
 def _verified_children(pid, *, strict=False):

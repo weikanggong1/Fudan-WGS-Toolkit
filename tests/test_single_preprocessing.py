@@ -38,6 +38,14 @@ class PreprocessingTests(unittest.TestCase):
             with self.subTest(gt=gt),self.assertRaisesRegex(ValueError,'Partial, haploid'):
                 vcf_oracle(fixture(self.tmp_path,(gt,)),'subject_a',self.tmp_path/('oracle'+str(number)))
 
+    def test_invalid_BQSR_or_QC_options_do_not_create_an_output(self):
+        for options in ({'bqsr_mode':'unknown'},{'bqsr_workers':True},
+                        {'bqsr_workers':0},{'bqsr_workers':17},{'qc_exit_fix':1}):
+            with self.subTest(options=options),self.assertRaises(ValueError):
+                single_subj_preprocessing('a','b','ref',[],self.tmp_path/'rejected',
+                    sample_id='subject_a',**options)
+            self.assertFalse((self.tmp_path/'rejected').exists())
+
     def test_true_sample_axis(self):
         with self.assertRaisesRegex(ValueError,'requested single sample'):
             vcf_oracle(fixture(self.tmp_path),'wrong_subject',self.tmp_path/'oracle')
@@ -100,6 +108,48 @@ class PreprocessingTests(unittest.TestCase):
                    {'pss_bytes':42,'pss_coverage_complete':True}]):
             self.assertEqual(_pss({os.getpid()},diagnostics=diagnostics),42)
         self.assertEqual(diagnostics['transient_endpoint_retries'],1)
+
+    def test_pss_recovers_after_startup_longer_than_previous_retry_window(self):
+        from fudan_wgs_toolkit.single_preprocessing import _pss
+        diagnostics={}
+        missing={'pss_bytes':None,'pss_coverage_complete':False,
+                 'pss_read_errors':[{'source':'smaps','error_type':'ValueError',
+                                     'errno':None,'reason':'invalid or overlapping smaps VMA addresses'}]}
+        with patch('fudan_wgs_toolkit.phewas_resources._process_memory_counters',
+                   side_effect=[missing]*6+[{'pss_bytes':42,'pss_coverage_complete':True}]):
+            self.assertEqual(_pss({os.getpid()},diagnostics=diagnostics),42)
+        self.assertEqual(diagnostics['transient_endpoint_retries'],6)
+        self.assertEqual(diagnostics['recovered_endpoints'],1)
+        self.assertEqual(diagnostics['endpoint_failures'][0]['read_errors'],missing['pss_read_errors'])
+        self.assertGreater(diagnostics['endpoint_failures'][-1]['elapsed_seconds'],.15)
+
+    def test_pss_rejects_changed_identity_even_with_complete_counters(self):
+        from fudan_wgs_toolkit.single_preprocessing import _pss
+        before=Path('/proc',str(os.getpid()),'stat').read_text()
+        prefix,fields=before.rsplit(')',1);fields=fields.split()
+        fields[19]=str(int(fields[19])+1)
+        after=prefix+') '+' '.join(fields)
+        with patch('pathlib.Path.read_text',side_effect=[before,after]), \
+             patch('fudan_wgs_toolkit.phewas_resources._process_memory_counters',
+                   return_value={'pss_bytes':42,'pss_coverage_complete':True}):
+            with self.assertRaisesRegex(RuntimeError,'identity changed'):_pss({os.getpid()})
+
+    def test_failed_stage_preserves_pss_diagnostics_and_drains_session(self):
+        import json
+        from fudan_wgs_toolkit.single_preprocessing import _Runner
+        config={'cpu_affinity':[min(os.sched_getaffinity(0))],
+                'host_memory_limit_gib':2,'host_memory_reserve_gib':.01}
+        runner=_Runner(self.tmp_path,Path(sys.executable).parent.parent,config,False)
+        def unavailable(pids,*,diagnostics):
+            diagnostics['incomplete_endpoint_count']=3
+            raise RuntimeError('PSS is unavailable for a live task process')
+        with patch('fudan_wgs_toolkit.single_preprocessing._pss',side_effect=unavailable):
+            with self.assertRaisesRegex(RuntimeError,'PSS is unavailable'):
+                runner.stage('unknown',[[sys.executable,'-c','import time;time.sleep(30)']],[],.01)
+        failed=json.loads((self.tmp_path/'stages/unknown/failed.private.json').read_text())
+        self.assertEqual(failed['pss_diagnostics']['incomplete_endpoint_count'],3)
+        self.assertNotIn('cleanup_error',failed)
+        self.assertFalse((self.tmp_path/'stages/unknown/complete.private.json').exists())
 
     def test_failed_stage_drains_child_after_root_exit(self):
         from fudan_wgs_toolkit.single_preprocessing import _Runner

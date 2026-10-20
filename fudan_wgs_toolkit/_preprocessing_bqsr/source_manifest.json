@@ -1,0 +1,11 @@
+{
+  "schema": "fudan-bqsr-parallel-source-v1",
+  "algorithm": "unmodified_GATK4.2.0.0_BaseRecalibrationEngine_and_RecalUtils",
+  "execution": "worker_private_original_FeatureManager_fixed_1000_lookahead_contiguous_eligible_chunk16",
+  "feature_cache_lookahead_bases": 1000,
+  "files": {
+    "assets/java/org/fnit/wgs/BqsrComparator.java": "17cf585f2da8b23958846f806862f0cd597ac3fe75e43efd305d910694a0c8cf",
+    "assets/java/org/fnit/wgs/bqsr/parallel/ParallelFusedBqsrTrainer.java": "8aa8f9a6f9846e51eb21e145c624f74962baf948f0fe4a489251bb6831f51465"
+  },
+  "eligible_dispatch_contiguous_chunk_size": 16
+}

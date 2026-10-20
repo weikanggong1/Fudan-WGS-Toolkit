@@ -1,6 +1,7 @@
 """Older Linux full-smaps PSS fallback; anonymous process/file fixtures."""
 from pathlib import Path
 import io
+import errno
 
 import pytest
 
@@ -80,17 +81,20 @@ def test_partial_empty_or_bad_smaps_never_produces_partial_pss(files,bad):
 
 
 def test_midstream_oserror_discards_complete_prefix_instead_of_admitting_partial_pss(files,monkeypatch):
-    class FailingStream(io.StringIO):
-        def __iter__(self):
-            yield from vma(0x1000,0x5000,16,8).splitlines(keepends=True)
-            raise OSError('anonymous midstream read error')
+    class FailingStream(io.BytesIO):
+        def read(self,size=-1):
+            if self.tell():
+                raise OSError(errno.EIO,'anonymous midstream read error')
+            return super().read(size)
     real_open=Path.open
     def opened(path,*args,**kwargs):
-        if path==files/'smaps':return FailingStream()
+        if path==files/'smaps':return FailingStream(vma(0x1000,0x5000,16,8).encode())
         return real_open(path,*args,**kwargs)
     monkeypatch.setattr(Path,'open',opened)
     result=r._process_memory_counters(123,include_pss=True)
     assert result['pss_bytes'] is None and result['rss_bytes']==900*1024
+    assert result['pss_read_errors'][-1]==dict(source='smaps',error_type='OSError',
+        errno=errno.EIO,reason='endpoint_read_failed')
 
 
 def test_unreadable_smaps_keeps_pss_unknown_even_when_status_has_rss(files,monkeypatch):
@@ -122,11 +126,11 @@ def test_malformed_rollup_does_not_keep_an_earlier_successful_pss_field(files):
     assert result['pss_bytes']==4*1024 and result['pss_source']=='smaps'
 
 
-def test_streaming_fallback_does_not_materialize_smaps_text(files,monkeypatch):
+def test_fallback_uses_bounded_binary_capture_not_unbounded_read_text(files,monkeypatch):
     (files/'smaps').write_text(vma(0x1000,0x5000,16,8))
     real_read=Path.read_text
     def read(path,*args,**kwargs):
-        if path.name in ('smaps','smaps_rollup'):pytest.fail('PSS paths must stream')
+        if path.name in ('smaps','smaps_rollup'):pytest.fail('PSS paths must not use unbounded read_text')
         return real_read(path,*args,**kwargs)
     monkeypatch.setattr(Path,'read_text',read)
     assert r._process_memory_counters(123,include_pss=True)['pss_bytes']==8*1024

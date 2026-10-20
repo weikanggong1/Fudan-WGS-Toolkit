@@ -1,0 +1,47 @@
+{
+  "schema": "safe-inline-BAI-forced-spill-anonymous-v1",
+  "status": "complete_safe_inline_BAI_forced_spill",
+  "scope": "same_real_100k_postBQSR_BAM;explicit_T_fix_only",
+  "CPU_count": 3,
+  "GPU_used": false,
+  "rows": [
+    {
+      "label": "normal",
+      "memory_option": "512M",
+      "wall_seconds": 1.3128200336359441,
+      "peak_sampled_pss_bytes": 96733184,
+      "exit_codes": [
+        0
+      ],
+      "actual_external_merge_files": 0,
+      "BAI_magic_verified": true,
+      "idxstats_sha256": "79a58aee5767d9565a3cc8023aa3ee2ea1d91e56bba5dadc1f0343511f012ed3"
+    },
+    {
+      "label": "forced_spill",
+      "memory_option": "1M",
+      "wall_seconds": 6.9501414760015905,
+      "peak_sampled_pss_bytes": 45814784,
+      "exit_codes": [
+        0
+      ],
+      "actual_external_merge_files": 58,
+      "BAI_magic_verified": true,
+      "idxstats_sha256": "79a58aee5767d9565a3cc8023aa3ee2ea1d91e56bba5dadc1f0343511f012ed3"
+    }
+  ],
+  "full_SAM_records_compared": 200422,
+  "all_core_typed_AUX_and_record_order_identical": true,
+  "non_PG_header_contig_and_sample_axes_identical": true,
+  "complete_idxstats_identical": true,
+  "all_temporary_merge_files_cleaned": true,
+  "source_tool_and_inputs_unchanged": true,
+  "original_unsafe_path_combination_repeated": false,
+  "speedup_claimed": false,
+  "sampled_PSS_is_not_exact_peak": true,
+  "whole_WGS_or_long_duration_memory_assessed": false,
+  "explicit_T_prefix_used_in_both_arms": true,
+  "inline_BAI_output_syntax_preserved": true,
+  "full_complete_receipt_sha256": "9c5aa9a41418a107138dc9581a0da609d879615538d3a2666270e6a5d3235b78",
+  "launcher_exit_code": 0
+}

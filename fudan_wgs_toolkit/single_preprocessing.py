@@ -97,10 +97,15 @@ def _descendants(root):
 
 def _pss(pids, *, diagnostics=None):
     from .phewas_resources import _process_memory_counters
+    # A single sample has a bounded settling window. Old kernels may stream
+    # inconsistent smaps during exec/mmap; no partial endpoint contributes to
+    # the sample, and a persistent unknown still stops the stage.
+    began=time.monotonic();deadline=began+2.0
     result=0; verified=0
-    for pid in pids:
-        identity_ticks=None
-        for attempt in range(5):
+    for pid in sorted(pids):
+        identity_ticks=None;attempt=0
+        while True:
+            attempt+=1
             try:
                 before=Path('/proc',str(pid),'stat').read_text().rsplit(')',1)[1].split()
             except (FileNotFoundError,ProcessLookupError):break
@@ -117,16 +122,32 @@ def _pss(pids, *, diagnostics=None):
                 raise RuntimeError('Process identity changed during task PSS measurement')
             if measured['pss_coverage_complete'] and measured['pss_bytes'] is not None:
                 result+=measured['pss_bytes'];verified+=1
+                if attempt>1 and diagnostics is not None:
+                    diagnostics['recovered_endpoints']=diagnostics.get('recovered_endpoints',0)+1
                 break
             # An exec/map change can make an old kernel's streamed smaps
             # temporarily inconsistent. Discard every partial total, retry
             # the entire endpoint with the same identity, and remain closed
             # on persistent unknowns rather than substituting RSS or zero.
-            if attempt==4:
+            if diagnostics is not None:
+                endpoint=dict(pid=pid,start_ticks=identity_ticks,attempt=attempt,
+                    state_before=before[0],state_after=after[0],
+                    elapsed_seconds=time.monotonic()-began,
+                    read_errors=measured.get('pss_read_errors',[]))
+                failures=diagnostics.setdefault('endpoint_failures',[])
+                if len(failures)<16:
+                    failures.append(endpoint)
+                diagnostics['last_incomplete_endpoint']=endpoint
+                diagnostics['incomplete_endpoint_count']=diagnostics.get('incomplete_endpoint_count',0)+1
+            remaining=deadline-time.monotonic()
+            if remaining<=0 or attempt>=64:
+                if diagnostics is not None:
+                    diagnostics['retry_deadline_seconds']=2.0
+                    diagnostics['failed_sample_elapsed_seconds']=time.monotonic()-began
                 raise RuntimeError('PSS is unavailable for a live task process; memory budget cannot be verified')
             if diagnostics is not None:
                 diagnostics['transient_endpoint_retries']=diagnostics.get('transient_endpoint_retries',0)+1
-            time.sleep(.01*2**attempt)
+            time.sleep(min(.01*2**min(attempt-1,5),.2,remaining))
     return result if verified else None
 
 
@@ -211,6 +232,8 @@ class _Runner:
             raise MemoryError('Stage not admitted within task budget and actual finite ancestor/physical headroom: '+name)
         directory.mkdir(parents=True)
         began=time.monotonic()
+        children_before=resource.getrusage(resource.RUSAGE_CHILDREN)
+        controller_before=resource.getrusage(resource.RUSAGE_SELF)
         record=dict(stage=name,started_utc=_utc(),commands=commands,admission=limits,
                     future_peak_gib=future_gib,status='running')
         atomic(directory/'started.private.json',record)
@@ -244,9 +267,16 @@ class _Runner:
             hashing_wall=time.monotonic()-hashing_started
             if any(x['size']==0 for x in checked):
                 raise RuntimeError('Stage produced an empty required output: '+name)
+            children_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+            controller_after=resource.getrusage(resource.RUSAGE_SELF)
             record.update(status='complete',exit_codes=exits,outputs=checked,
                           wall_seconds=time.monotonic()-began,command_and_resource_observer_seconds=command_wall,
                           artifact_hashing_seconds=hashing_wall,peak_sampled_pss_bytes=maximum,
+                          reaped_child_cpu_user_seconds=children_after.ru_utime-children_before.ru_utime,
+                          reaped_child_cpu_system_seconds=children_after.ru_stime-children_before.ru_stime,
+                          controller_cpu_user_seconds=controller_after.ru_utime-controller_before.ru_utime,
+                          controller_cpu_system_seconds=controller_after.ru_stime-controller_before.ru_stime,
+                          child_CPU_includes_reaped_descendants_once=True,
                           pss_diagnostics=pss_diagnostics,
                           pss_is_sampled_not_a_cgroup_hard_limit=True,
                           completed_utc=_utc(),resource_snapshot_after=_limits())
@@ -263,7 +293,8 @@ class _Runner:
                     record['cleanup_error']=str(cleanup_error)
             record.update(status='failed',error_type=type(error).__name__,error=str(error),
                           exit_codes=exits,wall_seconds=time.monotonic()-began,
-                          peak_sampled_pss_bytes=maximum,failed_utc=_utc())
+                          peak_sampled_pss_bytes=maximum,pss_diagnostics=pss_diagnostics,
+                          failed_utc=_utc())
             atomic(directory/'failed.private.json',record)
             raise
 
@@ -280,6 +311,8 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
                              aligner='bwa', aligner_executable=None, index_prefix=None,
                              pairhmm_backend='cpu', gpu_uuid=None, gpu_memory_limit_gib=2, gpu_build_dir=None,
                              intervals=None, qc_mode='shared', bqsr_input='cram',
+                             qc_exit_fix=True, runtime_build_dir=None,
+                             bqsr_mode='auto', bqsr_workers=None, bqsr_build_dir=None,
                              resume=False):
     """Process one real paired-end subject with established caller semantics.
 
@@ -290,6 +323,12 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
     CUDA replaces PairHMM only; no GPU speedup is assumed or silently reported.
     """
     started=time.monotonic()
+    if type(qc_exit_fix) is not bool:
+        raise ValueError('qc_exit_fix must be a boolean')
+    if bqsr_mode not in ('auto','original','parallel'):
+        raise ValueError('bqsr_mode must be auto, original or parallel')
+    if bqsr_workers is not None and (type(bqsr_workers) is not int or not 1<=bqsr_workers<=16):
+        raise ValueError('bqsr_workers must be None or an integer of 1..16')
     if not isinstance(sample_id,str) or not re.fullmatch(r'[A-Za-z0-9_.-]+',sample_id) or sample_id=='0':
         raise ValueError('sample_id must be a nonzero whitespace-free identifier')
     if not isinstance(known_sites,(list,tuple)) or len(known_sites)!=3:
@@ -326,6 +365,12 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         if type(threads) is not int or threads<2 or not cpus or any(type(x) is not int or x not in allowed for x in cpus):
             raise ValueError('At least two actually available CPU cores are required')
         cpus=sorted(set(cpus))[:threads]
+        selected_bqsr_mode=('parallel' if threads>=4 else 'original') if bqsr_mode=='auto' else bqsr_mode
+        training_workers=(bqsr_workers or min(16,max(1,threads-2))) if selected_bqsr_mode=='parallel' else None
+        if bqsr_workers is not None and selected_bqsr_mode!='parallel':
+            raise ValueError('bqsr_workers requires the parallel BQSR mode')
+        if training_workers is not None and training_workers>max(1,threads-2):
+            raise ValueError('BQSR workers must leave the producer and writer within the CPU budget')
         cleaning_threads=min(6,threads) if fastp_threads is None else fastp_threads
         if type(cleaning_threads) is not int or not 1<=cleaning_threads<=min(16,threads):
             raise ValueError('fastp_threads must be 1..min(16, CPU budget); None explicitly enables parallel cleaning')
@@ -359,6 +404,63 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         if len(jars)!=1:raise ValueError('The tested GATK 4.2.0.0 local jar is required')
         binaries['gatk_jar']=bound(jars[0])
         source_files=[Path(__file__),Path(__file__).with_name('_preprocessing_io.py'),Path(__file__).with_name('phewas_resources.py')]
+        bqsr_assets=None
+        if selected_bqsr_mode=='parallel':
+            from .build_preprocessing_bqsr import build_preprocessing_bqsr, bqsr_training_argv
+            bqsr_helper=Path(__file__).with_name('build_preprocessing_bqsr.py')
+            bqsr_package=Path(__file__).with_name('_preprocessing_bqsr')
+            bqsr_manifest=bqsr_package/'source_manifest.json'
+            build=Path(bqsr_build_dir).resolve() if bqsr_build_dir else root/'bqsr_build'
+            asset_file=build/'assets.private.json'
+            if resume and not asset_file.is_file():
+                raise ValueError('Resume requires the original committed BQSR build')
+            bqsr_assets=json.loads(asset_file.read_text()) if asset_file.is_file() else build_preprocessing_bqsr(
+                str(prefix),str(build),cpu_affinity=cpus[:1],
+                host_memory_limit_gib=4,host_memory_reserve_gib=host_memory_reserve_gib)
+            if (bqsr_assets.get('condaPrefix')!=str(prefix)
+                    or Path(bqsr_assets.get('java','')).resolve()!=(prefix/'bin'/'java').resolve()
+                    or Path(bqsr_assets.get('gatkJar','')).resolve()!=jars[0].resolve()):
+                raise ValueError('BQSR assets must use the same Conda prefix')
+            # The command builder verifies the committed receipt, packaged
+            # sources, executable, jars and exact classpath before any input.
+            bqsr_training_argv(bqsr_assets,input_cram=root/'files'/'marked.cram',reference_fasta=reference,
+                known_sites=sites,recalibration_table=root/'files'/'recal.table',
+                canonical_bam=root/'files'/'canonical_bqsr.bam',audit_json=root/'bqsr_training.private.json',
+                temporary_directory=root/'tmp',cpu_threads=threads,heap_gib=4,
+                training_workers=training_workers,queue_capacity=min(32,256//training_workers))
+            binaries['bqsr_build_receipt']=bound(bqsr_assets['buildReceipt'])
+            binaries['bqsr_asset_record']=bound(asset_file)
+            for key in bqsr_assets['sha256']:
+                binaries['bqsr_'+key]=bound(bqsr_assets[key])
+            manifest=json.loads(bqsr_manifest.read_text())
+            source_files += [bqsr_helper,bqsr_manifest,*[bqsr_package/path for path in manifest['files']]]
+        qc_assets=None
+        if qc_exit_fix:
+            from ._preprocessing_runtime import build_preprocessing_runtime, qc_argv
+            runtime_helper=Path(__file__).with_name('_preprocessing_runtime.py')
+            runtime_source=Path(__file__).with_name('_preprocessing_runtime_assets')/'QcMain.java'
+            build=Path(runtime_build_dir).resolve() if runtime_build_dir else root/'runtime_build'
+            asset_file=build/'assets.private.json'
+            if resume and not asset_file.is_file():
+                raise ValueError('Resume requires the original committed QC runtime build')
+            qc_assets=json.loads(asset_file.read_text()) if asset_file.is_file() else build_preprocessing_runtime(
+                str(prefix),str(build),cpu_affinity=cpus[:1],
+                host_memory_limit_gib=4,host_memory_reserve_gib=host_memory_reserve_gib)
+            if (qc_assets.get('condaPrefix')!=str(prefix)
+                    or qc_assets.get('source_sha256')!=digest(runtime_source)
+                    or qc_assets.get('builder_sha256')!=digest(runtime_helper)
+                    or Path(qc_assets.get('java','')).resolve()!=(prefix/'bin'/'java').resolve()
+                    or Path(qc_assets.get('gatkJar','')).resolve()!=jars[0].resolve()):
+                raise ValueError('QC runtime build is bound to different Conda or packaged sources')
+            # Check committed-build integrity before admitting any scientific stage.
+            qc_argv(qc_assets,'CollectMultipleMetrics','--help')
+            binaries['qc_build_receipt']=bound(qc_assets['build_receipt'])
+            binaries['qc_asset_record']=bound(asset_file)
+            for key,expected in qc_assets['sha256'].items():
+                if digest(qc_assets[key])!=expected:
+                    raise ValueError('QC runtime build artifact SHA changed')
+                binaries['qc_'+key]=bound(qc_assets[key])
+            source_files += [runtime_helper,runtime_source]
         gpu_assets=None
         if pairhmm_backend=='cuda':
             if not gpu_uuid or not re.fullmatch(r'GPU-[0-9a-fA-F-]{36}',gpu_uuid) or gpu_memory_limit_gib>18:
@@ -384,12 +486,16 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
                 binaries['gpu_'+key]=bound(gpu_assets[key])
             source_files += [Path(__file__).with_name('build_preprocessing_gpu.py'),Path(__file__).with_name('_preprocessing_gpu')/'source_manifest.json',Path(__file__).with_name('_preprocessing_gpu')/'evidence.py']
         config=dict(schema=1,sample_id=sample_id,inputs=inputs,tools=binaries,
-            source_sha256={p.name:digest(p) for p in source_files},cpu_affinity=cpus,fastp_threads=cleaning_threads,
+            source_sha256={p.relative_to(Path(__file__).parent).as_posix():digest(p) for p in source_files},cpu_affinity=cpus,fastp_threads=cleaning_threads,
             host_memory_limit_gib=budget,host_memory_reserve_gib=host_memory_reserve_gib,
             aligner=aligner,index_prefix=str(idx),pairhmm_backend=pairhmm_backend,
             gpu_uuid=gpu_uuid,gpu_memory_limit_gib=gpu_memory_limit_gib,
             gpu_build_dir=str(Path(gpu_build_dir).resolve()) if gpu_build_dir else None,
             intervals=selected_intervals,qc_mode=qc_mode,bqsr_input=bqsr_input,
+            qc_exit_fix=qc_exit_fix,
+            runtime_build_dir=str(Path(runtime_build_dir).resolve()) if runtime_build_dir else None,
+            bqsr_mode=bqsr_mode,selected_bqsr_mode=selected_bqsr_mode,bqsr_workers=training_workers,
+            bqsr_build_dir=str(Path(bqsr_build_dir).resolve()) if bqsr_build_dir else None,
             calling_scope='selected_intervals' if selected_intervals else 'complete_reference',
             plink_scope='autosomal_biallelic_hard_calls',input_content_SHA_assessed=False)
         run=_Runner(root,prefix,config,resume)
@@ -398,6 +504,12 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         (root/'tmp').mkdir(exist_ok=True)
         files=root/'files';files.mkdir(exist_ok=True)
         gatk=run.gatk
+        def qc(name,*args):
+            original=gatk(name,*args)
+            if qc_assets is None:return original
+            import shlex
+            from ._preprocessing_runtime import qc_argv
+            return qc_argv(qc_assets,name,*original[4:],java_options=shlex.split(original[2]))
         clean1,clean2=files/'clean_1.fq.gz',files/'clean_2.fq.gz'
         if shutil.disk_usage(root).free < sum(Path(p).stat().st_size for p in reads)*8+10*2**30:
             raise OSError('Insufficient free storage for conservative FASTQ/intermediate staging reserve')
@@ -421,14 +533,27 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         sorted_bam,marked,cram,recal,table=[files/name for name in ('sorted.bam','marked.bam','marked.cram','recalibrated.bam','recal.table')]
         rg='@RG\\tID:'+sample_id+'\\tSM:'+sample_id+'\\tLB:'+sample_id+'\\tPL:ILLUMINA'
         mapping=[str(align),'mem','-K','10000000','-M','-Y','-t',str(max(1,threads-1)),'-R',rg,str(idx),str(clean1),str(clean2)]
-        sorting=[run.tool('samtools'),'sort','-@','1','-m','512M','-O','BAM','--write-index','--reference',str(reference),'-o',str(sorted_bam)+'##idx##'+str(sorted_bam)+'.bai','-']
+        # samtools 1.10 derives spill names from -o unless -T is explicit.
+        # The indexed-output separator must never enter a temporary BAM name.
+        sorting=[run.tool('samtools'),'sort','-@','1','-m','512M','-T',str(root/'tmp'/'sort'),'-O','BAM','--write-index','--reference',str(reference),'-o',str(sorted_bam)+'##idx##'+str(sorted_bam)+'.bai','-']
         run.stage('mapping_sort_index',[['/bin/bash','-c','set -o pipefail\n'+shlex.join(mapping)+' | '+shlex.join(sorting)]],[sorted_bam,Path(str(sorted_bam)+'.bai')],32 if aligner=='bwa-mem2' else 8)
         run.stage('markdup',[[run.tool('sambamba'),'markdup','-t',str(threads),'--sort-buffer-size=6144','--tmpdir='+str(root/'tmp'),str(sorted_bam),str(marked)]],[marked],4)
         run.stage('cram',[[run.tool('samtools'),'view','-@',str(max(0,threads-1)),'-h','-O','CRAM','--write-index','--no-PG','--reference',str(reference),'-o',str(cram)+'##idx##'+str(cram)+'.crai',str(marked)]],[cram,Path(str(cram)+'.crai')],2)
-        cmd=gatk('BaseRecalibrator','-R',reference,'-I',cram,'-O',table)
-        for site in sites:cmd+=['--known-sites',str(site)]
-        run.stage('BaseRecalibrator',[cmd],[table],8)
-        run.stage('ApplyBQSR',[gatk('ApplyBQSR','-R',reference,'-I',cram,'--bqsr-recal-file',table,'-O',recal,'--create-output-bam-index','false')],[recal],8)
+        if bqsr_assets is None:
+            cmd=gatk('BaseRecalibrator','-R',reference,'-I',cram,'-O',table)
+            for site in sites:cmd+=['--known-sites',str(site)]
+            run.stage('BaseRecalibrator',[cmd],[table],8)
+            apply_input=cram
+        else:
+            from .build_preprocessing_bqsr import bqsr_training_argv
+            apply_input=files/'canonical_bqsr.bam'
+            bqsr_audit=root/'bqsr_training.private.json'
+            cmd=bqsr_training_argv(bqsr_assets,input_cram=cram,reference_fasta=reference,known_sites=sites,
+                recalibration_table=table,canonical_bam=apply_input,audit_json=bqsr_audit,
+                temporary_directory=root/'tmp',cpu_threads=threads,heap_gib=4,
+                training_workers=training_workers,queue_capacity=min(32,256//training_workers))
+            run.stage('BaseRecalibrator',[cmd],[table,apply_input,bqsr_audit],8)
+        run.stage('ApplyBQSR',[gatk('ApplyBQSR','-R',reference,'-I',apply_input,'--bqsr-recal-file',table,'-O',recal,'--create-output-bam-index','false')],[recal],8)
         run.stage('recal_index',[[run.tool('samtools'),'quickcheck','-v',str(recal)],[run.tool('samtools'),'index','-@',str(max(0,threads-1)),str(recal),str(recal)+'.bai']],[Path(str(recal)+'.bai')],1)
         region_args=[item for region in selected_intervals for item in ('-L',region)]
         gvcf=files/'sample.g.vcf.gz'
@@ -461,11 +586,11 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         run.stage('wgs_metrics',[gatk('CollectWgsMetrics','-R',reference,'-I',recal,'-O',wgs,*wgsargs)],[wgs],4)
         if qc_mode=='shared':
             q=files/'qc'
-            qcoutputs=[Path(str(q)+x) for x in ('.alignment_summary_metrics','.insert_size_metrics','.insert_size_histogram.pdf')]
-            run.stage('alignment_insert_metrics',[gatk('CollectMultipleMetrics','-R',reference,'-I',recal,'-O',q,'--PROGRAM','null','--PROGRAM','CollectAlignmentSummaryMetrics','--PROGRAM','CollectInsertSizeMetrics')],qcoutputs,4)
+            qcoutputs=[Path(str(q)+x) for x in ('.alignment_summary_metrics','.insert_size_metrics','.insert_size_histogram.pdf','.read_length_histogram.pdf')]
+            run.stage('alignment_insert_metrics',[qc('CollectMultipleMetrics','-R',reference,'-I',recal,'-O',q,'--PROGRAM','null','--PROGRAM','CollectAlignmentSummaryMetrics','--PROGRAM','CollectInsertSizeMetrics')],qcoutputs,4)
         else:
             qcoutputs=[files/'alignment_metrics.txt',files/'insert_metrics.txt',files/'insert_metrics.pdf']
-            run.stage('alignment_insert_metrics',[gatk('CollectAlignmentSummaryMetrics','-R',reference,'-I',recal,'-O',qcoutputs[0]),gatk('CollectInsertSizeMetrics','-I',recal,'-O',qcoutputs[1],'-H',qcoutputs[2])],qcoutputs,4)
+            run.stage('alignment_insert_metrics',[qc('CollectAlignmentSummaryMetrics','-R',reference,'-I',recal,'-O',qcoutputs[0]),qc('CollectInsertSizeMetrics','-I',recal,'-O',qcoutputs[1],'-H',qcoutputs[2])],qcoutputs,4)
         raw,vcf=files/'genotyped.vcf.gz',files/'normalized.vcf.gz'
         run.stage('genotype',[gatk('GenotypeGVCFs','-R',reference,'-V',gvcf,'-O',raw,*region_args)],[raw,Path(str(raw)+'.tbi')],8)
         run.stage('normalize',[[run.tool('bcftools'),'norm','-f',str(reference),'-m','-any','--threads',str(max(0,threads-1)),str(raw),'-Oz','-o',str(vcf)],[run.tool('bcftools'),'index','-t',str(vcf)]],[vcf,Path(str(vcf)+'.tbi')],2)
@@ -491,7 +616,7 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
         for p,expected in inputs.items():
             if identity(p)!=expected:raise RuntimeError('Bound input changed during the run')
         for p in source_files:
-            if digest(p)!=config['source_sha256'][p.name]:raise RuntimeError('Pipeline source changed during the run')
+            if digest(p)!=config['source_sha256'][p.relative_to(Path(__file__).parent).as_posix()]:raise RuntimeError('Pipeline source changed during the run')
         for value in binaries.values():
             if bound(value['path'])!=value:raise RuntimeError('Bound tool changed during the run')
         gpu_work=False
@@ -505,6 +630,7 @@ def single_subj_preprocessing(read1, read2, reference_fasta, known_sites, output
             final_output_bindings=[bound(gvcf),bound(vcf),*verification['files']],
             total_wall_seconds=time.monotonic()-started,final_PLINK_readback_seconds=time.monotonic()-conversion_started,
             actual_GPU_work=gpu_work,GPU_evidence=gpu_summary,pairhmm_backend=pairhmm_backend,
+            bqsr_mode=selected_bqsr_mode,bqsr_workers=training_workers,
             functional_annotations_created=False,association_performed=False,
             full_reference_calling_completed=not bool(selected_intervals))
         atomic(complete,result)

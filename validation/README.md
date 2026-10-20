@@ -4,7 +4,7 @@
 
 | 功能 | 验证记录 | 当前证据 |
 | --- | --- | --- |
-| 单样本原始预处理 | [单样本说明](../docs/single_subj_preprocessing.md#9-精度耗时与内存已完成范围)、[匿名汇总](single_subj_preprocessing_20261020.anonymous.json) | 真实十万对 FASTQ 前缀的三路完整流程、局部 calling 全字段及 PLINK 回读；完整原始 WGS 和长期稳定性未验收 |
+| 单样本原始预处理 | [单样本说明](../docs/single_subj_preprocessing.md#9-精度耗时与内存已完成范围)、[最新 10M 对照](single_subj_preprocessing_10M_20261020.anonymous.json) | 真实 10M 对 FASTQ、8.8 Mb 调用的两路完整 API，五组全记录、BQSR 五表、VCF 及独立 PLINK 完整回读；QC 等待修复、有限内存窗口与额外验收耗时分别记录。完整原始 WGS 和长期稳定性未验收 |
 | 数据准备 | [数据准备：验证与 benchmark](../docs/wgs_data_preparation.md#验证与-benchmark) | 原始 PLINK 的局部真实转换、独立 BED 回读、注释转换和 1 / 8 CPU 对照 |
 | 二分类 WGS | [二分类：验证与 benchmark](../docs/wgs_binary.md#验证与-benchmark) | 最新六表型同输入官方统计核心对照、128 表型有限端到端与 CSV 核查；唯一官方 Single 求根回退差异另列。历史双 GPU / 两种缺失策略的入口验证保留各自范围 |
 | 连续表型 WGS | [连续表型：验证与 benchmark](../docs/wgs_continuous.md#验证与-benchmark) | 成熟关联内核的真实局部对照；独立连续入口的样本、字段、排序和恢复检查另行区分 |
@@ -12,6 +12,7 @@
 
 ## 精度
 
+- 单样本原始预处理固定 FASTQ 顺序、参考、RG、已知位点、筛选和工具配置，完整比较 BQSR 表、SAM 核心字段与 typed AUX、gVCF/VCF 字段和 PLINK 基因型。原 CPU 输出是实现对照，不是生物学真值集；读段前缀和局部调用区间的通过不等于完整深度 WGS 验收。
 - 遗传数据准备核对完整样本顺序、等位基因方向、基因型状态、整数计数和注释；数值压缩不能改变这些内容。
 - 关联精度对照固定样本、表型处理、协变量、零模型、GRM、遗传方向、注释与 mask。报告全部有限 P 值及任一路径 `P<0.05` 的显著并集，目标为 `|Δ(−log10 P)|<0.001`。
 - 极小概率使用有限的原生 log P 比较。没有可验证 log P 的下溢零值单独报告，不用人为 floor 算作通过。

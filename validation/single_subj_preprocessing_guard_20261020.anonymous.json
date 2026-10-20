@@ -1,0 +1,63 @@
+{
+  "status": "complete_three_actual_new_guard_regressions",
+  "scientific_result": false,
+  "complete_PSS_includes_probe_observer": true,
+  "mapping_activity_window_seconds": 15,
+  "bounded_retry_deadline_seconds": 2,
+  "proc_read_not_interruptible_wall_deadline": true,
+  "CPU_count": 9,
+  "task_PSS_budget_GiB": 64,
+  "reserve_GiB": 10,
+  "guard_source_sha256": {
+    "fudan_wgs_toolkit/phewas_resources.py": "decc1ac3fd8c304647b5a33fef10ee1ed23d0e221d5907ba935e59266d3a1fd6",
+    "fudan_wgs_toolkit/single_preprocessing.py": "634ad2d45e569f7957bfb4998952d161c56adcd9fc7408dedf1dfdb128e56aff"
+  },
+  "runs": [
+    {
+      "complete_PSS_samples": 232,
+      "complete_task_PSS_peak_bytes": 5963849728,
+      "max_sample_wall_seconds": 0.2188530880957842,
+      "transient_endpoint_retries": 24,
+      "recovered_endpoints": 18,
+      "incomplete_endpoint_count": 24,
+      "first_sixteen_diagnostic_categories": {
+        "smaps_rollup:FileNotFoundError:endpoint_unavailable": 16,
+        "smaps:ValueError:invalid or overlapping smaps VMA addresses": 16
+      },
+      "owned_session_drained": true,
+      "watchdog_SIGTERM_dispatched_seconds": 15.000645986758173,
+      "intentional_probe_exit": -15
+    },
+    {
+      "complete_PSS_samples": 249,
+      "complete_task_PSS_peak_bytes": 6020133888,
+      "max_sample_wall_seconds": 0.1283156699500978,
+      "transient_endpoint_retries": 6,
+      "recovered_endpoints": 4,
+      "incomplete_endpoint_count": 6,
+      "first_sixteen_diagnostic_categories": {
+        "smaps_rollup:FileNotFoundError:endpoint_unavailable": 6,
+        "smaps:ValueError:invalid or overlapping smaps VMA addresses": 6
+      },
+      "owned_session_drained": true,
+      "watchdog_SIGTERM_dispatched_seconds": 15.000488282646984,
+      "intentional_probe_exit": -15
+    },
+    {
+      "complete_PSS_samples": 246,
+      "complete_task_PSS_peak_bytes": 6014047232,
+      "max_sample_wall_seconds": 0.3623734060674906,
+      "transient_endpoint_retries": 22,
+      "recovered_endpoints": 13,
+      "incomplete_endpoint_count": 22,
+      "first_sixteen_diagnostic_categories": {
+        "smaps_rollup:FileNotFoundError:endpoint_unavailable": 16,
+        "smaps:ValueError:invalid or overlapping smaps VMA addresses": 16
+      },
+      "owned_session_drained": true,
+      "watchdog_SIGTERM_dispatched_seconds": 15.000466897152364,
+      "intentional_probe_exit": -15
+    }
+  ],
+  "private_complete_receipt_sha256": "f771bbfef30f9c1dfab7437545542e15a158e79dca838362f4972d82a8b921a1"
+}

@@ -6,7 +6,7 @@ Fudan WGS Toolkit 使用 PyTorch GPU 完成多个二分类或连续表型的全�
 
 | 功能 | Python 入口 | 输入与默认行为 | 完整说明 |
 | --- | --- | --- | --- |
-| 单人原始 WGS 预处理 | `single_subj_preprocessing` | 一对 FASTQ、参考与三份已知位点 VCF，生成 BAM/CRAM、gVCF、VCF 和逐染色体 PLINK；默认原 GKL，可选项目 CUDA PairHMM | [单人预处理](docs/single_subj_preprocessing.md) |
+| 单人原始 WGS 预处理 | `single_subj_preprocessing` | 一对 FASTQ、参考与三份已知位点 VCF，生成 BAM/CRAM、gVCF、VCF 和逐染色体 PLINK；自动选择原 BQSR 引擎并行训练，默认原 GKL，可选项目 CUDA PairHMM | [单人预处理](docs/single_subj_preprocessing.md) |
 | 数据准备 | `prepare_WGS_data` | 原始 PLINK BED/BIM/FAM 与独立功能注释，生成有校验和的遗传目录 | [数据准备](docs/wgs_data_preparation.md) |
 | 二分类 WGS | `run_WGS_all_binanry` | 至少两个 0/1/缺失表型；默认缺失标签填为 0，可选各列 available 样本 | [二分类分析](docs/wgs_binary.md) |
 | 连续表型 WGS | `run_WGS_continuous` | 至少两个连续数值表型；默认逐列均值填补，可选各列 available 样本 | [连续表型分析](docs/wgs_continuous.md) |
@@ -42,7 +42,7 @@ conda activate fudan-wgs-toolkit
 
 Conda 环境包含 CUDA 11.8、PyTorch 2.5.1 和本包的 editable 安装。数据准备在 CPU 执行，关联矩阵计算优先使用原生 TF32/FP32；零模型和稳定概率计算保留各自所需精度。
 
-原始 FASTQ 预处理使用独立的 [Conda 锁文件](environments/preprocessing-linux-64.explicit.txt)，包含 fastp、BWA、samtools、GATK、PLINK、Java、R 和 C++/CUDA 编译器；不需要另装 Docker 或 Parabricks，也不需要导入 PyTorch。按[预处理文档](docs/single_subj_preprocessing.md)安装和调用。可选 GPU PairHMM 使用 FP32，稀疏真实工作集的完整 HC 仍以原 GKL 更快，因此 GPU 后端需要显式选择。
+原始 FASTQ 预处理使用独立的 [Conda 锁文件](environments/preprocessing-linux-64.explicit.txt)，包含 fastp、BWA、samtools、GATK、PLINK、Java、R 和 C++/CUDA 编译器；不需要另装 Docker 或 Parabricks，也不需要导入 PyTorch。按[预处理文档](docs/single_subj_preprocessing.md)安装和调用。默认在至少 4 核的有效 CPU 预算内并行执行原 BQSR 引擎和位点读取，异步暂存全记录；原 QC 正常返回后直接结束 JVM。有效 CPU 数结合请求、亲和性和有限 quota 确定，不是操作系统线程数上限。可选 GPU PairHMM 使用 FP32，稀疏真实工作集的完整 HC 仍以原 GKL 更快，因此 GPU 后端需要显式选择。
 
 ## 如何开始
 

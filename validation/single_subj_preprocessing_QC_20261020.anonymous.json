@@ -1,0 +1,221 @@
+{
+  "schema": "QC-runtime-exit-comparison-anonymous-v1",
+  "status": "complete_real_component_not_whole_WGS",
+  "date": "2026-10-20",
+  "input_scope": {
+    "origin": "same completed post-BQSR BAM from a real 100000-paired-FASTQ prefix",
+    "same_BAM_reference_and_GATK_jar": true,
+    "whole_WGS_processed": false,
+    "biological_truth_accuracy_assessed": false
+  },
+  "comparison": {
+    "only_changed_component": "project-written successful-CLI-exit adapter after original GATK mainEntry returns",
+    "original_GATK_and_environment_modified": false,
+    "scientific_QC_options_changed": false,
+    "CollectMultipleMetrics_programs": [
+      "CollectAlignmentSummaryMetrics",
+      "CollectInsertSizeMetrics"
+    ],
+    "both_PDFs_generated": [
+      "insert_size_histogram.pdf",
+      "read_length_histogram.pdf"
+    ],
+    "interleaved_pair_order": [
+      "original/adapter",
+      "adapter/original",
+      "original/adapter"
+    ],
+    "paired_repeats": 3,
+    "warmup_runs": 0
+  },
+  "resources": {
+    "CPU_count": 3,
+    "task_host_budget_GiB": 16,
+    "live_reserve_GiB": 10,
+    "GPU_used": false,
+    "shared_node_not_exclusive": true,
+    "sampled_PSS_is_not_exact_peak": true,
+    "long_duration_memory_stability_assessed": false,
+    "baseline_maximum_sampled_process_PSS_bytes": 1691883520,
+    "adapter_maximum_sampled_process_PSS_bytes": 1806564352,
+    "first_baseline_includes_one_diagnostic_jstack_attach": true,
+    "diagnostic_jstack_memory_not_included_in_stage_process_tree_peak": true
+  },
+  "timing_scope": "Original GATK CLI vs project adapter CLI;stage includes the same resource observer and output hashes;normal GATK scientific completion and R plots retained;build and scientific validation reported separately;Picard done timestamp has 1-second resolution",
+  "runs": [
+    {
+      "repeat": 1,
+      "mode": "baseline",
+      "stage": "pair1_baseline",
+      "receipt_sha256": "67a5c2861eea39924dcdbc3a098049049aa082797eaad0779729aa3a4540dd00",
+      "wall_seconds": 78.63043059781194,
+      "command_and_observer_seconds": 78.62880150508136,
+      "peak_sampled_pss_bytes": 1591131136,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 15.600000000000001,
+      "last_done_to_stage_commit_seconds": 61.002856,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    },
+    {
+      "repeat": 1,
+      "mode": "adapter",
+      "stage": "pair1_adapter",
+      "receipt_sha256": "faaabbb27541ae6ffb920f61cb42221ef977fb0ef0bade362440fc220dd22ce3",
+      "wall_seconds": 17.510245450772345,
+      "command_and_observer_seconds": 17.50881545105949,
+      "peak_sampled_pss_bytes": 1652758528,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 15.0,
+      "last_done_to_stage_commit_seconds": 0.625366,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    },
+    {
+      "repeat": 2,
+      "mode": "adapter",
+      "stage": "pair2_adapter",
+      "receipt_sha256": "aad5889b6881e5aa664b3940e9cd31f959f9297c645d5efecd038b689cf6d244",
+      "wall_seconds": 16.47884629201144,
+      "command_and_observer_seconds": 16.47745121177286,
+      "peak_sampled_pss_bytes": 1806564352,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 14.399999999999999,
+      "last_done_to_stage_commit_seconds": 1.122968,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    },
+    {
+      "repeat": 2,
+      "mode": "baseline",
+      "stage": "pair2_baseline",
+      "receipt_sha256": "65e3ed4b74b5ec80be93fba71cdfefbc74d6bd3a42527f0fa62c9ac82adf0d75",
+      "wall_seconds": 76.69489183789119,
+      "command_and_observer_seconds": 76.69342803396285,
+      "peak_sampled_pss_bytes": 1613370368,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 15.0,
+      "last_done_to_stage_commit_seconds": 60.831375,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    },
+    {
+      "repeat": 3,
+      "mode": "baseline",
+      "stage": "pair3_baseline",
+      "receipt_sha256": "84ae9fccf597119b9f600f1d27050ad0e67908018cf9975355a3ca632d09d2d2",
+      "wall_seconds": 78.73061584169045,
+      "command_and_observer_seconds": 78.72886335290968,
+      "peak_sampled_pss_bytes": 1691883520,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 15.600000000000001,
+      "last_done_to_stage_commit_seconds": 60.578533,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    },
+    {
+      "repeat": 3,
+      "mode": "adapter",
+      "stage": "pair3_adapter",
+      "receipt_sha256": "767e9202072ef5262c7a549a3675a69f35a2e191c453627ba64c2053da888366",
+      "wall_seconds": 17.71231015585363,
+      "command_and_observer_seconds": 17.71087790466845,
+      "peak_sampled_pss_bytes": 1747073024,
+      "exit_codes": [
+        0
+      ],
+      "picard_reported_elapsed_seconds": 15.0,
+      "last_done_to_stage_commit_seconds": 0.305166,
+      "done_timestamp_resolution_seconds": 1,
+      "Rscript_mentions": 3,
+      "PDFs_nonempty": true,
+      "PDF_count": 2
+    }
+  ],
+  "all_QC_table_headers_values_and_histogram_bins_identical": true,
+  "all_expected_PDFs_present_and_have_PDF_headers": true,
+  "PDF_byte_identity_assessed": false,
+  "baseline_median_wall_seconds": 78.63043059781194,
+  "adapter_median_wall_seconds": 17.510245450772345,
+  "speedup": 4.490538457548788,
+  "total_experiment_seconds_including_compile_and_full_validation": 289.04828204913065,
+  "runtime_build": {
+    "status": "compiled_not_scientific_validation",
+    "build_receipt_sha256": "08634705ee885b922d2a20615644df6e9f8d985b291cefe205ad6e78f4ad638b",
+    "stages": [
+      {
+        "stage": "javac",
+        "exit_codes": [
+          0
+        ],
+        "wall_seconds": 0.7818658910691738,
+        "peak_sampled_pss_bytes": 135085056
+      },
+      {
+        "stage": "jar",
+        "exit_codes": [
+          0
+        ],
+        "wall_seconds": 0.260526608210057,
+        "peak_sampled_pss_bytes": 16600064
+      }
+    ],
+    "artifacts_sha256": {
+      "runtimeJar": "f18d1b4c2ad805e4f139dab5716b67968a2e7ac0b7bb055359ca434e42d0b250",
+      "gatkJar": "63f0b0d7ed4ce61d8c61527f8af24a93ef7f16b355dff9334b37eff7a644f322",
+      "java": "02e0f01f3472e7589ec7a036c7791234ff27e5f71442b7856f8e9cb7dd6576bc"
+    },
+    "Conda_package_records_unchanged": true
+  },
+  "source_sha256": {
+    "project_QC_runtime_helper": "032c062e40e12bf31ee995248a42c982b36e2eb872750d856d269b9ad7da55ff",
+    "project_Java_entry": "0edc21db32340eab9c4f2cb9696bfaf607b04ce643a6e33cb7845ec9d2714778",
+    "frozen_experiment_driver": "360883fded6a936d7b13f54c01008b0698e2fb0a626bbaa2f9c2e8a5194dec76",
+    "existing_stage_and_resource_runner": "e6b40cb4d274c2ada745c2fdf70629e639c26a611c21faffe3a6db5472a746b9"
+  },
+  "mechanism_evidence": {
+    "actual_same_process_jstack_collected": true,
+    "ProcessExecutor_Thread_present": true,
+    "thread_header_marks_daemon": false,
+    "thread_state": "TIMED_WAITING (parking)",
+    "stack_chain": [
+      "SynchronousQueue.poll",
+      "ThreadPoolExecutor.getTask",
+      "ThreadPoolExecutor.runWorker"
+    ],
+    "source_explanation": "HTSJDK 2.24.0 cached non-daemon stderr-reader pool remains after original Picard completion;GATK4.2.0.0 success mainEntry returns without System.exit(0);the adapter requests normal JVM exit only after that return",
+    "jstack_sha256": "92b86f445eba672803ace99b3a913f97ad31175286b0ed986fc16928c6569a16"
+  },
+  "full_complete_receipt_sha256": "d1d33418b56064144e46fb67f1278a8949e5a468c62e351d5d74a2f40abad096",
+  "all_scientific_stage_exit_codes_zero": true,
+  "launcher_exit_code": 0,
+  "original_sources": [
+    "https://github.com/samtools/htsjdk/blob/2.24.0/src/main/java/htsjdk/samtools/util/ProcessExecutor.java#L52-L57",
+    "https://github.com/broadinstitute/picard/blob/2.25.0/src/main/java/picard/util/RExecutor.java#L78",
+    "https://github.com/broadinstitute/gatk/blob/4.2.0.0/src/main/java/org/broadinstitute/hellbender/Main.java#L198-L205",
+    "https://github.com/broadinstitute/gatk/blob/4.2.0.0/src/main/java/org/broadinstitute/hellbender/cmdline/PicardCommandLineProgramExecutor.java#L36-L41"
+  ],
+  "privacy": {
+    "real_identifiers_paths_server_connections_coordinates_and_sequence_data_included": false
+  }
+}

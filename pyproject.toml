@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fudan-wgs-toolkit"
-version = "0.11.0"
+version = "0.12.0"
 description = "Fudan WGS Toolkit: Python GPU association analysis for binary or continuous phenotypes"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-only"}
@@ -27,4 +27,6 @@ single_subj_preprocessing = "fudan_wgs_toolkit.single_preprocessing:main"
 include = ["fudan_wgs_toolkit*"]
 
 [tool.setuptools.package-data]
+"fudan_wgs_toolkit._preprocessing_runtime_assets" = ["*.java"]
+"fudan_wgs_toolkit._preprocessing_bqsr" = ["assets/**/*.java", "source_manifest.json", "SOURCES.md", "README.zh.md"]
 "fudan_wgs_toolkit._preprocessing_gpu" = ["assets/**/*", "*.json", "SOURCES.md", "THIRD_PARTY_NOTICES.md"]
