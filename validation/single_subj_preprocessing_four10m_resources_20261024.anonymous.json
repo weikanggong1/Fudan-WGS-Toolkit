@@ -1,0 +1,469 @@
+{
+  "schema": "anonymous-four-case-resource-summary-v1",
+  "status": "CLOSED_REAL_RESOURCE_EVIDENCE_WITH_EXPLICIT_UNVERIFIED_WINDOWS",
+  "source_report_sha256": "bdb4995a42f179fdae2ebb5e7aa150ad1fd15041d590df08537a7391d2f43f41",
+  "source_envelope_sha256": "b0df0e8fc4d2c7b67f78c7802bd774695cda580305c5377f82674dd4dbda8f00",
+  "scope": {
+    "anonymous_cases": 4,
+    "read_pairs_per_case": 10000000,
+    "full_reference": true,
+    "full_depth_WGS": false,
+    "CPU_per_case": 8,
+    "HC_JVMs_per_case": 2
+  },
+  "sampled_resources": {
+    "observation_seconds": 8424.313479565084,
+    "cycles": 4211,
+    "nominal_cadence_seconds": 2,
+    "valid_aggregate_PSS_cycles": 4200,
+    "aggregate_PSS_unknown_cycles": 11,
+    "science_plus_coordinator_PSS_GiB": {
+      "minimum": 0.04546642303466797,
+      "median": 23.806668281555176,
+      "p95": 29.559497833251953,
+      "peak": 31.604546546936035
+    },
+    "science_plus_coordinator_budget_GiB": 120.0,
+    "whole_project_reserved_GiB": 128,
+    "known_aggregate_budget_exceeding_samples": 0,
+    "per_case": [
+      {
+        "anonymous_case": 1,
+        "task_budget_GiB": 28.0,
+        "valid_PSS_samples": 3994,
+        "PSS_GiB": {
+          "minimum": 0.02648639678955078,
+          "median": 5.953965187072754,
+          "p95": 7.3023731231689455,
+          "peak": 7.616729736328125
+        },
+        "known_budget_exceeding_samples": 0
+      },
+      {
+        "anonymous_case": 2,
+        "task_budget_GiB": 28.0,
+        "valid_PSS_samples": 4120,
+        "PSS_GiB": {
+          "minimum": 0.023771286010742188,
+          "median": 5.958094596862793,
+          "p95": 7.483358764648438,
+          "peak": 8.174789428710938
+        },
+        "known_budget_exceeding_samples": 0
+      },
+      {
+        "anonymous_case": 3,
+        "task_budget_GiB": 28.0,
+        "valid_PSS_samples": 4208,
+        "PSS_GiB": {
+          "minimum": 0.025104522705078125,
+          "median": 5.9312744140625,
+          "p95": 7.354762840270996,
+          "peak": 7.990520477294922
+        },
+        "known_budget_exceeding_samples": 0
+      },
+      {
+        "anonymous_case": 4,
+        "task_budget_GiB": 28.0,
+        "valid_PSS_samples": 4144,
+        "PSS_GiB": {
+          "minimum": 0.02692890167236328,
+          "median": 5.959002494812012,
+          "p95": 7.567425346374511,
+          "peak": 8.334976196289062
+        },
+        "known_budget_exceeding_samples": 0
+      }
+    ],
+    "reserve_GiB": 10.0,
+    "known_headroom_cycles": 4210,
+    "minimum_known_headroom_GiB": 810.3642196655273,
+    "known_reserve_below_threshold_samples": 0,
+    "whole_project_simultaneous_PSS_peak_GiB": null,
+    "independent_observer_peaks_are_not_added": true,
+    "continuous_peak_assessed": false
+  },
+  "thread_affinity": {
+    "covered_samples": 66766,
+    "unknown_samples": 18,
+    "violating_samples": 0
+  },
+  "HC_JVM_trends": [
+    {
+      "anonymous_case": 1,
+      "anonymous_HC_JVM": 1,
+      "observed_seconds": 3689.9999703411013,
+      "valid_PSS_samples": 1846,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.17464351654052734,
+        "median": 2.9554567337036133,
+        "p95": 3.7106332778930664,
+        "peak": 3.771768569946289
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.906764030456543,
+        "median": 2.955540657043457,
+        "p95": 3.7106414794921876,
+        "peak": 3.771768569946289
+      },
+      "time_third_PSS_medians_GiB": [
+        2.9175257682800293,
+        2.9554567337036133,
+        3.614321708679199
+      ],
+      "late_minus_early_PSS_median_GiB": 0.6967959403991699,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 1,
+      "anonymous_HC_JVM": 2,
+      "observed_seconds": 4119.999966775067,
+      "valid_PSS_samples": 2061,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.17150211334228516,
+        "median": 3.2947778701782227,
+        "p95": 4.195052146911621,
+        "peak": 4.2338972091674805
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.926419258117676,
+        "median": 3.294877052307129,
+        "p95": 4.20861415863037,
+        "peak": 4.2338972091674805
+      },
+      "time_third_PSS_medians_GiB": [
+        3.1933412551879883,
+        3.2947778701782227,
+        3.799384117126465
+      ],
+      "late_minus_early_PSS_median_GiB": 0.6060428619384766,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 2,
+      "anonymous_HC_JVM": 3,
+      "observed_seconds": 4177.999979131157,
+      "valid_PSS_samples": 2090,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.29297542572021484,
+        "median": 3.2709522247314453,
+        "p95": 3.8096113204956055,
+        "peak": 3.8523454666137695
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.9163589477539062,
+        "median": 3.2727041244506836,
+        "p95": 3.8127756118774405,
+        "peak": 3.8523454666137695
+      },
+      "time_third_PSS_medians_GiB": [
+        3.198091506958008,
+        3.2709522247314453,
+        3.683624267578125
+      ],
+      "late_minus_early_PSS_median_GiB": 0.4855327606201172,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 2,
+      "anonymous_HC_JVM": 4,
+      "observed_seconds": 3747.9999957941473,
+      "valid_PSS_samples": 1875,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.2990074157714844,
+        "median": 2.9738197326660156,
+        "p95": 3.959316635131836,
+        "peak": 4.412243843078613
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.902698516845703,
+        "median": 2.9739112854003906,
+        "p95": 3.9606449127197267,
+        "peak": 4.412243843078613
+      },
+      "time_third_PSS_medians_GiB": [
+        2.924623489379883,
+        2.9738197326660156,
+        3.679370880126953
+      ],
+      "late_minus_early_PSS_median_GiB": 0.7547473907470703,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 3,
+      "anonymous_HC_JVM": 5,
+      "observed_seconds": 3723.9999790980946,
+      "valid_PSS_samples": 1863,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.25201988220214844,
+        "median": 2.9692115783691406,
+        "p95": 3.5022605895996093,
+        "peak": 4.11016845703125
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.9057207107543945,
+        "median": 2.9693145751953125,
+        "p95": 3.5022674560546876,
+        "peak": 4.11016845703125
+      },
+      "time_third_PSS_medians_GiB": [
+        2.9318981170654297,
+        2.9692115783691406,
+        3.4275054931640625
+      ],
+      "late_minus_early_PSS_median_GiB": 0.4956073760986328,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 3,
+      "anonymous_HC_JVM": 6,
+      "observed_seconds": 4241.999962114962,
+      "valid_PSS_samples": 2122,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.2587461471557617,
+        "median": 3.4669456481933594,
+        "p95": 3.9679718017578125,
+        "peak": 4.03535270690918
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.9128007888793945,
+        "median": 3.4670543670654297,
+        "p95": 3.968214988708496,
+        "peak": 4.03535270690918
+      },
+      "time_third_PSS_medians_GiB": [
+        3.1618213653564453,
+        3.466951370239258,
+        3.8300857543945312
+      ],
+      "late_minus_early_PSS_median_GiB": 0.6682643890380859,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 4,
+      "anonymous_HC_JVM": 7,
+      "observed_seconds": 4189.999959381064,
+      "valid_PSS_samples": 2096,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.13525867462158203,
+        "median": 3.4484996795654297,
+        "p95": 4.463263511657715,
+        "peak": 4.546357154846191
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.9130754470825195,
+        "median": 3.4485836029052734,
+        "p95": 4.464385986328125,
+        "peak": 4.546357154846191
+      },
+      "time_third_PSS_medians_GiB": [
+        3.1925907135009766,
+        3.4484996795654297,
+        4.10114860534668
+      ],
+      "late_minus_early_PSS_median_GiB": 0.9085578918457031,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    },
+    {
+      "anonymous_case": 4,
+      "anonymous_HC_JVM": 8,
+      "observed_seconds": 3761.999966175994,
+      "valid_PSS_samples": 1882,
+      "missing_PSS_values": 0,
+      "PSS_GiB": {
+        "minimum": 0.13268375396728516,
+        "median": 2.974581718444824,
+        "p95": 3.846421241760254,
+        "peak": 3.9158973693847656
+      },
+      "warm_after_30_observed_seconds_PSS_GiB": {
+        "minimum": 2.9042272567749023,
+        "median": 2.9771862030029297,
+        "p95": 3.8522112369537354,
+        "peak": 3.9158973693847656
+      },
+      "time_third_PSS_medians_GiB": [
+        2.917111396789551,
+        2.974581718444824,
+        3.4785146713256836
+      ],
+      "late_minus_early_PSS_median_GiB": 0.5614032745361328,
+      "time_third_FD_medians": [
+        29.0,
+        29.0,
+        29.0
+      ],
+      "observed_thread_count_range": [
+        12.0,
+        12.0
+      ],
+      "stationary_platform_established": false,
+      "equal_work_trend_assessed": false
+    }
+  ],
+  "heap_aggregate": {
+    "cycles": 170,
+    "queries": 527,
+    "valid_snapshots": 526,
+    "optional_failed_queries": 1,
+    "HC_JVMs": 8,
+    "HC_valid_snapshots": 426,
+    "HC_heap_used_peak_range_GiB": [
+      3.2280384059995413,
+      4.196037005633116
+    ],
+    "HC_heap_committed_range_GiB": [
+      7.99072265625,
+      8.0
+    ],
+    "HC_JVMs_late_median_above_early": 6,
+    "distinct_actual_owned_query_waits": 527,
+    "valid_snapshots_require_wait0_and_normal_drain": true,
+    "all_query_exit_codes_zero_assessed": false,
+    "raw_bytes_and_closed_logs_SHA_verified": true,
+    "full21_stage_heap_coverage": false,
+    "matched_original_arm_heap_comparison_assessed": false,
+    "heap_and_PSS_are_not_added": true
+  },
+  "release": {
+    "distinct_exact_identity_probes": 636,
+    "live_same_identities": 0,
+    "unknown_identity_probes": 0,
+    "final_empty_owner_set": true,
+    "observed_identity_release_verified": true,
+    "physical_page_teardown_measured": false,
+    "all_unobserved_short_lived_processes_assessed": false
+  },
+  "prior_failed_heap_observer": {
+    "actual_outer_exit": 1,
+    "business_exit": 1,
+    "durable_queries_valid_optional": [
+      61,
+      61,
+      0
+    ],
+    "returned_queries_valid_optional": [
+      62,
+      61,
+      1
+    ],
+    "uncommitted_returned_endpoint_or_exit_reconstructed": false,
+    "fatal_query_actual_exit": null,
+    "fatal_query_cause": "unknown",
+    "later_success_does_not_erase_previous_failure": true
+  },
+  "heap_sampling_gap": {
+    "between_prior_last_and_replacement_first_committed_cycles_seconds": 1126.5735008716583,
+    "initial_HC_stage_seconds_before_replacement_by_case": [
+      995.5574128627777,
+      918.0212399959564,
+      935.9845359325409,
+      935.3959438800812
+    ],
+    "earlier_valid_HC_heap_snapshots_by_case": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "exact_observer_downtime_or_eligible_JVM_coverage": false,
+    "missing_heap_reconstructed": false
+  },
+  "limitations": {
+    "finite_ancestor_report_count": 0,
+    "cgroup_unverified_cycles": 1,
+    "finite_cgroup_memory_events_delta": null,
+    "no_finite_rows_is_not_zero_event_proof": true,
+    "task_budget_is_not_independent_cgroup_hard_quota": true,
+    "anon_file_shared_PSS_split_assessed": false,
+    "pinned_locked_memory_summary_assessed": false,
+    "equal_work_trends_assessed": false,
+    "observation_time_thirds_are_not_equal_work": true,
+    "warm_observation_age_is_not_scientific_initialization": true,
+    "all_samples_budget_and_thread_coverage_verified": false,
+    "stationary_platform_established": false,
+    "automatic_leak_free_claim": false,
+    "OOM_recovery_assessed": false,
+    "resource_closure_is_not_scientific_precision": true,
+    "private_paths_or_process_identity_included": false,
+    "scientific_result_rows_included": false
+  }
+}

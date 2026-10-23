@@ -1,5 +1,5 @@
 """Fudan WGS Toolkit: preprocessing and GPU association analysis."""
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 __all__ = ["single_subj_preprocessing", "prepare_WGS_data", "generate_simulated_data", "run_WGS_all_binanry", "run_WGS_continuous"]
 

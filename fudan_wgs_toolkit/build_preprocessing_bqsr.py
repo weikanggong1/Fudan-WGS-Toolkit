@@ -127,10 +127,16 @@ def build_preprocessing_bqsr(conda_prefix, build_dir, *, cpu_affinity=None,
 def bqsr_training_argv(assets, *, input_cram, reference_fasta, known_sites,
                       recalibration_table, canonical_bam, audit_json, temporary_directory,
                       cpu_threads=3, heap_gib=4, replay_compression=0,
-                      training_workers=2, queue_capacity=32):
+                      training_workers=2, queue_capacity=32,
+                      gatk_source_patch_assets=None, source_patch_audit_json=None):
     """Return an argv for parallel training/replay; ApplyBQSR is separate.
 
     The original ordered known-sites list and full original CRAM must be used.
+    Optional ``gatk_source_patch_assets`` validates a separate original-GATK
+    source overlay and verifies its classes inside this same training JVM.
+    ``source_patch_audit_json`` defaults beside ``audit_json``; the replay
+    audit and loaded-class audit remain separate. No source patch is applied
+    to the subsequent ApplyBQSR.
     No interval/subsampling/filter-changing arguments are accepted by this plan.
     Output paths must be new. The temporary BAM retains every decoded record,
     including records that the original training predicate excludes.
@@ -193,6 +199,17 @@ def bqsr_training_argv(assets, *, input_cram, reference_fasta, known_sites,
           '--audit-json',str(audit_json),'--replay-compression',str(replay_compression),
           '--training-workers',str(training_workers),'--queue-capacity',str(queue_capacity)]
     for site in known_sites:argv+=['--known-sites',str(site)]
+    if gatk_source_patch_assets is not None:
+        from .build_preprocessing_gatk_sourcepatch import gatk_source_patch_training_argv
+        cp_index=argv.index('-cp')
+        patched_audit=(source_patch_audit_json if source_patch_audit_json is not None
+                       else str(audit_json)+'.sourcepatch.json')
+        return gatk_source_patch_training_argv(gatk_source_patch_assets,argv[cp_index+3:],
+            audit_json=patched_audit,entrypoint='parallel',adapter_jar=assets['adapterJar'],
+            java_options=argv[1+len(defaults):cp_index],
+            conda_prefix=assets['condaPrefix'],gatk_jar=assets['gatkJar'])
+    if source_patch_audit_json is not None:
+        raise ValueError('source_patch_audit_json requires gatk_source_patch_assets')
     return argv
 
 

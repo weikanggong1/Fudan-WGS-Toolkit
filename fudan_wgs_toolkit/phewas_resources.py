@@ -90,27 +90,39 @@ _SMAPS_CAPTURE_CHUNK_BYTES = 1024**2
 
 
 def _capture_smaps(path):
-    """Capture through EOF before parsing; reject, never truncate, large files.
+    """Capture with stable data storage while each proc endpoint is open.
 
-    Fast binary reads reduce time between kernel reads. They do not turn the
-    kernel's endpoint into an atomic address-space snapshot: the same captured
-    bytes still have to pass every strict VMA and counter check below.
+    Allocate 1 MiB plus an EOF probe before opening; on overflow close it,
+    grow geometrically and reread the whole endpoint, up to the original
+    32 MiB cap. Never combine prefixes or cache a buffer between calls.
     """
-    chunks, size = [], 0
-    with path.open("rb", buffering=0) as stream:
-        while True:
-            chunk = stream.read(min(_SMAPS_CAPTURE_CHUNK_BYTES,
-                                    _SMAPS_CAPTURE_LIMIT_BYTES + 1 - size))
-            if not isinstance(chunk, bytes):
-                raise ValueError("invalid smaps capture byte stream")
-            if not chunk:
-                return b"".join(chunks)
-            size += len(chunk)
-            if size > _SMAPS_CAPTURE_LIMIT_BYTES:
-                raise ValueError("smaps capture byte limit exceeded")
-            chunks.append(chunk)
-
-
+    limit = _SMAPS_CAPTURE_LIMIT_BYTES
+    capacity = min(_SMAPS_CAPTURE_CHUNK_BYTES, limit)
+    while True:
+        storage = bytearray(capacity + 1)
+        view = memoryview(storage)
+        size = 0
+        try:
+            with path.open("rb", buffering=0) as stream:
+                while True:
+                    part = view[size:min(size + _SMAPS_CAPTURE_CHUNK_BYTES, capacity + 1)]
+                    try:
+                        count = stream.readinto(part)
+                        if type(count) is not int or not 0 <= count <= len(part):
+                            raise ValueError("invalid smaps capture byte stream")
+                    finally:
+                        part.release()
+                    if count == 0:
+                        return bytes(view[:size])
+                    size += count
+                    if size > capacity:
+                        break
+        finally:
+            view.release()
+            view = storage = part = None
+        if capacity >= limit:
+            raise ValueError("smaps capture byte limit exceeded")
+        capacity = min(capacity * 2, limit)
 def _memory_kib(tail):
     if re.fullmatch(r"\s*[0-9]+\s+kB\s*", tail) is None:
         raise ValueError("memory counter must be nonnegative integer kB")
@@ -205,6 +217,74 @@ def _pss_read_error(source, error):
                 errno=error.errno if isinstance(error, OSError) else None, reason=reason)
 
 
+def _exiting_no_attached_mm(pid, *, proc_root=Path('/proc')):
+    """Conservative procfs classification, never an exit or physical-free proof.
+
+    Linux detaches task->mm before mmput/exit_mmap/filesystem close completes.
+    All predicates below are required. Missing/denied/malformed data remains
+    unknown. Other live threads are deliberately unsupported by this branch.
+    """
+    try:
+        if type(pid) is not int or pid<=0:return None
+        root=proc_root/str(pid)
+        def bounded(path,cap):
+            storage=bytearray(cap+1);view=memoryview(storage);used=0;part=None
+            try:
+                with path.open('rb',buffering=0) as stream:
+                    while used<len(storage):
+                        part=view[used:]
+                        try:count=stream.readinto(part)
+                        finally:part.release();part=None
+                        if type(count) is not int or count<0 or count>len(storage)-used:
+                            raise ValueError('invalid no-mm metadata byte stream')
+                        if count==0:
+                            return bytes(view[:used])
+                        used+=count
+                    raise ValueError('no-mm metadata exceeds bound')
+            finally:
+                if part is not None:part.release()
+                view.release();part=view=storage=None
+        def stat():
+            raw=bounded(root/'stat',16384);fields=raw.rsplit(b')',1)[1].split()
+            if int(raw.split(b'(',1)[0])!=pid or len(fields)<20:raise ValueError('invalid no-mm stat')
+            row=dict(uid=root.stat().st_uid,start_ticks=int(fields[19]),flags=int(fields[6]),num_threads=int(fields[17]),state=fields[0].decode('ascii'))
+            if row['uid']!=os.getuid() or row['start_ticks']<=0 or row['num_threads']!=1:raise ValueError('no-mm identity/threads unsupported')
+            if not row['flags']&0x4 or row['flags']&0x200000:raise ValueError('not exiting userspace task')
+            if row['state']not in ('R','S','D','T','t','W','K','P','I'):raise ValueError('not nonterminal exiting state')
+            return row
+        boot=bounded(proc_root/'sys/kernel/random/boot_id',128).decode('ascii').strip()
+        if re.fullmatch('[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',boot)is None:return None
+        before=stat();tids=sorted(int(q.name)for q in (root/'task').iterdir())
+        if tids!=[pid]:return None
+        raw_status=bounded(root/'status',65536)
+        if not raw_status.endswith(b'\n') or b'\x00'in raw_status:return None
+        status={}
+        for line in raw_status.decode('utf-8').splitlines():
+            key,sep,value=line.partition(':')
+            if not sep or not key or key in status:return None
+            status[key]=value.strip()
+        if int(status.get('Pid','0'))!=pid or int(status.get('Tgid','0'))!=pid or int(status.get('Threads','0'))!=1:return None
+        uids=status.get('Uid','').split()
+        if len(uids)!=4 or any(int(uid)!=before['uid']for uid in uids):return None
+        if any(key.startswith(('Vm','Rss'))or key=='HugetlbPages'for key in status):return None
+        statm=bounded(root/'statm',256).split()
+        if len(statm)!=7 or any(value!=b'0'for value in statm):return None
+        if bounded(root/'smaps',0)!=b'' or bounded(root/'maps',0)!=b'':return None
+        after=stat();tids_after=sorted(int(q.name)for q in (root/'task').iterdir())
+        if bounded(proc_root/'sys/kernel/random/boot_id',128).decode('ascii').strip()!=boot:return None
+        if tids_after!=tids or any(before[k]!=after[k]for k in ('uid','start_ticks','num_threads')):return None
+        # No attached mm says nothing about completion of mmput/kernel teardown.
+        return dict(classification='verified_exiting_no_attached_mm',pid=pid,
+            uid=before['uid'],start_ticks=before['start_ticks'],boot_id=boot,state_before=before['state'],state_after=after['state'],
+            flags_before=before['flags'],flags_after=after['flags'],task_TIDs=tids,
+            stat_num_threads=1,status_Threads=1,status_Vm_Rss_keys=[],statm_fields=[0]*7,
+            smaps_bytes=0,maps_bytes=0,status_sha256=hashlib.sha256(raw_status).hexdigest(),
+            process_exit_confirmed=False,lease_release_authorized=False,
+            physical_teardown_memory_status='unknown_not_measured',PSS_zero_inferred=False)
+    except (OSError,ValueError,IndexError,UnicodeError,TypeError):
+        return None
+
+
 def _process_memory_counters(pid, *, include_pss):
     """Read one endpoint; unavailable PSS remains unknown rather than zero."""
     status = {}
@@ -218,6 +298,7 @@ def _process_memory_counters(pid, *, include_pss):
     rollup = {}
     pss_source,smaps_vma_count = None,None
     pss_read_errors = []
+    exiting_no_attached_mm = None
     if include_pss:
         try:
             rollup = _read_rollup_pss(Path(f"/proc/{pid}/smaps_rollup"))
@@ -232,6 +313,8 @@ def _process_memory_counters(pid, *, include_pss):
                 # Never keep counters accumulated before a partial read or
                 # malformed later VMA; RSS may still be diagnostic status data.
                 rollup = {}
+                if isinstance(error,ValueError) and str(error)=='empty or incomplete smaps memory counters':
+                    exiting_no_attached_mm=_exiting_no_attached_mm(pid)
     return dict(rss_bytes=rollup.get("Rss",status.get("VmRSS")),
         pss_bytes=rollup.get("Pss"), anonymous_rss_bytes=status.get("RssAnon"),
         mapped_file_rss_bytes=status.get("RssFile"), shared_rss_bytes=status.get("RssShmem"),
@@ -239,7 +322,7 @@ def _process_memory_counters(pid, *, include_pss):
         shared_pss_bytes=rollup.get("Pss_Shmem"), swap_bytes=status.get("VmSwap"),
         swap_pss_bytes=rollup.get("SwapPss"),pss_source=pss_source,
         pss_coverage_complete=pss_source is not None,smaps_vma_count=smaps_vma_count,
-        pss_read_errors=pss_read_errors)
+        pss_read_errors=pss_read_errors,exiting_no_attached_mm=exiting_no_attached_mm)
 
 
 def _verified_children(pid, *, strict=False):

@@ -1,0 +1,76 @@
+--- a/src/read.h
++++ b/src/read.h
+@@ -27,6 +27,7 @@
+     int lowQualCount(int qual=20);
+     int length();
+     string toString();
++    void appendToString(string* target);
+     string toStringWithTag(string tag);
+     void resize(int len);
+     void convertPhred64To33();
+--- a/src/read.cpp
++++ b/src/read.cpp
+@@ -1,5 +1,7 @@
+ #include "read.h"
+ #include <sstream>
++#include <cstring>
++#include <stdexcept>
+ #include "util.h"
+ 
+ Read::Read(string name, string seq, string strand, string quality, bool phred64){
+@@ -129,6 +131,42 @@
+ 
+ string Read::toString() {
+ 	return mName + "\n" + mSeq.mStr + "\n" + mStrand + "\n" + mQuality + "\n";
++}
++
++namespace {
++// Compute the complete append length before resizing or writing the target.
++size_t readAppendLength(size_t nameLen, size_t seqLen, size_t strandLen,
++                        size_t qualLen, size_t remaining) {
++    size_t size = 4; // Four original LF separators, including the last one.
++    if (size > remaining)
++        throw std::length_error("FASTQ append exceeds string capacity");
++    const size_t lengths[] = {nameLen, seqLen, strandLen, qualLen};
++    for (size_t length : lengths) {
++        if (length > remaining - size)
++            throw std::length_error("FASTQ append exceeds string capacity");
++        size += length;
++    }
++    return size;
++}
++}
++
++void Read::appendToString(string* target) {
++    // The PE output buffers never alias a read field. Reject invalid new-API
++    // targets before mutation rather than invalidating a source during resize.
++    if (!target || target == &mName || target == &mSeq.mStr ||
++        target == &mStrand || target == &mQuality)
++        throw std::invalid_argument("FASTQ append requires a separate target string");
++    const size_t oldSize = target->size();
++    const size_t totalSize = readAppendLength(mName.size(), mSeq.mStr.size(),
++        mStrand.size(), mQuality.size(), target->max_size() - oldSize);
++    // C++11 string::resize leaves the original target unchanged if allocation
++    // fails. Once this succeeds the following bounded memcpy calls cannot throw.
++    target->resize(oldSize + totalSize);
++    char* dst = &(*target)[oldSize];
++    std::memcpy(dst, mName.data(), mName.size()); dst += mName.size(); *dst++ = '\n';
++    std::memcpy(dst, mSeq.mStr.data(), mSeq.mStr.size()); dst += mSeq.mStr.size(); *dst++ = '\n';
++    std::memcpy(dst, mStrand.data(), mStrand.size()); dst += mStrand.size(); *dst++ = '\n';
++    std::memcpy(dst, mQuality.data(), mQuality.size()); dst += mQuality.size(); *dst = '\n';
+ }
+ 
+ string Read::toStringWithTag(string tag) {
+--- a/src/peprocessor.cpp
++++ b/src/peprocessor.cpp
+@@ -447,8 +447,8 @@
+                 if(mOptions->outputToSTDOUT && !mOptions->merge.enabled) {
+                     singleOutput += r1->toString() + r2->toString();
+                 } else {
+-                    outstr1 += r1->toString();
+-                    outstr2 += r2->toString();
++                    r1->appendToString(&outstr1);
++                    r2->appendToString(&outstr2);
+                 }
+ 
+                 // stats the read after filtering

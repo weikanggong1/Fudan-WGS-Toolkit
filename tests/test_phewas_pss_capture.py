@@ -48,6 +48,11 @@ class PssCaptureTests(unittest.TestCase):
                 if value == b"": state["eof"] = True
                 return value
 
+            def readinto(inner, buffer):
+                count = super().readinto(buffer)
+                if count == 0: state["eof"] = True
+                return count
+
             def close(inner):
                 state["closed"] = True
                 # The parser must consume its captured bytes, not reopen this changed file.
@@ -72,6 +77,11 @@ class PssCaptureTests(unittest.TestCase):
         class ShortReads(io.BytesIO):
             def read(inner, size=-1):
                 return super().read(min(size, 7))
+
+            def readinto(inner, buffer):
+                view = memoryview(buffer)[:7]
+                try: return super().readinto(view)
+                finally: view.release()
 
         def opened(path, *args, **kwargs):
             return ShortReads(self.data) if path == self.path else real_open(path, *args, **kwargs)
@@ -115,6 +125,10 @@ class PssCaptureTests(unittest.TestCase):
             def read(inner, size=-1):
                 if inner.tell(): raise OSError(errno.EIO, "PRIVATE_ADDRESS_AND_CONTENT")
                 return super().read(size)
+
+            def readinto(inner, buffer):
+                if inner.tell(): raise OSError(errno.EIO, "PRIVATE_ADDRESS_AND_CONTENT")
+                return super().readinto(buffer)
 
         def opened(path, *args, **kwargs):
             return Failure(self.data) if path == self.path else real_open(path, *args, **kwargs)

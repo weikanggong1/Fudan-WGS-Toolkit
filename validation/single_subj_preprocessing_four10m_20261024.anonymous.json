@@ -1,0 +1,1600 @@
+{
+  "schema": "anonymous-single-subject-four10m-three-arm-benchmark-v1",
+  "status": "CLOSED_REAL_FOUR_CASE_SCOPED_BENCHMARK",
+  "publication": "validated_source_v0.13.0",
+  "scope": {
+    "cases": 4,
+    "read_pairs_per_case": 10000000,
+    "full_reference": true,
+    "full_depth_WGS": false,
+    "CPU_per_case": 8,
+    "concurrent_cases": 4,
+    "GPU_scientific_work": false,
+    "HC_JVMs_per_case_target_arm": 2
+  },
+  "timing": {
+    "schema": "anonymous_WGS_three_arm_timing_v1",
+    "status": "closed_scientific_timing_not_precision_or_leak_acceptance",
+    "scope": {
+      "paired_cases": 4,
+      "pairs_per_case": 10000000,
+      "reference_scope": "complete_reference",
+      "full_depth_WGS": false,
+      "repetitions_per_arm": 1,
+      "ABBA": false,
+      "randomized": false,
+      "page_cache_reset": false,
+      "scientific_CPUs_per_case": 8,
+      "concurrent_cases": 4,
+      "total_scientific_CPUs": 32,
+      "case_budget_GiB": 28,
+      "shared_project_budget_GiB": 128,
+      "node_reserve_GiB": 10,
+      "budget_kind": "task admission, not node cgroup hard limit",
+      "actual_total_peak_PSS_GiB": null,
+      "GPU_work": false
+    },
+    "arms": {
+      "original_tools": {
+        "per_case": [
+          {
+            "case": "S1",
+            "API_seconds": 12244.817897178931,
+            "whole_child_seconds": 12246.602235052967,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 295.97754239011556,
+              "BaseRecalibrator": 1406.4488410961349,
+              "HaplotypeCaller": 7829.45853783912,
+              "alignment_insert_metrics": 275.1443058731966,
+              "cram": 22.169586352072656,
+              "fastp": 147.48100807983428,
+              "genotype": 300.6485080579296,
+              "mapping_sort_index": 1104.0206358029973,
+              "markdup": 155.3940580219496,
+              "normalize": 3.57184577989392,
+              "plink": 0.8744750060141087,
+              "raw_gzip_integrity": 35.26450311602093,
+              "recal_index": 2.926386739127338,
+              "reference_dictionary": 16.053852963028476,
+              "wgs_metrics": 640.7517858641222
+            },
+            "HC_runtime_inclusive_seconds": 7829.45853783912,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 7829.45853783912,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 12236.185872981558,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 8.63202419737354,
+            "QC_sequential_stage_seconds": 915.8960917373188
+          },
+          {
+            "case": "S2",
+            "API_seconds": 12672.113108086865,
+            "whole_child_seconds": 12673.745729946997,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 294.44714869512245,
+              "BaseRecalibrator": 1449.1586783300154,
+              "HaplotypeCaller": 8140.675152290147,
+              "alignment_insert_metrics": 289.70348069490865,
+              "cram": 22.490479992935434,
+              "fastp": 144.22008938807994,
+              "genotype": 301.03328166296706,
+              "mapping_sort_index": 1160.5951491880696,
+              "markdup": 156.61383523093536,
+              "normalize": 3.595552461920306,
+              "plink": 0.8684072939213365,
+              "raw_gzip_integrity": 34.64764307695441,
+              "recal_index": 2.934660632163286,
+              "reference_dictionary": 15.7781648109667,
+              "wgs_metrics": 646.6631806690712
+            },
+            "HC_runtime_inclusive_seconds": 8140.675152290147,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 8140.675152290147,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 12663.424904418178,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 8.688203668687493,
+            "QC_sequential_stage_seconds": 936.3666613639798
+          },
+          {
+            "case": "S3",
+            "API_seconds": 12697.989302482922,
+            "whole_child_seconds": 12699.763908786,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 299.08344431081787,
+              "BaseRecalibrator": 1426.453044458991,
+              "HaplotypeCaller": 8165.699915454024,
+              "alignment_insert_metrics": 298.33733494300395,
+              "cram": 22.53409180394374,
+              "fastp": 145.351871608058,
+              "genotype": 302.93023185105994,
+              "mapping_sort_index": 1157.6219716330525,
+              "markdup": 158.06790787097998,
+              "normalize": 3.5811208391096443,
+              "plink": 0.8803180539980531,
+              "raw_gzip_integrity": 34.76784185296856,
+              "recal_index": 2.933637893991545,
+              "reference_dictionary": 16.099306775955483,
+              "wgs_metrics": 654.9993089819327
+            },
+            "HC_runtime_inclusive_seconds": 8165.699915454024,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 8165.699915454024,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 12689.341348331887,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 8.647954151034355,
+            "QC_sequential_stage_seconds": 953.3366439249367
+          },
+          {
+            "case": "S4",
+            "API_seconds": 12472.058323371923,
+            "whole_child_seconds": 12473.824833630119,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 298.76691673207097,
+              "BaseRecalibrator": 1404.2663600400556,
+              "HaplotypeCaller": 7985.7335180661175,
+              "alignment_insert_metrics": 276.4520360059105,
+              "cram": 22.35190559201874,
+              "fastp": 148.43620160408318,
+              "genotype": 300.7890568280127,
+              "mapping_sort_index": 1164.3235329550225,
+              "markdup": 156.52642706083134,
+              "normalize": 3.5927544911392033,
+              "plink": 0.8775251740589738,
+              "raw_gzip_integrity": 35.073283108882606,
+              "recal_index": 2.930292674107477,
+              "reference_dictionary": 16.05387954507023,
+              "wgs_metrics": 647.2341832478996
+            },
+            "HC_runtime_inclusive_seconds": 7985.7335180661175,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 7985.7335180661175,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 12463.407873125281,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 8.650450246641412,
+            "QC_sequential_stage_seconds": 923.6862192538101
+          }
+        ],
+        "concurrent_body_wall_seconds": 12701.57367636403,
+        "own_outer_wall_seconds": null,
+        "external_preparation_once_per_arm_seconds": {
+          "software_builds": null,
+          "HC_guard_build": 0.0,
+          "reference_preparation": null
+        },
+        "concurrent_body_plus_all_external_preparation_seconds": null,
+        "API_median_seconds": 12572.085715729394,
+        "HC_runtime_inclusive_median_seconds": 8063.204335178132
+      },
+      "prior_optimized": {
+        "per_case": [
+          {
+            "case": "S1",
+            "API_seconds": 11298.125993108144,
+            "whole_child_seconds": 11299.895307727857,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 270.62435812084004,
+              "BaseRecalibrator": 613.0696514770389,
+              "HaplotypeCaller": 7851.893031046959,
+              "alignment_insert_metrics": 160.9754648071248,
+              "cram": 22.291452360106632,
+              "fastp": 141.7660358331632,
+              "genotype": 296.3040530330036,
+              "mapping_sort_index": 1094.2445997470059,
+              "markdup": 157.25669005606323,
+              "normalize": 3.090839817887172,
+              "plink": 0.8956591750029474,
+              "raw_gzip_integrity": 35.31442271801643,
+              "recal_index": 2.6840990209020674,
+              "reference_validation_reuse": 0.3127674020361155,
+              "wgs_metrics": 632.9029558899347
+            },
+            "HC_runtime_inclusive_seconds": 7851.893031046959,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 7851.893031046959,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 11283.626080505084,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 14.499912603059784,
+            "QC_sequential_stage_seconds": 793.8784206970595
+          },
+          {
+            "case": "S2",
+            "API_seconds": 11566.834221144905,
+            "whole_child_seconds": 11568.456249632174,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 274.2683648071252,
+              "BaseRecalibrator": 590.396644796012,
+              "HaplotypeCaller": 8072.082624464994,
+              "alignment_insert_metrics": 169.3490615261253,
+              "cram": 22.872172432020307,
+              "fastp": 138.40052684908733,
+              "genotype": 296.492929951055,
+              "mapping_sort_index": 1142.1639370948542,
+              "markdup": 156.9820630820468,
+              "normalize": 3.638199853943661,
+              "plink": 1.1398510779254138,
+              "raw_gzip_integrity": 34.48456637887284,
+              "recal_index": 2.965179161168635,
+              "reference_validation_reuse": 0.3156167601700872,
+              "wgs_metrics": 646.259475535946
+            },
+            "HC_runtime_inclusive_seconds": 8072.082624464994,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 8072.082624464994,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 11551.811213771347,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 15.023007373558357,
+            "QC_sequential_stage_seconds": 815.6085370620713
+          },
+          {
+            "case": "S3",
+            "API_seconds": 11808.605403006077,
+            "whole_child_seconds": 11810.361905341037,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 278.5320963258855,
+              "BaseRecalibrator": 599.9645979560446,
+              "HaplotypeCaller": 8287.846235655015,
+              "alignment_insert_metrics": 181.36506998492405,
+              "cram": 23.024499527877197,
+              "fastp": 138.53126034117304,
+              "genotype": 302.1881782680284,
+              "mapping_sort_index": 1140.3222555660177,
+              "markdup": 159.09019745211117,
+              "normalize": 3.6282188869081438,
+              "plink": 1.1588529630098492,
+              "raw_gzip_integrity": 34.601049015065655,
+              "recal_index": 2.9500452550128102,
+              "reference_validation_reuse": 0.3131075268611312,
+              "wgs_metrics": 640.2513174549676
+            },
+            "HC_runtime_inclusive_seconds": 8287.846235655015,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 8287.846235655015,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 11793.766982178902,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 14.83842082717456,
+            "QC_sequential_stage_seconds": 821.6163874398917
+          },
+          {
+            "case": "S4",
+            "API_seconds": 11716.739526069025,
+            "whole_child_seconds": 11718.484067535028,
+            "effective_stage_seconds": {
+              "ApplyBQSR": 274.98431322397664,
+              "BaseRecalibrator": 591.4028920060955,
+              "HaplotypeCaller": 8213.822923839092,
+              "alignment_insert_metrics": 155.5968805339653,
+              "cram": 22.46853069588542,
+              "fastp": 141.39731597318314,
+              "genotype": 303.5367107070051,
+              "mapping_sort_index": 1145.445063764928,
+              "markdup": 157.7424712080974,
+              "normalize": 3.63063225382939,
+              "plink": 0.889493950875476,
+              "raw_gzip_integrity": 35.1036107679829,
+              "recal_index": 2.953036807011813,
+              "reference_validation_reuse": 0.3133705509826541,
+              "wgs_metrics": 652.9383994301315
+            },
+            "HC_runtime_inclusive_seconds": 8213.822923839092,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 8213.822923839092,
+            "HC_guard_build_inside_API_mode": "not_used",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": null,
+            "effective_stage_accounting_sum_seconds": 11702.225645713042,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 14.51388035598211,
+            "QC_sequential_stage_seconds": 808.5352799640968
+          }
+        ],
+        "concurrent_body_wall_seconds": 11811.634311172878,
+        "own_outer_wall_seconds": null,
+        "external_preparation_once_per_arm_seconds": {
+          "software_builds": null,
+          "HC_guard_build": 0.0,
+          "reference_preparation": null
+        },
+        "concurrent_body_plus_all_external_preparation_seconds": null,
+        "API_median_seconds": 11641.786873606965,
+        "HC_runtime_inclusive_median_seconds": 8142.952774152043
+      },
+      "HC_parallel": {
+        "per_case": [
+          {
+            "case": "S1",
+            "API_seconds": 8054.1042754170485,
+            "whole_child_seconds": 8055.986951756058,
+            "effective_stage_seconds": {
+              "reference_validation_reuse": 0.32364790700376034,
+              "raw_gzip_integrity": 35.15428021014668,
+              "fastp": 143.6919883408118,
+              "mapping_sort_index": 1096.059289989993,
+              "markdup": 157.80325079220347,
+              "cram": 22.136749217985198,
+              "BaseRecalibrator": 591.956768199103,
+              "ApplyBQSR": 276.1296360238921,
+              "recal_index": 2.6917638960294425,
+              "HaplotypeCaller": 4573.931433372898,
+              "wgs_metrics": 628.9206565550994,
+              "alignment_insert_metrics": 166.51181400800124,
+              "genotype": 338.1783498530276,
+              "normalize": 3.6052300301380455,
+              "plink": 0.885582558112219
+            },
+            "HC_runtime_inclusive_seconds": 4573.931433372898,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 4573.931433372898,
+            "HC_guard_build_inside_API_mode": "prebuilt_shared",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": {
+              "HaplotypeCaller_guard": 91.94548198883422,
+              "HaplotypeCaller_shards": 4122.500800282927,
+              "HaplotypeCaller_bgzip": 22.34773485409096,
+              "HaplotypeCaller_tabix": 12.135716910008341,
+              "HaplotypeCaller_index_names": 0.31652396195568144,
+              "HaplotypeCaller_index_full_readback": 27.896414112998173
+            },
+            "effective_stage_accounting_sum_seconds": 8037.980440954445,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 16.123834462603554,
+            "QC_sequential_stage_seconds": 795.4324705631007
+          },
+          {
+            "case": "S2",
+            "API_seconds": 8304.931066960096,
+            "whole_child_seconds": 8306.665777525166,
+            "effective_stage_seconds": {
+              "reference_validation_reuse": 0.3241217921022326,
+              "raw_gzip_integrity": 34.67301271203905,
+              "fastp": 140.5722810300067,
+              "mapping_sort_index": 1145.460689164931,
+              "markdup": 157.71140838088468,
+              "cram": 22.573448945069686,
+              "BaseRecalibrator": 622.0497777410783,
+              "ApplyBQSR": 274.9548055229243,
+              "recal_index": 2.6929416379425675,
+              "HaplotypeCaller": 4631.519481200026,
+              "wgs_metrics": 729.126514940057,
+              "alignment_insert_metrics": 195.83217499498278,
+              "genotype": 326.2673001100775,
+              "normalize": 3.6171998030040413,
+              "plink": 0.8863581418991089
+            },
+            "HC_runtime_inclusive_seconds": 4631.519481200026,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 4631.519481200026,
+            "HC_guard_build_inside_API_mode": "prebuilt_shared",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": {
+              "HaplotypeCaller_guard": 93.98833805299364,
+              "HaplotypeCaller_shards": 4182.364689314971,
+              "HaplotypeCaller_bgzip": 22.082554189953953,
+              "HaplotypeCaller_tabix": 12.174170966958627,
+              "HaplotypeCaller_index_names": 0.31159861595369875,
+              "HaplotypeCaller_index_full_readback": 28.203344007954
+            },
+            "effective_stage_accounting_sum_seconds": 8288.261516117025,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 16.669550843071193,
+            "QC_sequential_stage_seconds": 924.9586899350397
+          },
+          {
+            "case": "S3",
+            "API_seconds": 8477.6521431359,
+            "whole_child_seconds": 8479.516694531078,
+            "effective_stage_seconds": {
+              "reference_validation_reuse": 0.3241714430041611,
+              "raw_gzip_integrity": 34.77842493308708,
+              "fastp": 140.63814594806172,
+              "mapping_sort_index": 1144.6150695718825,
+              "markdup": 162.93748745508492,
+              "cram": 22.312138909939677,
+              "BaseRecalibrator": 602.6832845269237,
+              "ApplyBQSR": 272.76675841002725,
+              "recal_index": 2.694817285053432,
+              "HaplotypeCaller": 4688.97521081008,
+              "wgs_metrics": 824.1381472451612,
+              "alignment_insert_metrics": 208.0199018989224,
+              "genotype": 351.99456532206386,
+              "normalize": 3.6438645001035184,
+              "plink": 0.8947493170853704
+            },
+            "HC_runtime_inclusive_seconds": 4688.97521081008,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 4688.97521081008,
+            "HC_guard_build_inside_API_mode": "prebuilt_shared",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": {
+              "HaplotypeCaller_guard": 93.46895619411953,
+              "HaplotypeCaller_shards": 4245.583720891038,
+              "HaplotypeCaller_bgzip": 22.470925534144044,
+              "HaplotypeCaller_tabix": 12.166587484069169,
+              "HaplotypeCaller_index_names": 0.31035366118885577,
+              "HaplotypeCaller_index_full_readback": 27.680562359979376
+            },
+            "effective_stage_accounting_sum_seconds": 8461.416737576481,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 16.235405559418723,
+            "QC_sequential_stage_seconds": 1032.1580491440836
+          },
+          {
+            "case": "S4",
+            "API_seconds": 8351.078120609978,
+            "whole_child_seconds": 8352.939521034947,
+            "effective_stage_seconds": {
+              "reference_validation_reuse": 0.3241149028763175,
+              "raw_gzip_integrity": 35.04746425198391,
+              "fastp": 143.78871027799323,
+              "mapping_sort_index": 1148.1152859060094,
+              "markdup": 159.89917527302168,
+              "cram": 21.987883670954034,
+              "BaseRecalibrator": 595.8822138120886,
+              "ApplyBQSR": 276.3112842179835,
+              "recal_index": 2.9592023328877985,
+              "HaplotypeCaller": 4646.690211893991,
+              "wgs_metrics": 793.3721378638875,
+              "alignment_insert_metrics": 184.64179737493396,
+              "genotype": 321.847149875015,
+              "normalize": 3.362064482877031,
+              "plink": 0.8916016879957169
+            },
+            "HC_runtime_inclusive_seconds": 4646.690211893991,
+            "HC_runtime_plus_measured_inside_API_build_seconds": 4646.690211893991,
+            "HC_guard_build_inside_API_mode": "prebuilt_shared",
+            "HC_guard_build_inside_API_seconds": 0,
+            "HC_constituent_wall_seconds": {
+              "HaplotypeCaller_guard": 93.68899339600466,
+              "HaplotypeCaller_shards": 4193.052207045024,
+              "HaplotypeCaller_bgzip": 22.436535899993032,
+              "HaplotypeCaller_tabix": 12.200206005945802,
+              "HaplotypeCaller_index_names": 0.31177030014805496,
+              "HaplotypeCaller_index_full_readback": 29.173892363905907
+            },
+            "effective_stage_accounting_sum_seconds": 8335.120297824498,
+            "API_preflight_and_finalization_not_separately_attributed_seconds": 15.957822785479948,
+            "QC_sequential_stage_seconds": 978.0139352388214
+          }
+        ],
+        "concurrent_body_wall_seconds": 8480.263633189956,
+        "own_outer_wall_seconds": 8480.52444688906,
+        "external_preparation_once_per_arm_seconds": {
+          "software_builds": null,
+          "HC_guard_build": null,
+          "reference_preparation": null
+        },
+        "concurrent_body_plus_all_external_preparation_seconds": null,
+        "API_median_seconds": 8328.004593785037,
+        "HC_runtime_inclusive_median_seconds": 4639.1048465470085
+      }
+    },
+    "comparisons": {
+      "original_tools_to_prior_optimized": {
+        "paired_API_speedup": [
+          1.0837919407739185,
+          1.0955558682531683,
+          1.0753165906661966,
+          1.0644649303351295
+        ],
+        "ratio_of_API_medians_speedup": 1.079910313787955,
+        "concurrent_body_wall_speedup": 1.0753443039079986,
+        "construction_inclusive_concurrent_speedup": null
+      },
+      "prior_optimized_to_HC_parallel": {
+        "paired_API_speedup": [
+          1.4027787084396939,
+          1.3927670353775474,
+          1.3929098768893402,
+          1.4030211856302468
+        ],
+        "ratio_of_API_medians_speedup": 1.3979083155519527,
+        "concurrent_body_wall_speedup": 1.3928381029269707,
+        "construction_inclusive_concurrent_speedup": null
+      },
+      "original_tools_to_HC_parallel": {
+        "paired_API_speedup": [
+          1.5203202588961866,
+          1.52585409871744,
+          1.4978190999219168,
+          1.4934668486206115
+        ],
+        "ratio_of_API_medians_speedup": 1.5096156076945009,
+        "concurrent_body_wall_speedup": 1.4977805202485406,
+        "construction_inclusive_concurrent_speedup": null
+      }
+    },
+    "outside_API_final_audits": {
+      "precision": {
+        "actual_closed": true,
+        "own_outer_wall_seconds": 3429.1415608639363
+      },
+      "resource_and_heap": {
+        "actual_closed": true,
+        "own_outer_wall_seconds": 4.714388309046626
+      }
+    },
+    "interpretation": {
+      "prior_optimized_already_contains": [
+        "three original-tool source patches",
+        "reference validation reuse",
+        "parallel BQSR canonical replay",
+        "shared QC and exit fix"
+      ],
+      "new_arm_increment": [
+        "whole-contig original HC scheduling",
+        "strict resource-reader and lifecycle fixes"
+      ],
+      "HC_clock": "One inclusive aggregate includes guard scan, shard wave, merge, bgzip, tabix and complete indexed readback. Guard compilation follows the measured per-case inside-API clock or the once-per-arm external shared-asset clock; unknown cost remains null.",
+      "stage_clocks": "Resource observation and artifact hashing are inside stage wall. Six HC child stages are explanatory only and are excluded from the effective-stage sum.",
+      "concurrency": "Four case API walls are paired values; neither their sum nor their median replaces actual concurrent batch wall. The old combined two-arm outer is not a per-arm clock.",
+      "audit_clocks": "Precision and the combined resource/heap analysis are two outside-API jobs. Their walls are separate; potentially concurrent audit walls are never added to scientific API or batch wall.",
+      "causal_scope": "One ordered four-case run per version on shared hardware. Incremental contrasts describe observed route differences, not isolated patch effects.",
+      "biological_scope": "Real read prefixes with whole-reference calling; no complete original sequencing-depth, annotation, association, or biological-truth claim.",
+      "heap_gap": "Failed earlier heap observer and later supplement do not reconstruct the missing HC heap window; no automatic leak-free claim.",
+      "prepared_asset_scope": "API and concurrent-body ratios are prepared-asset runtime comparisons. Cold/setup-inclusive speed stays null until all once-per-arm preparation costs are measured."
+    }
+  },
+  "resources": {
+    "schema": "anonymous-four-case-resource-summary-v1",
+    "status": "CLOSED_REAL_RESOURCE_EVIDENCE_WITH_EXPLICIT_UNVERIFIED_WINDOWS",
+    "source_report_sha256": "bdb4995a42f179fdae2ebb5e7aa150ad1fd15041d590df08537a7391d2f43f41",
+    "source_envelope_sha256": "b0df0e8fc4d2c7b67f78c7802bd774695cda580305c5377f82674dd4dbda8f00",
+    "scope": {
+      "anonymous_cases": 4,
+      "read_pairs_per_case": 10000000,
+      "full_reference": true,
+      "full_depth_WGS": false,
+      "CPU_per_case": 8,
+      "HC_JVMs_per_case": 2
+    },
+    "sampled_resources": {
+      "observation_seconds": 8424.313479565084,
+      "cycles": 4211,
+      "nominal_cadence_seconds": 2,
+      "valid_aggregate_PSS_cycles": 4200,
+      "aggregate_PSS_unknown_cycles": 11,
+      "science_plus_coordinator_PSS_GiB": {
+        "minimum": 0.04546642303466797,
+        "median": 23.806668281555176,
+        "p95": 29.559497833251953,
+        "peak": 31.604546546936035
+      },
+      "science_plus_coordinator_budget_GiB": 120.0,
+      "whole_project_reserved_GiB": 128,
+      "known_aggregate_budget_exceeding_samples": 0,
+      "per_case": [
+        {
+          "anonymous_case": 1,
+          "task_budget_GiB": 28.0,
+          "valid_PSS_samples": 3994,
+          "PSS_GiB": {
+            "minimum": 0.02648639678955078,
+            "median": 5.953965187072754,
+            "p95": 7.3023731231689455,
+            "peak": 7.616729736328125
+          },
+          "known_budget_exceeding_samples": 0
+        },
+        {
+          "anonymous_case": 2,
+          "task_budget_GiB": 28.0,
+          "valid_PSS_samples": 4120,
+          "PSS_GiB": {
+            "minimum": 0.023771286010742188,
+            "median": 5.958094596862793,
+            "p95": 7.483358764648438,
+            "peak": 8.174789428710938
+          },
+          "known_budget_exceeding_samples": 0
+        },
+        {
+          "anonymous_case": 3,
+          "task_budget_GiB": 28.0,
+          "valid_PSS_samples": 4208,
+          "PSS_GiB": {
+            "minimum": 0.025104522705078125,
+            "median": 5.9312744140625,
+            "p95": 7.354762840270996,
+            "peak": 7.990520477294922
+          },
+          "known_budget_exceeding_samples": 0
+        },
+        {
+          "anonymous_case": 4,
+          "task_budget_GiB": 28.0,
+          "valid_PSS_samples": 4144,
+          "PSS_GiB": {
+            "minimum": 0.02692890167236328,
+            "median": 5.959002494812012,
+            "p95": 7.567425346374511,
+            "peak": 8.334976196289062
+          },
+          "known_budget_exceeding_samples": 0
+        }
+      ],
+      "reserve_GiB": 10.0,
+      "known_headroom_cycles": 4210,
+      "minimum_known_headroom_GiB": 810.3642196655273,
+      "known_reserve_below_threshold_samples": 0,
+      "whole_project_simultaneous_PSS_peak_GiB": null,
+      "independent_observer_peaks_are_not_added": true,
+      "continuous_peak_assessed": false
+    },
+    "thread_affinity": {
+      "covered_samples": 66766,
+      "unknown_samples": 18,
+      "violating_samples": 0
+    },
+    "HC_JVM_trends": [
+      {
+        "anonymous_case": 1,
+        "anonymous_HC_JVM": 1,
+        "observed_seconds": 3689.9999703411013,
+        "valid_PSS_samples": 1846,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.17464351654052734,
+          "median": 2.9554567337036133,
+          "p95": 3.7106332778930664,
+          "peak": 3.771768569946289
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.906764030456543,
+          "median": 2.955540657043457,
+          "p95": 3.7106414794921876,
+          "peak": 3.771768569946289
+        },
+        "time_third_PSS_medians_GiB": [
+          2.9175257682800293,
+          2.9554567337036133,
+          3.614321708679199
+        ],
+        "late_minus_early_PSS_median_GiB": 0.6967959403991699,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 1,
+        "anonymous_HC_JVM": 2,
+        "observed_seconds": 4119.999966775067,
+        "valid_PSS_samples": 2061,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.17150211334228516,
+          "median": 3.2947778701782227,
+          "p95": 4.195052146911621,
+          "peak": 4.2338972091674805
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.926419258117676,
+          "median": 3.294877052307129,
+          "p95": 4.20861415863037,
+          "peak": 4.2338972091674805
+        },
+        "time_third_PSS_medians_GiB": [
+          3.1933412551879883,
+          3.2947778701782227,
+          3.799384117126465
+        ],
+        "late_minus_early_PSS_median_GiB": 0.6060428619384766,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 2,
+        "anonymous_HC_JVM": 3,
+        "observed_seconds": 4177.999979131157,
+        "valid_PSS_samples": 2090,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.29297542572021484,
+          "median": 3.2709522247314453,
+          "p95": 3.8096113204956055,
+          "peak": 3.8523454666137695
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.9163589477539062,
+          "median": 3.2727041244506836,
+          "p95": 3.8127756118774405,
+          "peak": 3.8523454666137695
+        },
+        "time_third_PSS_medians_GiB": [
+          3.198091506958008,
+          3.2709522247314453,
+          3.683624267578125
+        ],
+        "late_minus_early_PSS_median_GiB": 0.4855327606201172,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 2,
+        "anonymous_HC_JVM": 4,
+        "observed_seconds": 3747.9999957941473,
+        "valid_PSS_samples": 1875,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.2990074157714844,
+          "median": 2.9738197326660156,
+          "p95": 3.959316635131836,
+          "peak": 4.412243843078613
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.902698516845703,
+          "median": 2.9739112854003906,
+          "p95": 3.9606449127197267,
+          "peak": 4.412243843078613
+        },
+        "time_third_PSS_medians_GiB": [
+          2.924623489379883,
+          2.9738197326660156,
+          3.679370880126953
+        ],
+        "late_minus_early_PSS_median_GiB": 0.7547473907470703,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 3,
+        "anonymous_HC_JVM": 5,
+        "observed_seconds": 3723.9999790980946,
+        "valid_PSS_samples": 1863,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.25201988220214844,
+          "median": 2.9692115783691406,
+          "p95": 3.5022605895996093,
+          "peak": 4.11016845703125
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.9057207107543945,
+          "median": 2.9693145751953125,
+          "p95": 3.5022674560546876,
+          "peak": 4.11016845703125
+        },
+        "time_third_PSS_medians_GiB": [
+          2.9318981170654297,
+          2.9692115783691406,
+          3.4275054931640625
+        ],
+        "late_minus_early_PSS_median_GiB": 0.4956073760986328,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 3,
+        "anonymous_HC_JVM": 6,
+        "observed_seconds": 4241.999962114962,
+        "valid_PSS_samples": 2122,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.2587461471557617,
+          "median": 3.4669456481933594,
+          "p95": 3.9679718017578125,
+          "peak": 4.03535270690918
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.9128007888793945,
+          "median": 3.4670543670654297,
+          "p95": 3.968214988708496,
+          "peak": 4.03535270690918
+        },
+        "time_third_PSS_medians_GiB": [
+          3.1618213653564453,
+          3.466951370239258,
+          3.8300857543945312
+        ],
+        "late_minus_early_PSS_median_GiB": 0.6682643890380859,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 4,
+        "anonymous_HC_JVM": 7,
+        "observed_seconds": 4189.999959381064,
+        "valid_PSS_samples": 2096,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.13525867462158203,
+          "median": 3.4484996795654297,
+          "p95": 4.463263511657715,
+          "peak": 4.546357154846191
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.9130754470825195,
+          "median": 3.4485836029052734,
+          "p95": 4.464385986328125,
+          "peak": 4.546357154846191
+        },
+        "time_third_PSS_medians_GiB": [
+          3.1925907135009766,
+          3.4484996795654297,
+          4.10114860534668
+        ],
+        "late_minus_early_PSS_median_GiB": 0.9085578918457031,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      },
+      {
+        "anonymous_case": 4,
+        "anonymous_HC_JVM": 8,
+        "observed_seconds": 3761.999966175994,
+        "valid_PSS_samples": 1882,
+        "missing_PSS_values": 0,
+        "PSS_GiB": {
+          "minimum": 0.13268375396728516,
+          "median": 2.974581718444824,
+          "p95": 3.846421241760254,
+          "peak": 3.9158973693847656
+        },
+        "warm_after_30_observed_seconds_PSS_GiB": {
+          "minimum": 2.9042272567749023,
+          "median": 2.9771862030029297,
+          "p95": 3.8522112369537354,
+          "peak": 3.9158973693847656
+        },
+        "time_third_PSS_medians_GiB": [
+          2.917111396789551,
+          2.974581718444824,
+          3.4785146713256836
+        ],
+        "late_minus_early_PSS_median_GiB": 0.5614032745361328,
+        "time_third_FD_medians": [
+          29.0,
+          29.0,
+          29.0
+        ],
+        "observed_thread_count_range": [
+          12.0,
+          12.0
+        ],
+        "stationary_platform_established": false,
+        "equal_work_trend_assessed": false
+      }
+    ],
+    "heap_aggregate": {
+      "cycles": 170,
+      "queries": 527,
+      "valid_snapshots": 526,
+      "optional_failed_queries": 1,
+      "HC_JVMs": 8,
+      "HC_valid_snapshots": 426,
+      "HC_heap_used_peak_range_GiB": [
+        3.2280384059995413,
+        4.196037005633116
+      ],
+      "HC_heap_committed_range_GiB": [
+        7.99072265625,
+        8.0
+      ],
+      "HC_JVMs_late_median_above_early": 6,
+      "distinct_actual_owned_query_waits": 527,
+      "valid_snapshots_require_wait0_and_normal_drain": true,
+      "all_query_exit_codes_zero_assessed": false,
+      "raw_bytes_and_closed_logs_SHA_verified": true,
+      "full21_stage_heap_coverage": false,
+      "matched_original_arm_heap_comparison_assessed": false,
+      "heap_and_PSS_are_not_added": true
+    },
+    "release": {
+      "distinct_exact_identity_probes": 636,
+      "live_same_identities": 0,
+      "unknown_identity_probes": 0,
+      "final_empty_owner_set": true,
+      "observed_identity_release_verified": true,
+      "physical_page_teardown_measured": false,
+      "all_unobserved_short_lived_processes_assessed": false
+    },
+    "prior_failed_heap_observer": {
+      "actual_outer_exit": 1,
+      "business_exit": 1,
+      "durable_queries_valid_optional": [
+        61,
+        61,
+        0
+      ],
+      "returned_queries_valid_optional": [
+        62,
+        61,
+        1
+      ],
+      "uncommitted_returned_endpoint_or_exit_reconstructed": false,
+      "fatal_query_actual_exit": null,
+      "fatal_query_cause": "unknown",
+      "later_success_does_not_erase_previous_failure": true
+    },
+    "heap_sampling_gap": {
+      "between_prior_last_and_replacement_first_committed_cycles_seconds": 1126.5735008716583,
+      "initial_HC_stage_seconds_before_replacement_by_case": [
+        995.5574128627777,
+        918.0212399959564,
+        935.9845359325409,
+        935.3959438800812
+      ],
+      "earlier_valid_HC_heap_snapshots_by_case": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "exact_observer_downtime_or_eligible_JVM_coverage": false,
+      "missing_heap_reconstructed": false
+    },
+    "limitations": {
+      "finite_ancestor_report_count": 0,
+      "cgroup_unverified_cycles": 1,
+      "finite_cgroup_memory_events_delta": null,
+      "no_finite_rows_is_not_zero_event_proof": true,
+      "task_budget_is_not_independent_cgroup_hard_quota": true,
+      "anon_file_shared_PSS_split_assessed": false,
+      "pinned_locked_memory_summary_assessed": false,
+      "equal_work_trends_assessed": false,
+      "observation_time_thirds_are_not_equal_work": true,
+      "warm_observation_age_is_not_scientific_initialization": true,
+      "all_samples_budget_and_thread_coverage_verified": false,
+      "stationary_platform_established": false,
+      "automatic_leak_free_claim": false,
+      "OOM_recovery_assessed": false,
+      "resource_closure_is_not_scientific_precision": true,
+      "private_paths_or_process_identity_included": false,
+      "scientific_result_rows_included": false
+    }
+  },
+  "precision": {
+    "status": "CLOSED_SCOPED_SAME_INPUT_AGREEMENT",
+    "full_output_agreement": true,
+    "anonymous_projection": {
+      "schema": "anonymous-four-case-full-precision-v1",
+      "status": "all_requested_full_outputs_equal",
+      "science_source_archive_sha256": "aacc0a8d82d735436b43383b1bdc8e957cb699d9802cc3d3c237f153283dae3d",
+      "controller72_sha256": "d1c55328a860437e2558eedee182c09cc7cd5fdccb078f4120e91333aac119cf",
+      "precision_worker79_sha256": "d0e8ca1ce7bc09972aeb696055f43cbf6b9b1b2128820deb42cf411fa2cb2bf8",
+      "closed_business_sha256": "6d6f3816763a4fc8a80ca85ec51bb0d3b1e664462c6c0335a5111a5c4a413bb7",
+      "actual_outer_wall_seconds": 3429.1415608639363,
+      "anonymous_cases": 4,
+      "input_pairs_per_case": 10000000,
+      "full_reference": true,
+      "full_depth_WGS": false,
+      "cases": [
+        {
+          "anonymous_case": 1,
+          "comparison_groups": 87,
+          "categories": {
+            "clean_FASTQ": {
+              "pairs_per_side": 9572817,
+              "differing_pairs": 0,
+              "full_gzip_CRC_EOF": true
+            },
+            "fastp_JSON": {
+              "all_scientific_fields_and_distributions_equal": true
+            },
+            "BAM": [
+              {
+                "kind": "sorted",
+                "records_per_side": 19194998,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "marked",
+                "records_per_side": 19194998,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "recalibrated",
+                "records_per_side": 19194998,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19194998,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19194998,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              }
+            ],
+            "BQSR": [
+              {
+                "table": "Arguments",
+                "rows_per_side": 17,
+                "all_cells_equal": true
+              },
+              {
+                "table": "Quantized",
+                "rows_per_side": 94,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable0",
+                "rows_per_side": 1,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable1",
+                "rows_per_side": 3,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable2",
+                "rows_per_side": 948,
+                "all_cells_equal": true
+              }
+            ],
+            "QC": {
+              "metrics": [
+                {
+                  "kind": "wgs",
+                  "scientific_lines_per_side": 256,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "alignment",
+                  "scientific_lines_per_side": 140,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "insert",
+                  "scientific_lines_per_side": 692,
+                  "differing_lines": 0
+                }
+              ],
+              "PDF_container_files_per_side": [
+                2,
+                2
+              ],
+              "PDF_render_or_byte_equivalence_assessed": false
+            },
+            "VCF": [
+              {
+                "kind": "gVCF",
+                "records_per_side": 50158016,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "genotyped",
+                "records_per_side": 783966,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "normalized",
+                "records_per_side": 784779,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              }
+            ],
+            "PLINK": {
+              "autosomal_variants": 745198,
+              "samples": 1,
+              "independent_GT_axes": 2,
+              "chromosome_split_count": 22,
+              "file_pairs_compared": 69,
+              "bytes_per_side": 52253678,
+              "differing_files": 0
+            }
+          },
+          "actual_comparator_tool_wait0_count": 7,
+          "all_86plus_components_equal": true,
+          "HC_actual_command_headers_verified": true,
+          "HC_all_reference_contigs_covered": true
+        },
+        {
+          "anonymous_case": 2,
+          "comparison_groups": 87,
+          "categories": {
+            "clean_FASTQ": {
+              "pairs_per_side": 9660976,
+              "differing_pairs": 0,
+              "full_gzip_CRC_EOF": true
+            },
+            "fastp_JSON": {
+              "all_scientific_fields_and_distributions_equal": true
+            },
+            "BAM": [
+              {
+                "kind": "sorted",
+                "records_per_side": 19385485,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "marked",
+                "records_per_side": 19385485,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "recalibrated",
+                "records_per_side": 19385485,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19385485,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19385485,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              }
+            ],
+            "BQSR": [
+              {
+                "table": "Arguments",
+                "rows_per_side": 17,
+                "all_cells_equal": true
+              },
+              {
+                "table": "Quantized",
+                "rows_per_side": 94,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable0",
+                "rows_per_side": 1,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable1",
+                "rows_per_side": 3,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable2",
+                "rows_per_side": 948,
+                "all_cells_equal": true
+              }
+            ],
+            "QC": {
+              "metrics": [
+                {
+                  "kind": "wgs",
+                  "scientific_lines_per_side": 256,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "alignment",
+                  "scientific_lines_per_side": 140,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "insert",
+                  "scientific_lines_per_side": 665,
+                  "differing_lines": 0
+                }
+              ],
+              "PDF_container_files_per_side": [
+                2,
+                2
+              ],
+              "PDF_render_or_byte_equivalence_assessed": false
+            },
+            "VCF": [
+              {
+                "kind": "gVCF",
+                "records_per_side": 49435412,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "genotyped",
+                "records_per_side": 798955,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "normalized",
+                "records_per_side": 799885,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              }
+            ],
+            "PLINK": {
+              "autosomal_variants": 758205,
+              "samples": 1,
+              "independent_GT_axes": 2,
+              "chromosome_split_count": 22,
+              "file_pairs_compared": 69,
+              "bytes_per_side": 53173264,
+              "differing_files": 0
+            }
+          },
+          "actual_comparator_tool_wait0_count": 7,
+          "all_86plus_components_equal": true,
+          "HC_actual_command_headers_verified": true,
+          "HC_all_reference_contigs_covered": true
+        },
+        {
+          "anonymous_case": 3,
+          "comparison_groups": 87,
+          "categories": {
+            "clean_FASTQ": {
+              "pairs_per_side": 9692185,
+              "differing_pairs": 0,
+              "full_gzip_CRC_EOF": true
+            },
+            "fastp_JSON": {
+              "all_scientific_fields_and_distributions_equal": true
+            },
+            "BAM": [
+              {
+                "kind": "sorted",
+                "records_per_side": 19451112,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "marked",
+                "records_per_side": 19451112,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "recalibrated",
+                "records_per_side": 19451112,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19451112,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19451112,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              }
+            ],
+            "BQSR": [
+              {
+                "table": "Arguments",
+                "rows_per_side": 17,
+                "all_cells_equal": true
+              },
+              {
+                "table": "Quantized",
+                "rows_per_side": 94,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable0",
+                "rows_per_side": 1,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable1",
+                "rows_per_side": 3,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable2",
+                "rows_per_side": 948,
+                "all_cells_equal": true
+              }
+            ],
+            "QC": {
+              "metrics": [
+                {
+                  "kind": "wgs",
+                  "scientific_lines_per_side": 256,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "alignment",
+                  "scientific_lines_per_side": 140,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "insert",
+                  "scientific_lines_per_side": 659,
+                  "differing_lines": 0
+                }
+              ],
+              "PDF_container_files_per_side": [
+                2,
+                2
+              ],
+              "PDF_render_or_byte_equivalence_assessed": false
+            },
+            "VCF": [
+              {
+                "kind": "gVCF",
+                "records_per_side": 49819304,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "genotyped",
+                "records_per_side": 799841,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "normalized",
+                "records_per_side": 800720,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              }
+            ],
+            "PLINK": {
+              "autosomal_variants": 749731,
+              "samples": 1,
+              "independent_GT_axes": 2,
+              "chromosome_split_count": 22,
+              "file_pairs_compared": 69,
+              "bytes_per_side": 52542564,
+              "differing_files": 0
+            }
+          },
+          "actual_comparator_tool_wait0_count": 7,
+          "all_86plus_components_equal": true,
+          "HC_actual_command_headers_verified": true,
+          "HC_all_reference_contigs_covered": true
+        },
+        {
+          "anonymous_case": 4,
+          "comparison_groups": 87,
+          "categories": {
+            "clean_FASTQ": {
+              "pairs_per_side": 9675238,
+              "differing_pairs": 0,
+              "full_gzip_CRC_EOF": true
+            },
+            "fastp_JSON": {
+              "all_scientific_fields_and_distributions_equal": true
+            },
+            "BAM": [
+              {
+                "kind": "sorted",
+                "records_per_side": 19403997,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "marked",
+                "records_per_side": 19403997,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "recalibrated",
+                "records_per_side": 19403997,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19403997,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              },
+              {
+                "kind": "canonical_replay",
+                "records_per_side": 19403997,
+                "differing_complete_rows": 0,
+                "differing_raw_rows": 0,
+                "all_core_and_typed_AUX_compared": true
+              }
+            ],
+            "BQSR": [
+              {
+                "table": "Arguments",
+                "rows_per_side": 17,
+                "all_cells_equal": true
+              },
+              {
+                "table": "Quantized",
+                "rows_per_side": 94,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable0",
+                "rows_per_side": 1,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable1",
+                "rows_per_side": 3,
+                "all_cells_equal": true
+              },
+              {
+                "table": "RecalTable2",
+                "rows_per_side": 948,
+                "all_cells_equal": true
+              }
+            ],
+            "QC": {
+              "metrics": [
+                {
+                  "kind": "wgs",
+                  "scientific_lines_per_side": 256,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "alignment",
+                  "scientific_lines_per_side": 140,
+                  "differing_lines": 0
+                },
+                {
+                  "kind": "insert",
+                  "scientific_lines_per_side": 695,
+                  "differing_lines": 0
+                }
+              ],
+              "PDF_container_files_per_side": [
+                2,
+                2
+              ],
+              "PDF_render_or_byte_equivalence_assessed": false
+            },
+            "VCF": [
+              {
+                "kind": "gVCF",
+                "records_per_side": 50133550,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "genotyped",
+                "records_per_side": 785778,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              },
+              {
+                "kind": "normalized",
+                "records_per_side": 786621,
+                "differing_complete_rows": 0,
+                "full_body_fields_and_order": true
+              }
+            ],
+            "PLINK": {
+              "autosomal_variants": 734679,
+              "samples": 1,
+              "independent_GT_axes": 2,
+              "chromosome_split_count": 22,
+              "file_pairs_compared": 69,
+              "bytes_per_side": 51501020,
+              "differing_files": 0
+            }
+          },
+          "actual_comparator_tool_wait0_count": 7,
+          "all_86plus_components_equal": true,
+          "HC_actual_command_headers_verified": true,
+          "HC_all_reference_contigs_covered": true
+        }
+      ],
+      "previous_audit_failure": {
+        "actual_outer_exit": 1,
+        "business_exit": 1,
+        "partial_cases_with_only_FASTQ_and_fastp_JSON_equal": 1,
+        "full_four_case_precision_pass": false,
+        "cause": "reference_certificate_schema",
+        "preserved": true
+      },
+      "not_biological_truth": true,
+      "association_precision_assessed": false,
+      "PDF_render_equivalence_assessed": false,
+      "raw_record_values_exported": false,
+      "private_paths_or_process_identity_included": false
+    }
+  },
+  "failed_external_audit_history": [
+    {
+      "attempt": "initial_full_field_audit",
+      "actual_outer_exit": 1,
+      "outer_wall_seconds": 815.179668,
+      "failure_type": "reference_certificate_schema_mismatch",
+      "scientific_difference_established": false,
+      "scientific_pipeline_exits_unchanged": true,
+      "clock_added_to_API_or_batch": false,
+      "failed_attempt_erased": false
+    }
+  ],
+  "unmeasured_end_to_end_clocks": {
+    "actual_launch_to_all_audits_ready_wall_seconds": null,
+    "cold_preparation_inclusive_batch_wall_seconds": null,
+    "clock_sum_is_not_a_measurement": true
+  },
+  "interpretation": {
+    "arm_attribution": "Original32 to prior31 includes three source patches/reference reuse plus mature parallel BQSR/shared QC/exit fix. Final66 versus prior31 adds whole-contig original HC scheduling and strict resource lifecycle.",
+    "nested_clock_rule": "HC aggregate is counted once; six child clocks and individual concurrent JVM walls are not added. API/whole-child/batch/outer and outside-API audit walls remain separate.",
+    "failure_history_rule": "First failed audit and last successful audit remain separate. No addition of potentially nested/parallel walls to infer a user total.",
+    "resource_scope": "Known sampled budgets had no observed exceedance. Unknown cycles, HC late-time PSS increases, failed earlier heap observer and missing early HC heap window remain explicit; no long-term platform or leak-free claim.",
+    "precision_scope": "Same-input full field/sequence/axis/order agreement is distinct from biological truth, full-depth WGS, annotation or association precision."
+  }
+}

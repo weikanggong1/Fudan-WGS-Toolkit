@@ -1,0 +1,35 @@
+{
+  "schema": "fudan-original-gatk-sourcepatch-source-v1",
+  "upstream_repository": "broadinstitute/gatk",
+  "upstream_version": "4.2.0.0",
+  "upstream_commit": "1f7fade2afbd706539eb983087907a0cb11ee734",
+  "license": {
+    "spdx": "Apache-2.0",
+    "path": "LICENSE.TXT",
+    "sha256": "0e53509666a2480048ef7ae7dfdfc24a075fc1d6492295f5fa93aa60eb7d226a",
+    "bytes": 10966
+  },
+  "sources": [
+    {
+      "path": "src/main/java/org/broadinstitute/hellbender/utils/recalibration/BaseRecalibrationEngine.java",
+      "upstream_bytes": 23468,
+      "upstream_sha256": "de5ce3fa392bc2f38f551c1b755cab6029d2cc7916c41b5e8b1c5032b2b443fc",
+      "scientific_sha256": "6ea34b7793f059bdb1d9cca1e0b6b6a941bafbb8afbffd45f06b5a65408e0e4a",
+      "modified_sha256": "bfe08e1c30bd7c30ea706870905d3601125c47fac9421efd822700f1b2de4a77"
+    },
+    {
+      "path": "src/main/java/org/broadinstitute/hellbender/utils/recalibration/ReadRecalibrationInfo.java",
+      "upstream_bytes": 5473,
+      "upstream_sha256": "74cea96d4c784b8abac3ff860a39605570e69329a2b890423c4eced428897181",
+      "scientific_sha256": "8fc70e545ce49bdea65b58553bf4a3d1779b385a72fab0785247e2d9bed7f147",
+      "modified_sha256": "4a628020c0b0bbe44e5965bee7048a3d1c1e517b2691f2ed91928b200c85018a"
+    }
+  ],
+  "files": {
+    "assets/bqsr-allocations.patch": "c145dd3d70ec12c53e967dac84bf0158243654b3443c1acce6f5912e8541ac5a",
+    "assets/SourcePatchedBqsrMain.java": "a9cf4c187a2f1caaababeb588a5fbf79237a2b8a95962a2ac689d4ae89eec157",
+    "LICENSE.GATK-4.2.0.0.txt": "0e53509666a2480048ef7ae7dfdfc24a075fc1d6492295f5fa93aa60eb7d226a",
+    "SOURCES.md": "d7c66187640052280377db065f4cbcb8523e3b87f2332e85a6118fb032726814",
+    "README.zh.md": "a4f5a0a07f5fcb32422c220d665c5be4329401a48186faab739002962c5144a0"
+  }
+}

@@ -1,0 +1,165 @@
+--- a/src/main/java/org/broadinstitute/hellbender/utils/recalibration/BaseRecalibrationEngine.java
++++ b/src/main/java/org/broadinstitute/hellbender/utils/recalibration/BaseRecalibrationEngine.java
+@@ -1,3 +1,8 @@
++/*
++ * Modified by Fudan WGS Toolkit from GATK 4.2.0.0 (Apache License 2.0).
++ * Reuse each engine read-transform composition and avoid unused default indel error arrays.
++ * Original attribution and license: see LICENSE.GATK-4.2.0.0.txt and SOURCES.md.
++ */
+ package org.broadinstitute.hellbender.utils.recalibration;
+ 
+ import htsjdk.samtools.CigarOperator;
+@@ -44,6 +49,10 @@
+      */
+     private final EventType[] cachedEventTypes;
+ 
++    // Do not add a serialized object graph to this Spark-serializable engine.
++    // Each engine lazily reconstructs the same stateless composition after deserialization.
++    private transient ReadTransformer readTransform;
++
+     /**
+      * Reference window function for BQSR. For each read, returns an interval representing the span of
+      * reference bases required by the BQSR algorithm for that read.
+@@ -114,8 +123,7 @@
+      * whether or not the base matches the reference at this particular location
+      */
+     public void processRead( final GATKRead originalRead, final ReferenceDataSource refDS, final Iterable<? extends Locatable> knownSites ) {
+-        final ReadTransformer transform = makeReadTransform();
+-        final GATKRead read = transform.apply(originalRead);
++        final GATKRead read = getReadTransform().apply(originalRead);
+ 
+         if( read.isEmpty() ) {
+             return; // the whole read was inside the adaptor so skip it
+@@ -138,11 +146,19 @@
+             final ReadCovariates covariates = RecalUtils.computeCovariates(read, readsHeader, this.covariates, true, keyCache);
+             final boolean[] skip = calculateSkipArray(read, knownSites); // skip known sites of variation as well as low quality and non-regular bases
+             final double[] snpErrors = calculateFractionalErrorArray(isSNP, baqArray);
+-            final double[] insertionErrors = calculateFractionalErrorArray(isInsertion, baqArray);
+-            final double[] deletionErrors = calculateFractionalErrorArray(isDeletion, baqArray);
++            // The event axis was fixed when this engine was constructed. Do not
++            // consult the mutable argument object again or omit SNP/indel detection:
++            // nErrors and the unchanged BAQ path above still require both int arrays.
++            final ReadRecalibrationInfo info;
++            if (cachedEventTypes.length == 1 && cachedEventTypes[0] == EventType.BASE_SUBSTITUTION) {
++                info = ReadRecalibrationInfo.forSubstitutionOnly(read, covariates, skip, snpErrors);
++            } else {
++                final double[] insertionErrors = calculateFractionalErrorArray(isInsertion, baqArray);
++                final double[] deletionErrors = calculateFractionalErrorArray(isDeletion, baqArray);
++                info = new ReadRecalibrationInfo(read, covariates, skip, snpErrors, insertionErrors, deletionErrors);
++            }
+ 
+             // aggregate all of the info into our info object, and update the data
+-            final ReadRecalibrationInfo info = new ReadRecalibrationInfo(read, covariates, skip, snpErrors, insertionErrors, deletionErrors);
+             updateRecalTablesForRead(info);
+         }
+ 
+@@ -274,6 +290,15 @@
+                 }
+             }
+         }
++    }
++
++    private ReadTransformer getReadTransform() {
++        // This engine already owns mutable tables and a per-engine covariate cache;
++        // it is not shared between training threads.
++        if (readTransform == null) {
++            readTransform = makeReadTransform();
++        }
++        return readTransform;
+     }
+ 
+     private ReadTransformer makeReadTransform() {
+--- a/src/main/java/org/broadinstitute/hellbender/utils/recalibration/ReadRecalibrationInfo.java
++++ b/src/main/java/org/broadinstitute/hellbender/utils/recalibration/ReadRecalibrationInfo.java
+@@ -1,3 +1,8 @@
++/*
++ * Modified by Fudan WGS Toolkit from GATK 4.2.0.0 (Apache License 2.0).
++ * Add an explicit substitution-only info factory while retaining the public all-event constructor.
++ * Original attribution and license: see LICENSE.GATK-4.2.0.0.txt and SOURCES.md.
++ */
+ package org.broadinstitute.hellbender.utils.recalibration;
+ 
+ import org.broadinstitute.hellbender.utils.read.GATKRead;
+@@ -18,6 +23,28 @@
+                                  final double[] snpErrors,
+                                  final double[] insertionErrors,
+                                  final double[] deletionErrors) {
++        this(read, covariates, skips, snpErrors, insertionErrors, deletionErrors, false);
++    }
++
++    /**
++     * Build information for an engine whose only event is BASE_SUBSTITUTION.
++     * Indel error arrays are not allocated or accepted by this explicit path.
++     * The public six-argument constructor retains its all-events contract.
++     */
++    public static ReadRecalibrationInfo forSubstitutionOnly(final GATKRead read,
++                                                           final ReadCovariates covariates,
++                                                           final boolean[] skips,
++                                                           final double[] snpErrors) {
++        return new ReadRecalibrationInfo(read, covariates, skips, snpErrors, null, null, true);
++    }
++
++    private ReadRecalibrationInfo(final GATKRead read,
++                                  final ReadCovariates covariates,
++                                  final boolean[] skips,
++                                  final double[] snpErrors,
++                                  final double[] insertionErrors,
++                                  final double[] deletionErrors,
++                                  final boolean substitutionOnly) {
+         if ( read == null ) {
+             throw new IllegalArgumentException("read cannot be null");
+         }
+@@ -30,10 +57,10 @@
+         if ( snpErrors == null ) {
+             throw new IllegalArgumentException("snpErrors cannot be null");
+         }
+-        if ( insertionErrors == null ) {
++        if ( !substitutionOnly && insertionErrors == null ) {
+             throw new IllegalArgumentException("insertionErrors cannot be null");
+         }
+-        if ( deletionErrors == null ) {
++        if ( !substitutionOnly && deletionErrors == null ) {
+             throw new IllegalArgumentException("deletionErrors cannot be null");
+         }
+ 
+@@ -54,10 +81,10 @@
+         if ( snpErrors.length != length ) {
+             throw new IllegalArgumentException("snpErrors.length " + snpErrors.length + " != length " + length);
+         }
+-        if ( insertionErrors.length != length ) {
++        if ( !substitutionOnly && insertionErrors.length != length ) {
+             throw new IllegalArgumentException("insertionErrors.length " + snpErrors.length + " != length " + length);
+         }
+-        if ( deletionErrors.length != length ) {
++        if ( !substitutionOnly && deletionErrors.length != length ) {
+             throw new IllegalArgumentException("deletionErrors.length " + snpErrors.length + " != length " + length);
+         }
+     }
+@@ -70,6 +97,7 @@
+      * @return a valid quality score for event at offset
+      */
+     public byte getQual(final EventType eventType, final int offset) {
++        requireAvailableEvent(eventType);
+         switch ( eventType ) {
+             case BASE_SUBSTITUTION: return baseQuals[offset];
+             // note optimization here -- if we don't have ins/del quals we just return the default byte directly
+@@ -92,11 +120,19 @@
+      * @return a fractional weight for an error at this offset
+      */
+     public double getErrorFraction(final EventType eventType, final int offset) {
++        requireAvailableEvent(eventType);
+         switch ( eventType ) {
+             case BASE_SUBSTITUTION: return snpErrors[offset];
+             case BASE_INSERTION: return insertionErrors[offset];
+             case BASE_DELETION: return deletionErrors[offset];
+             default: throw new IllegalStateException("Unknown event type " + eventType);
++        }
++    }
++
++    private void requireAvailableEvent(final EventType eventType) {
++        if ((eventType == EventType.BASE_INSERTION && insertionErrors == null)
++                || (eventType == EventType.BASE_DELETION && deletionErrors == null)) {
++            throw new IllegalStateException("Indel event is unavailable in substitution-only recalibration info");
+         }
+     }
+ 

@@ -1,0 +1,1 @@
+Project-authored Java guard and build probe. Uses existing GATK 4.2.0.0 / HTSJDK APIs without copying their implementation. Guard50 source is unchanged; only a separate no-input build probe is added. Scientific HC uses the original GATK jar.

@@ -1,0 +1,8 @@
+{
+  "schema": "fudan-hc-contig-guard-source-v1",
+  "original_guard50_source_sha256": "f3d343db8e7359d191fa2468d116dcee0af19d02be8ef96552344137fe9c37bc",
+  "files": {
+    "assets/HCMappedStartGuard.java": "f3d343db8e7359d191fa2468d116dcee0af19d02be8ef96552344137fe9c37bc",
+    "assets/HcGuardProbe.java": "1a361e2bf4e9e210ae8c92b2d43298f08a8b2a85d7ea4ff7fc6546b507608928"
+  }
+}

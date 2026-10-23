@@ -1,0 +1,94 @@
+--- a/bwamem_pair.c
++++ b/bwamem_pair.c
+@@ -108,7 +108,24 @@
+ 		}
+ }
+ 
+-int mem_matesw(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_pestat_t pes[4], const mem_alnreg_t *a, int l_ms, const uint8_t *ms, mem_alnreg_v *ma)
++/* One immutable mate query owns both strand profiles only until rescue ends.
++ * No global/TLS state and no change to DP, rescue order, or pairing statistics.
++ */
++typedef struct {
++	kswq_t *profile[2];
++	uint8_t *reverse_query;
++} mem_matesw_workspace_t;
++
++static void mem_matesw_workspace_destroy(mem_matesw_workspace_t *workspace)
++{
++	if (workspace->profile[0]) free(workspace->profile[0]);
++	if (workspace->profile[1]) free(workspace->profile[1]);
++	if (workspace->reverse_query) free(workspace->reverse_query);
++	workspace->profile[0] = workspace->profile[1] = 0;
++	workspace->reverse_query = 0;
++}
++
++static int mem_matesw_cached(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_pestat_t pes[4], const mem_alnreg_t *a, int l_ms, const uint8_t *ms, mem_alnreg_v *ma, mem_matesw_workspace_t *workspace)
+ {
+ 	extern int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, uint8_t *query, int n, mem_alnreg_t *a);
+ 	int64_t l_pac = bns->l_pac;
+@@ -124,15 +141,17 @@
+ 	if (skip[0] + skip[1] + skip[2] + skip[3] == 4) return 0; // consistent pair exist; no need to perform SW
+ 	for (r = 0; r < 4; ++r) {
+ 		int is_rev, is_larger;
+-		uint8_t *seq, *rev = 0, *ref = 0;
++		uint8_t *seq, *ref = 0;
+ 		int64_t rb, re;
+ 		if (skip[r]) continue;
+ 		is_rev = (r>>1 != (r&1)); // whether to reverse complement the mate
+ 		is_larger = !(r>>1); // whether the mate has larger coordinate
+ 		if (is_rev) {
+-			rev = malloc(l_ms); // this is the reverse complement of $ms
+-			for (i = 0; i < l_ms; ++i) rev[l_ms - 1 - i] = ms[i] < 4? 3 - ms[i] : 4;
+-			seq = rev;
++			if (workspace->reverse_query == 0) {
++				workspace->reverse_query = malloc(l_ms);
++				for (i = 0; i < l_ms; ++i) workspace->reverse_query[l_ms - 1 - i] = ms[i] < 4? 3 - ms[i] : 4;
++			}
++			seq = workspace->reverse_query;
+ 		} else seq = (uint8_t*)ms;
+ 		if (!is_rev) {
+ 			rb = is_larger? a->rb + pes[r].low : a->rb - pes[r].high;
+@@ -148,7 +167,7 @@
+ 			kswr_t aln;
+ 			mem_alnreg_t b;
+ 			int tmp, xtra = KSW_XSUBO | KSW_XSTART | (l_ms * opt->a < 250? KSW_XBYTE : 0) | (opt->min_seed_len * opt->a);
+-			aln = ksw_align2(l_ms, seq, re - rb, ref, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, xtra, 0);
++			aln = ksw_align2(l_ms, seq, re - rb, ref, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, xtra, &workspace->profile[is_rev]);
+ 			memset(&b, 0, sizeof(mem_alnreg_t));
+ 			if (aln.score >= opt->min_seed_len && aln.qb >= 0) { // something goes wrong if aln.qb < 0
+ 				b.rid = a->rid;
+@@ -173,9 +192,18 @@
+ 			++n;
+ 		}
+ 		if (n) ma->n = mem_sort_dedup_patch(opt, 0, 0, 0, ma->n, ma->a);
+-		if (rev) free(rev);
+ 		free(ref);
+ 	}
++	return n;
++}
++
++
++/* Preserve the original standalone API and its per-call ownership. */
++int mem_matesw(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, const mem_pestat_t pes[4], const mem_alnreg_t *a, int l_ms, const uint8_t *ms, mem_alnreg_v *ma)
++{
++	mem_matesw_workspace_t workspace = {{0, 0}, 0};
++	int n = mem_matesw_cached(opt, bns, pac, pes, a, l_ms, ms, ma, &workspace);
++	mem_matesw_workspace_destroy(&workspace);
+ 	return n;
+ }
+ 
+@@ -269,9 +297,12 @@
+ 			for (j = 0; j < a[i].n; ++j)
+ 				if (a[i].a[j].score >= a[i].a[0].score  - opt->pen_unpaired)
+ 					kv_push(mem_alnreg_t, b[i], a[i].a[j]);
+-		for (i = 0; i < 2; ++i)
++		for (i = 0; i < 2; ++i) {
++			mem_matesw_workspace_t workspace = {{0, 0}, 0};
+ 			for (j = 0; j < b[i].n && j < opt->max_matesw; ++j)
+-				n += mem_matesw(opt, bns, pac, pes, &b[i].a[j], s[!i].l_seq, (uint8_t*)s[!i].seq, &a[!i]);
++				n += mem_matesw_cached(opt, bns, pac, pes, &b[i].a[j], s[!i].l_seq, (uint8_t*)s[!i].seq, &a[!i], &workspace);
++			mem_matesw_workspace_destroy(&workspace);
++		}
+ 		free(b[0].a); free(b[1].a);
+ 	}
+ 	n_pri[0] = mem_mark_primary_se(opt, a[0].n, a[0].a, id<<1|0);
