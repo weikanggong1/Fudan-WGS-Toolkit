@@ -81,17 +81,21 @@ def test_partial_empty_or_bad_smaps_never_produces_partial_pss(files,bad):
 
 
 def test_midstream_oserror_discards_complete_prefix_instead_of_admitting_partial_pss(files,monkeypatch):
+    prefix=vma(0x1000,0x5000,16,8).encode()
+    reads=[]
     class FailingStream(io.BytesIO):
-        def read(self,size=-1):
+        def readinto(self,buffer):
+            reads.append(self.tell())
             if self.tell():
                 raise OSError(errno.EIO,'anonymous midstream read error')
-            return super().read(size)
+            return super().readinto(buffer)
     real_open=Path.open
     def opened(path,*args,**kwargs):
-        if path==files/'smaps':return FailingStream(vma(0x1000,0x5000,16,8).encode())
+        if path==files/'smaps':return FailingStream(prefix)
         return real_open(path,*args,**kwargs)
     monkeypatch.setattr(Path,'open',opened)
     result=r._process_memory_counters(123,include_pss=True)
+    assert reads==[0,len(prefix)]  # A complete VMA prefix was read before the real readinto failure.
     assert result['pss_bytes'] is None and result['rss_bytes']==900*1024
     assert result['pss_read_errors'][-1]==dict(source='smaps',error_type='OSError',
         errno=errno.EIO,reason='endpoint_read_failed')

@@ -6,6 +6,7 @@ FP32 GEMV/dot or K=1 outer products and are reported separately. No component re
 FP64 chunk accumulation, alternate statistical formula or precision fallback.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 import math
 import re
 import time
@@ -213,7 +214,7 @@ def _guard_workspace(device,estimate,*,left_shape,right_shape):
     _memory_guard_checks+=1
     _memory_guard_max_workspace_bytes=max(_memory_guard_max_workspace_bytes,required)
     allocator_start=time.perf_counter()
-    allocated=torch.cuda.memory_allocated(device);reserved=torch.cuda.memory_reserved(device)
+    allocated, reserved = allocator_bytes(device)
     backend=_allocator_backend()
     _memory_guard_allocator_seconds+=time.perf_counter()-allocator_start
     _memory_guard_backend_counts[backend]=_memory_guard_backend_counts.get(backend,0)+1

@@ -539,8 +539,8 @@ def test_resident_gene_route_guard_uses_storage_and_decoder_before_read(monkeypa
     pipeline.genotype=SimpleNamespace(_flat_reader=object(),genotype_raw_memory_bytes=1024,n_samples=1000)
     model=SimpleNamespace(n_pheno=1,use_spa=False,matmul_mode='tf32',device='cuda:0')
     pipeline.models=[model];monkeypatch.setattr(module,'GaussianNullModel',SimpleNamespace)
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda *a: 400*2**20 if binding=='cap' else 0)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda *a: 400*2**20 if binding=='cap' else 0)
+    allocated = 400*2**20 if binding=='cap' else 0
+    monkeypatch.setattr(module,'allocator_bytes',lambda *a:(allocated,allocated))
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda *a:(1024 if binding=='live' else 2**30,2**30))
     result=pipeline._resident_gene_reader_options(np.arange(100))
     assert bool(result)==(binding=='fits')

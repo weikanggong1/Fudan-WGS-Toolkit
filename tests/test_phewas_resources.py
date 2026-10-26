@@ -227,6 +227,7 @@ def test_zero_future_skips_live_sampling_but_keeps_durable_ledger(host,monkeypat
     monkeypatch.setattr(resources,"read_host_memory",unavailable)
     monkeypatch.setattr(resources.os,"fsync",sync)
     with gate.lease() as lease:
+        published_phase = json.loads(gate.path.read_text())["leases"][lease.token]["phase"]
         for phase in ("gene_host_ready","gene_mask_released"):
             lease.set_future(0,phase=phase)
             sample=lease.last_admission
@@ -234,9 +235,10 @@ def test_zero_future_skips_live_sampling_but_keeps_durable_ledger(host,monkeypat
             assert sample["pressure_check_skipped_reason"]=="zero_or_nonincreasing_future_budget"
             assert sample["capacity_bytes"] is None and sample["live_effective_bytes"] is None
             assert sample["pressure_constraints"]==[] and sample["future_bytes"]==0
-            assert json.loads(gate.path.read_text())["leases"][lease.token]["phase"]==phase
-        assert len(sync_calls)==3  # Initial zero plus both phase updates.
-    assert len(sync_calls)==4 and not json.loads(gate.path.read_text())["leases"]
+            assert sample["ledger_phase_coalesced"] and lease.phase == phase
+            assert json.loads(gate.path.read_text())["leases"][lease.token]["phase"] == published_phase
+        assert len(sync_calls)==1  # Only initial zero; phase-only changes are local.
+    assert len(sync_calls)==2 and not json.loads(gate.path.read_text())["leases"]
 
 
 def test_decrease_and_equal_future_skip_sampling_but_growth_requires_fresh_pressure(host,monkeypatch):

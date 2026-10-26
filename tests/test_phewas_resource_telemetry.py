@@ -103,8 +103,7 @@ def test_tensor_backing_ownership_deduplicates_views_without_copying():
 
 
 def test_live_gpu_guard_does_not_add_owned_or_reserved_bytes_again(monkeypatch):
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda _:100)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda _:140)
+    monkeypatch.setattr(r,'allocator_bytes',lambda _:(100,140))
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda _:(200,500))
     result=r.sample_gpu_memory('cuda:0',limit_bytes=300,reserve_bytes=20,required_new_bytes=180)
     assert result['available_new_bytes']==180

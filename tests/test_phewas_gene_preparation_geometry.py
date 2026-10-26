@@ -67,7 +67,9 @@ def test_multimask_anchor_dimensions_release_before_preparation_and_keep_trait_m
         # The proxy retains no x/residual/spectrum tensor and no model lease.
         assert repository.active == 0
         assert all(reference() is None for reference in repository.references)
-        assert vars(pipeline.models[0]) == dict(n=n, device=torch.device('cpu'), use_spa=False)
+        assert vars(pipeline.models[0]) == dict(n=n, device=torch.device('cpu'), use_spa=False,
+            gaussian_rotation_geometry_known=True, gaussian_has_blocks=False,
+            gaussian_maximum_family_rows=0)
         prepared_calls.append(indices.copy())
         if outcome == 'prepare_error':
             raise MemoryError('injected preparation rejection')

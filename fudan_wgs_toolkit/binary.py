@@ -113,7 +113,7 @@ def _probability_columns(probability, index):
     return probability if probability.shape[1] == 1 else probability[:, index]
 
 
-def _safeguarded_root(mu, g, q, tol, max_iter, *, newton=True):
+def _safeguarded_root_reference(mu, g, q, tol, max_iter, *, newton=True):
     """Bracket the monotone K' and evaluate only still-active columns.
 
     Residuals certify convergence; a small/NaN Newton step does not. A single
@@ -182,6 +182,14 @@ def _safeguarded_root(mu, g, q, tol, max_iter, *, newton=True):
         current[index] = update
     result.iteration_limit = active
     return result
+
+
+def _safeguarded_root(mu, g, q, tol, max_iter, *, newton=True):
+    if (g.is_cuda and g.dtype == torch.float64 and mu.dtype == torch.float64
+            and q.dtype == torch.float64 and q.ndim == 1 and q.is_contiguous()):
+        from ._binary_root_control import safeguarded_root
+        return safeguarded_root(mu, g, q, tol, max_iter, newton=newton)
+    return _safeguarded_root_reference(mu, g, q, tol, max_iter, newton=newton)
 
 
 def _newton(mu, g, q, tol, max_iter):

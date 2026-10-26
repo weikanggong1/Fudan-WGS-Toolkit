@@ -1,10 +1,10 @@
 """Static CSV contracts and allocation admission, not scientific benchmarks."""
 import csv
 import importlib
-import os
 
 import numpy as np
 import pytest
+from _file_identity_fixture import rewrite_with_changed_ctime
 
 run = importlib.import_module("fudan_wgs_toolkit.run")
 resources = importlib.import_module("fudan_wgs_toolkit.phewas_resources")
@@ -93,9 +93,8 @@ def test_file_mutation_between_passes_rejected_even_with_same_size_and_mtime(tmp
     def mutate(path, **kwargs):
         result = scan(path, **kwargs)
         if path == p:
-            stat = p.stat()
-            p.write_text(p.read_text().replace("f,001,0,1", "f,001,1,1"))
-            os.utime(p, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            rewrite_with_changed_ctime(p, p.read_bytes().replace(b"f,001,0,1", b"f,001,1,1"),
+                                      preserve_mtime=True)
         return result
 
     monkeypatch.setattr(run, "_csv_layout", mutate)

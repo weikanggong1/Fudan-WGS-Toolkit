@@ -9,6 +9,7 @@ import weakref
 import numpy as np
 import pytest
 import torch
+from _file_identity_fixture import rewrite_with_changed_ctime
 
 from fudan_wgs_toolkit import phewas_storage as storage
 from fudan_wgs_toolkit.null_model import fit_gaussian_null
@@ -76,8 +77,7 @@ def test_verification_rejects_changed_identity_even_if_contents_match(tmp_path, 
     original = path.stat()
     storage.verify_file(path, expected)
     if change == 'rewrite':
-        path.write_bytes(payload)
-        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        rewrite_with_changed_ctime(path, payload, preserve_mtime=True)
     elif change == 'replace':
         replacement = tmp_path/'replacement'
         replacement.write_bytes(payload)

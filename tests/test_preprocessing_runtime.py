@@ -1,6 +1,10 @@
 """QC CLI lifecycle contracts; no scientific fixture or external tools."""
 import copy
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,6 +30,26 @@ class QcRuntimeTests(unittest.TestCase):
         receipt = root / "build_receipt.private.json"
         atomic(receipt, dict(status="compiled_not_scientific_validation", artifacts=copy.deepcopy(self.assets)))
         self.assets.update(build_receipt=str(receipt), build_receipt_sha256=digest(receipt))
+
+    def test_host_resource_guards_do_not_import_association_dependencies(self):
+        script = textwrap.dedent("""
+            import importlib.abc, os, sys
+            forbidden = {"torch", "triton", "numpy", "scipy", "pandas"}
+            class NoAssociationDependencies(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname.split(".")[0] in forbidden:
+                        raise AssertionError("host-only preprocessing imported " + fullname)
+            sys.meta_path.insert(0, NoAssociationDependencies())
+            from fudan_wgs_toolkit.single_preprocessing import _limits, _pss
+            assert _limits()["available_bytes"] >= 0
+            assert _pss({os.getpid()}) > 0
+            assert not forbidden.intersection(sys.modules)
+        """)
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]),
+                   PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run([sys.executable, "-B", "-c", script], env=env,
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_original_defaults_and_explicit_options_are_preserved(self):
         argv = qc_argv(self.assets, "CollectMultipleMetrics", "-I", "input.bam",

@@ -5,6 +5,7 @@ source AF/MAC, orientation and ordered sample axis before the existing Single
 or gene statistic receives a DeviceMinorBlock. CPU mode is a small contract
 oracle; production CUDA uses bounded Triton count/scatter kernels.
 """
+from .._cuda_memory import allocator_bytes
 from collections import OrderedDict
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
@@ -372,8 +373,8 @@ class SharedStateBroker:
 
     def _live_available_bytes(self):
         free, total = torch.cuda.mem_get_info(self.device)
-        allocated = torch.cuda.memory_allocated(self.device)
-        unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
+        allocated, reserved = allocator_bytes(self.device)
+        unused = max(0, reserved-allocated)
         cap = int(total) if self._limit is None else min(int(total), self._limit)
         return max(0, min(int(free)+unused, cap-allocated)-self._reserve)
 
@@ -426,8 +427,8 @@ class SharedStateBroker:
             # Own LRU entries may be evicted; independent model allocations are
             # only retired through the explicitly installed owner callback.
             while self._raw_sources or self._device_sources:
-                allocated = torch.cuda.memory_allocated(self.device)
-                unused = max(0, torch.cuda.memory_reserved(self.device)-allocated)
+                allocated, reserved = allocator_bytes(self.device)
+                unused = max(0, reserved-allocated)
                 free, _ = torch.cuda.mem_get_info(self.device)
                 if ((self._limit is None or allocated+required+self._reserve <= self._limit)
                         and required <= max(0, free+unused-self._reserve)):

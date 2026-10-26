@@ -41,8 +41,7 @@ def mocked_cuda(monkeypatch):
                    workspace_rejections=0, last_rejection=None)
     monkeypatch.setattr(_burden, '_METRICS', metrics)
     monkeypatch.delenv('TORCH_ALLOW_TF32_CUBLAS_OVERRIDE', raising=False)
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: state.allocated)
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: state.reserved)
+    monkeypatch.setattr(_burden, 'allocator_bytes', lambda device: (state.allocated, state.reserved))
     monkeypatch.setattr(torch.cuda, 'device', lambda device: nullcontext())
 
     def memory_info():

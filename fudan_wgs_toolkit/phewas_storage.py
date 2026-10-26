@@ -1,5 +1,6 @@
 """Private immutable model stores and bounded, complete PheWAS CSV shards."""
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -903,8 +904,8 @@ class ModelRepository:
         cache_budget = self.cache_limit_bytes if cache_limit_bytes is None else cache_limit_bytes
         if cache_live_fraction is not None and device.type == 'cuda':
             free, total = torch.cuda.mem_get_info(device)
-            allocated = torch.cuda.memory_allocated(device)
-            unused = max(0, torch.cuda.memory_reserved(device)-allocated)
+            allocated, reserved = allocator_bytes(device)
+            unused = max(0, reserved-allocated)
             cap = int(total) if limit_bytes is None else min(int(total), limit_bytes)
             # Own cached storage already consumes allocated memory. Restore
             # those bytes only to the cache sizing basis, never to admission.
@@ -951,8 +952,8 @@ class ModelRepository:
         released = False
         while True:
             free, total = torch.cuda.mem_get_info(device)
-            allocated = torch.cuda.memory_allocated(device)
-            unused = max(0, torch.cuda.memory_reserved(device)-allocated)
+            allocated, reserved = allocator_bytes(device)
+            unused = max(0, reserved-allocated)
             limit = self._memory_policies.get(device, (None, 0))[0]
             cap = int(total) if limit is None else min(int(total), limit)
             # Keep the reserve inside both the physical and process ceilings.

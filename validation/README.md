@@ -2,6 +2,8 @@
 
 真实数据范围、资源、精度和耗时随对应功能说明维护，不将接口测试耗时当作分析速度。
 
+`guo` 运行时优化的整合、回归覆盖及真实数据验收状态见[关联运行时优化](../docs/runtime_optimization.md)。
+
 | 功能 | 验证记录 | 当前证据 |
 | --- | --- | --- |
 | 单样本原始预处理 | [单样本说明](../docs/single_subj_preprocessing.md#9-精度耗时与内存已完成范围)、[最新 10M 对照](single_subj_preprocessing_10M_20261020.anonymous.json) | 真实 10M 对 FASTQ、8.8 Mb 调用的两路完整 API，五组全记录、BQSR 五表、VCF 及独立 PLINK 完整回读；QC 等待修复、有限内存窗口与额外验收耗时分别记录。完整原始 WGS 和长期稳定性未验收 |

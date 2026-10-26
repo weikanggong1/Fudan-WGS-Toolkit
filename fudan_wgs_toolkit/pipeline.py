@@ -4,6 +4,7 @@ SPDX-License-Identifier: GPL-3.0-only
 Analysis rules follow the frozen original independent-trait workflow 0.9.7.1 source.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 from dataclasses import dataclass
 from collections import OrderedDict
@@ -653,8 +654,8 @@ class PheWASPipeline:
         # The raw budget may span gaps/layers beyond this block's selected sites.
         reserve = 256 * 2**20
         scratch = 96 * n * b + 4 * self.genotype.genotype_raw_memory_bytes + 8 * self.genotype.n_samples
-        allocated = torch.cuda.memory_allocated(model.device)
-        unused = max(0, torch.cuda.memory_reserved(model.device) - allocated)
+        allocated, reserved = allocator_bytes(model.device)
+        unused = max(0, reserved-allocated)
         free, _ = torch.cuda.mem_get_info(model.device)
         needed = storage + scratch + reserve
         counters = self.local_mask_reuse_counters

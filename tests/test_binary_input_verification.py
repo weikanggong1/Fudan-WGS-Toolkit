@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from _file_identity_fixture import rewrite_with_changed_ctime
 
 from fudan_wgs_toolkit import prepared_association as prepared
 from fudan_wgs_toolkit import run
@@ -59,7 +60,8 @@ def test_same_length_edits_or_inode_replacements_fail_closed(tmp_path,change):
         target=Path(source['prepared_directory'])/'COMPLETE'
     original=target.stat(); payload=target.read_bytes()
     if change=='same_size_content':
-        target.write_bytes(payload.replace(b'disease_a',b'disease_x'))
+        rewrite_with_changed_ctime(target, payload.replace(b'disease_a',b'disease_x'),
+                                  preserve_mtime=True)
         assert target.stat().st_size==original.st_size
     else:
         replacement=target.with_name(target.name+'.new')
@@ -75,7 +77,7 @@ def test_same_length_edits_or_inode_replacements_fail_closed(tmp_path,change):
 def test_source_change_between_matrix_read_and_initial_hash_is_rejected(tmp_path):
     source,phenotype=binding(tmp_path)
     loaded={str(phenotype):prepared._input_file_identity(phenotype)}
-    phenotype.write_bytes(phenotype.read_bytes())
+    rewrite_with_changed_ctime(phenotype, phenotype.read_bytes())
     with pytest.raises(ValueError,match='matrices were read'):
         prepared._BinaryInputVerification(source,loaded_input_stats=loaded)
 
@@ -91,7 +93,7 @@ def test_full_hash_pass_brackets_same_bytes_rewrite_with_stat_proof(tmp_path,mon
         value=original(path)
         if str(path)==str(phenotype):
             # Even a same-byte rewrite invalidates the identity around hashing.
-            phenotype.write_bytes(phenotype.read_bytes())
+            rewrite_with_changed_ctime(phenotype, phenotype.read_bytes())
         return value
     monkeypatch.setattr(prepared,'digest_file',digest)
     with pytest.raises(ValueError,match=f'during the {boundary}'):

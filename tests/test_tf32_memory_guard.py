@@ -32,8 +32,7 @@ def test_live_shared_device_and_process_budget_bind_independently(cap,live,bindi
 
 def test_guard_rejects_before_math_with_one_query_and_anonymous_snapshot(monkeypatch):
     tf32.configure_tf32();tf32.execution_metadata(reset=True);queries=[]
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:100)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:120)
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(100,120))
     monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(queries.append(1) or 0,80*2**30))
     left=SimpleNamespace(shape=(2,100),dtype=torch.float64,device='cuda:0')
@@ -63,8 +62,7 @@ def test_configured_reserve_reaches_both_live_and_process_guard(monkeypatch):
     monkeypatch.setattr(tf32, '_memory_limit_bytes', tf32._memory_limit_bytes)
     monkeypatch.setattr(tf32, '_memory_reserve_bytes', tf32._memory_reserve_bytes)
     configured=tf32.configure_tf32(memory_limit_gib=80,memory_reserve_bytes=512)
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:100)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:100)
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(100,100))
     monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(520,80*2**30))
     left=SimpleNamespace(shape=(2,2),dtype=torch.float32,device='cuda:0')
@@ -82,8 +80,7 @@ def test_process_reserve_is_preserved_even_with_idle_device_and_owned_cache(monk
     # reserve. An idle device or a large reusable cache cannot override it.
     monkeypatch.setattr(tf32,'_memory_limit_bytes',100+16+16-1)
     monkeypatch.setattr(tf32,'_memory_reserve_bytes',16)
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:100)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:100+unused_cache)
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(100,100+unused_cache))
     monkeypatch.setattr(torch.cuda,'get_allocator_backend',lambda:'native',raising=False)
     monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(10**9,80*2**30))
@@ -109,8 +106,7 @@ def test_outer_broadcast_has_no_operand_materialization_or_component_workspace(l
 
 def test_live_memory_queries_are_not_cached_even_for_repeated_product(monkeypatch):
     tf32.configure_tf32();tf32.execution_metadata(reset=True);queries=[]
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:0)
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:0)
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(0,0))
     monkeypatch.setattr(torch.cuda,'device',lambda device:nullcontext())
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(queries.append(1) or 30*2**30,40*2**30))
     a=SimpleNamespace(shape=(2,1),dtype=torch.float32,device='cuda:0')

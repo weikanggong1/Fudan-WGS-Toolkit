@@ -109,8 +109,8 @@ def _mock_cache_admission(monkeypatch, module, *, allocated, cap, reserved=None)
     monkeypatch.setattr(module._tf32, "execution_metadata", lambda: {
         "tf32_memory_guard": {"process_allocated_limit_bytes": cap, "live_cuda_reserve_bytes": 0}})
     monkeypatch.setattr(module._tf32, "_allocator_backend", lambda: "native")
-    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: allocated)
-    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: allocated if reserved is None else reserved)
+    monkeypatch.setattr(module, "allocator_bytes", lambda device:
+        (allocated, allocated if reserved is None else reserved))
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda: (2**30, 2**30))
     monkeypatch.setattr(torch.cuda, "device", lambda device: nullcontext())
     return calls
@@ -153,8 +153,8 @@ def test_invalidated_cache_references_are_removed_before_live_snapshot(monkeypat
     calls = _mock_cache_admission(monkeypatch, module, allocated=1024, cap=2**20)
     def snapshot(device):
         assert model._constant_precision_covariance_cache is None
-        return 1024
-    monkeypatch.setattr(torch.cuda, "memory_allocated", snapshot)
+        return 1024, 1024
+    monkeypatch.setattr(module, "allocator_bytes", snapshot)
     model._covariance_product_state()
     assert len(calls) == 1
 

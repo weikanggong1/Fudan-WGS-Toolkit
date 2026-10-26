@@ -5,6 +5,7 @@ in the private task directory. Memory is admitted, never waited for while a
 partial genotype is retained; callers unwind preparation before retrying.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 from contextlib import contextmanager
 import copy
@@ -540,7 +541,7 @@ def sample_gpu_memory(device, *, limit_bytes=None, reserve_bytes=256*2**20,
     footprint = tensor_storage_footprint(owned_tensors)
     if target.type != "cuda":
         return dict(device_type=target.type,**footprint,cuda_memory_observed=False)
-    allocated,reserved = int(torch.cuda.memory_allocated(target)),int(torch.cuda.memory_reserved(target))
+    allocated, reserved = allocator_bytes(target)
     free,total = map(int,torch.cuda.mem_get_info(target))
     unused = max(0,reserved-allocated)
     capacity = total if limit_bytes is None else min(total,limit_bytes)
@@ -1293,11 +1294,15 @@ class HostMemoryGate:
             # tree while buffers are being released. Every later increase
             # takes the fresh-pressure path below, including growth from zero.
             if not required_bytes or shrinking:
-                coalesced = (not self.ledger_durable and previous is not None
-                             and required_bytes == previous['future_bytes'])
-                # Ephemeral IPC records the phase of the last budget change;
-                # current per-call diagnostics remain local on the lease. A
-                # changed label alone never requires a shared-file rewrite.
+                coalesced = (previous is not None
+                             and required_bytes == previous['future_bytes']
+                             and previous.get('registration_token') == self.registration_token
+                             and previous.get('label') == lease.label)
+                # The shared record keeps the phase of its last budget or
+                # ownership/label change; current phase remains on the lease.
+                # Locks, identity checks and reaping above always run. _write
+                # still durably publishes any real state change, including
+                # peer cleanup; only a phase-only publication is coalesced.
                 if not coalesced:
                     state["leases"][lease.token] = dict(identity=lease.identity,
                         future_bytes=required_bytes,peak_future_bytes=max(required_bytes,

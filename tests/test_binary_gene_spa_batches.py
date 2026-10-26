@@ -8,7 +8,7 @@ from fudan_wgs_toolkit.binary import prepare_binary_burdens, ExactBinaryBurdenCa
 from test_binary_gene_batch import make_models, genetic
 
 
-def setup(count=9):
+def make_spa_case(count=9):
     prepared = make_models(count=count)
     g, f, a = genetic(57)
     burdens = prepare_binary_burdens(prepared[0].model, g, f, a, ['a', 'b'])
@@ -16,7 +16,7 @@ def setup(count=9):
 
 
 def test_selected_trait_batches_hold_original_leases_and_match_independent_outputs(monkeypatch):
-    prepared, g, f, a, burdens = setup()
+    prepared, g, f, a, burdens = make_spa_case()
     active, events = set(), []
     factories = []
     for trait, item in enumerate(prepared):
@@ -57,7 +57,7 @@ def test_selected_trait_batches_hold_original_leases_and_match_independent_outpu
 
 @pytest.mark.parametrize('reject', ['callback', 'built_in', 'sidecar'])
 def test_spa_batch_admission_failure_releases_leases_and_uses_independent_path(monkeypatch, reject):
-    prepared, g, f, a, burdens = setup(3)
+    prepared, g, f, a, burdens = make_spa_case(3)
     active, enters, releases = set(), [], []
     factories = []
     first = True
@@ -105,7 +105,7 @@ def test_selected_packing_never_splits_a_large_trait_or_exceeds_bounds():
 
 
 def test_diagonal_and_full_covariance_normal_products_have_identical_output():
-    prepared, g, f, a, burdens = setup(1)
+    prepared, g, f, a, burdens = make_spa_case(1)
     model = prepared[0].model
     score, covariance = model.score_covariance(burdens.burdens)
     full, full_diag = staar_binary_phewas(model, g, f, a, ['a', 'b'], prepared_burdens=burdens,
@@ -153,7 +153,7 @@ def test_near_filter_rechecks_vector_score_and_retains_repaired_variance(monkeyp
 
 
 def test_spa_batch_solver_failure_releases_all_sidecars_and_workspace(monkeypatch):
-    prepared, g, f, a, burdens = setup(2)
+    prepared, g, f, a, burdens = make_spa_case(2)
     active, released = set(), []
     factories = []
     for trait, item in enumerate(prepared):
@@ -185,7 +185,7 @@ def test_spa_batch_solver_failure_releases_all_sidecars_and_workspace(monkeypatc
     ({'rv_num_cutoff_max': 57}, 'rare-variant count'),
 ])
 def test_selected_batch_preserves_original_entry_validation(changes, message):
-    prepared, g, f, a, burdens = setup(2)
+    prepared, g, f, a, burdens = make_spa_case(2)
     entered = []
     @contextmanager
     def acquire():
@@ -199,7 +199,7 @@ def test_selected_batch_preserves_original_entry_validation(changes, message):
 
 
 def test_selected_batch_requires_verified_lazy_factory_binding_before_acquisition():
-    prepared, g, f, a, burdens = setup(2)
+    prepared, g, f, a, burdens = make_spa_case(2)
     prepared[1].model.null_fit_source_sha256 = None
     entered = []
     @contextmanager

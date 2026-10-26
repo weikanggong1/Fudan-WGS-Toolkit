@@ -24,8 +24,7 @@ def operands(left_dtype=torch.float32,right_dtype=torch.float32):
 
 def snapshots(monkeypatch,allocated,reserved,free=30*2**30):
     calls=[]
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:(calls.append(('allocated',device)) or allocated))
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:(calls.append(('reserved',device)) or reserved))
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(calls.append(('allocator',device)) or (allocated,reserved)))
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(calls.append(('free','cuda:0')) or free,40*2**30))
     return calls
 
@@ -48,7 +47,8 @@ def test_byte_boundaries_keep_cap_and_fallback(monkeypatch,cache_delta,cap_delta
     assert report['owned_cache_passes']==int(owned)
     assert report['cuda_free_queries']==int(not owned)
     assert report['workspace_rejections']==int(rejected)
-    assert calls[:2]==[('allocated','cuda:0'),('reserved','cuda:0')]
+    assert calls[0]==('allocator','cuda:0')
+    assert sum(kind=='allocator' for kind,_ in calls)==1
     if owned:
         assert report['last_owned_cache_pass']['cuda_free_bytes'] is None
         assert report['last_owned_cache_pass']['available_owned_cache_lower_bound_bytes']>=required
@@ -84,12 +84,11 @@ def test_missing_or_failed_backend_api_falls_back(monkeypatch):
 
 def test_allocator_state_is_fresh_after_an_owned_cache_pass(monkeypatch):
     allocated=iter([0,0]);reserved=iter([2**30,0]);calls=[]
-    monkeypatch.setattr(torch.cuda,'memory_allocated',lambda device:(calls.append('allocated') or next(allocated)))
-    monkeypatch.setattr(torch.cuda,'memory_reserved',lambda device:(calls.append('reserved') or next(reserved)))
+    monkeypatch.setattr(tf32,'allocator_bytes',lambda device:(calls.append('allocator') or (next(allocated),next(reserved))))
     monkeypatch.setattr(torch.cuda,'mem_get_info',lambda:(calls.append('free') or 30*2**30,40*2**30))
     tf32._guard_product_workspace(*operands(),mode='tf32')
     tf32._guard_product_workspace(*operands(),mode='tf32')
-    assert calls==['allocated','reserved','allocated','reserved','free']
+    assert calls==['allocator','allocator','free']
     report=tf32.execution_metadata()['tf32_memory_guard']
     assert report['total_checks']==2 and report['owned_cache_passes']==report['cuda_free_queries']==1
 

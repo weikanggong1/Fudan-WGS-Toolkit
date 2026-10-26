@@ -1,5 +1,6 @@
 """Shared genotype scores use IEEE FP32 while covariance retains native TF32."""
 from __future__ import annotations
+from .._cuda_memory import allocator_bytes
 
 from copy import deepcopy
 import os
@@ -34,8 +35,7 @@ def _simt_admission(genotype, traits):
     _METRICS['maximum_estimated_new_workspace_bytes'] = max(
         _METRICS['maximum_estimated_new_workspace_bytes'], required)
     _METRICS['workspace_queries'] += 1
-    allocated = torch.cuda.memory_allocated(genotype.device)
-    reserved = torch.cuda.memory_reserved(genotype.device)
+    allocated, reserved = allocator_bytes(genotype.device)
     with torch.cuda.device(genotype.device):
         free, _ = torch.cuda.mem_get_info()
     available = tf32._product_workspace_availability(allocated=allocated,

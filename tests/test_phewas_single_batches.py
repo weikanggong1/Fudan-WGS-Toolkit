@@ -15,6 +15,7 @@ from fudan_wgs_toolkit.genotype_device import DeviceMinorBlock
 from fudan_wgs_toolkit.binary_null import BinaryNullModel
 from fudan_wgs_toolkit.null_model import fit_gaussian_null
 from fudan_wgs_toolkit.pipeline import AnalysisOptions, PheWASPipeline
+from fudan_wgs_toolkit import pipeline as pipeline_module
 from fudan_wgs_toolkit.phewas_runtime import single
 
 
@@ -195,13 +196,12 @@ def test_resident_gene_binary_guard_admits_only_complete_native_diagonal_state(m
     pipeline.genotype = SimpleNamespace(_flat_reader=object(), n_samples=256, genotype_raw_memory_bytes=1024)
     pipeline.local_mask_reuse_counters = {}
     queried = []
-    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda device: queried.append("allocated") or 0)
-    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda device: queried.append("reserved") or 0)
+    monkeypatch.setattr(pipeline_module, "allocator_bytes", lambda device: queried.append("allocator") or (0, 0))
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: queried.append("free") or (80 * 2**30, 80 * 2**30))
     result = pipeline._resident_gene_reader_options(np.arange(10))
     if state == "complete":
         assert result == dict(device=device, resident=True)
-        assert queried == ["allocated", "reserved", "free"]
+        assert queried == ["allocator", "free"]
     else:
         assert result == {} and queried == []
 

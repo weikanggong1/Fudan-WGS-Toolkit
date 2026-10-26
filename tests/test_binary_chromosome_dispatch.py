@@ -217,6 +217,9 @@ handles=[os.open('/dev/null',os.O_RDONLY) for _ in range(256)]
 binding=dict(source_implementation_sha256='source',input_manifest_sha256='inputs',configuration_sha256='ordered',models={'0':'bound'})
 writer=ChromosomeCheckpointCSVWriter(sys.argv[1],binding=binding,chromosomes=['21'],file_descriptor_admission=admission)
 writer.write_tile('coding','21',[(i,[dict(Chr='21',P=.25)]) for i in range(799)],job_index=0)
+# The production telemetry is throttled; force this fixture's observation
+# while all 799 real lock owners are still live, before finish releases them.
+writer.telemetry.sample(force=True)
 result=writer.finish()
 for handle in handles: os.close(handle)
 print(json.dumps(dict(rows=result['rows'],files=result['files'],file_descriptors=result['file_descriptors'],verified=result['committed_range_checksums_verified'])))

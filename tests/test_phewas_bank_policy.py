@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from fudan_wgs_toolkit.phewas_storage import ModelRepository, digest_file
+from fudan_wgs_toolkit import phewas_storage
 
 
 class _ExplicitStorageEntry(SimpleNamespace):
@@ -109,8 +110,7 @@ def test_live_cache_fraction_counts_owned_storage_once_and_restores_nested_limit
     repository._entry_storages[token] = {('cuda:0', storage[1]): 100}
     repository._cache_bytes_by_device = {'cuda:0': 100}
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (700, 1000))
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 300)
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 400)
+    monkeypatch.setattr(phewas_storage, 'allocator_bytes', lambda device: (300, 400))
     with repository.memory_policy('cuda:0', limit_bytes=900, reserve_bytes=100,
                                   cache_live_fraction=.5):
         # min(700+100-100,900-300-100)+100 already-owned =600.

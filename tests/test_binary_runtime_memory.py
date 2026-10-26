@@ -105,11 +105,11 @@ def test_explicit_preallocation_fraction_still_wins_for_binary(monkeypatch):
 
 
 def test_binary_preallocation_uses_real_driver_cap_and_own_live_allocations(monkeypatch):
+    from fudan_wgs_toolkit import phewas_partition
     from fudan_wgs_toolkit.phewas_partition import gpu_model_cache_capacity
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (79*2**30, 80*2**30))
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 2*2**30)
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 3*2**30)
+    monkeypatch.setattr(phewas_partition, 'allocator_bytes', lambda device: (2*2**30, 3*2**30))
     assert gpu_model_cache_capacity((0, 1), memory_limit_gib=40,
         binary_only=True) == int(37*2**30*.75)
 

@@ -364,8 +364,7 @@ def test_batch_capacity_uses_fresh_total_budget_and_accounts_gathered_D(monkeypa
     covariance = SimpleNamespace(shape=(7, 7), is_cuda=True, device=torch.device('cuda'))
     unit = weighted.full_workspace_unit_bytes(7)+4*7
     monkeypatch.setattr(torch.cuda, 'device', lambda device: nullcontext())
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 900)
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 1000)
+    monkeypatch.setattr(weighted, 'allocator_bytes', lambda device: (900, 1000))
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda: (5000, 10000))
     snapshots = []
     def availability(**kwargs):

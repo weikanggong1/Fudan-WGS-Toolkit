@@ -42,7 +42,7 @@ def continuous_fixture(tmp_path, *, sparse_observations=False):
 
 
 def cpu_single_control(monkeypatch):
-    from fudan_wgs_toolkit import run
+    from fudan_wgs_toolkit import run, phewas_partition
     from fudan_wgs_toolkit.cache_runtime.adapter_fast import CachedGenotypeAdapter
     from fudan_wgs_toolkit.pipeline import AnalysisOptions, PheWASPipeline
     from fudan_wgs_toolkit.phewas_runtime import runtime
@@ -51,8 +51,7 @@ def cpu_single_control(monkeypatch):
     monkeypatch.setattr(run.torch.cuda, "device_count", lambda: 1)
     monkeypatch.setattr(run.torch.cuda, "mem_get_info", lambda *args: (8*2**30, 8*2**30))
     # CPU formula controls inject the whole CUDA accounting boundary.
-    monkeypatch.setattr(run.torch.cuda, "memory_allocated", lambda *args: 0)
-    monkeypatch.setattr(run.torch.cuda, "memory_reserved", lambda *args: 0)
+    monkeypatch.setattr(phewas_partition, "allocator_bytes", lambda *args: (0, 0))
 
     def fit(*args, **kwargs):
         calls["fits"].append(kwargs.copy())

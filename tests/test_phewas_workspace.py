@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from fudan_wgs_toolkit.phewas_storage import ModelRepository, save_model_store
+from fudan_wgs_toolkit import phewas_storage
 from fudan_wgs_toolkit.phewas_runtime import runtime
 from fudan_wgs_toolkit.phewas_runtime.shared_state import SharedStateBroker
 from fudan_wgs_toolkit.pipeline import AnalysisOptions
@@ -31,8 +32,7 @@ def simulated_cuda(monkeypatch, repository, *, total=1000):
             value.bytes for bank in (repository.models, repository.spa_sources)
             for key, value in bank.items() if key[1] == 'cuda:0')
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (total-used(), total))
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: used())
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: used())
+    monkeypatch.setattr(phewas_storage, 'allocator_bytes', lambda device: (used(), used()))
     def empty():
         state['emptied'] += 1
     monkeypatch.setattr(torch.cuda, 'empty_cache', empty)
@@ -185,8 +185,8 @@ def test_batched_runtime_installs_cap_and_reserve_then_restores_policy_on_error(
     monkeypatch.setattr(torch.cuda, 'get_device_properties', lambda device: SimpleNamespace(total_memory=80*2**30))
     # Inject the complete CUDA accounting boundary on this CPU contract test.
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (80*2**30, 80*2**30))
-    monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 0)
-    monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 0)
+    monkeypatch.setattr(phewas_storage, 'allocator_bytes', lambda device: (0, 0))
+    monkeypatch.setattr(runtime, 'allocator_bytes', lambda device: (0, 0))
     monkeypatch.setattr(runtime.cli, '_weighted_eigensolver_settings', lambda *args: {'effective': 'torch'})
     repository = ModelRepository([], workspace_bytes=0)
     repository._descriptors = [descriptor(0, np.arange(1))]

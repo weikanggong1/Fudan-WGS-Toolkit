@@ -8,6 +8,7 @@ import torch
 
 from fudan_wgs_toolkit.cache_runtime import fast_container, sparse_codec_fast, store
 from fudan_wgs_toolkit.phewas_runtime.shared_state import RawStateBlock, SharedStateBroker
+from fudan_wgs_toolkit.phewas_runtime import shared_state
 
 
 class MetadataReader:
@@ -321,6 +322,7 @@ def test_adaptive_cache_caps_use_live_available_and_leave_reserve(tmp_path, monk
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (500, 2000))
     monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 200)
     monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 300)
+    monkeypatch.setattr(shared_state, 'allocator_bytes', lambda device: (200, 300))
     with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
             device='cuda:0', memory_limit_gib=1000/2**30, memory_reserve_bytes=100,
             device_cache_bytes=1000, device_cache_live_fraction=.25) as broker:
@@ -331,6 +333,7 @@ def test_adaptive_cache_caps_use_live_available_and_leave_reserve(tmp_path, monk
             assert broker.metrics['raw_state_cache_limit_bytes'] == 250
         monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (0, 2000))
         monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 200)
+        monkeypatch.setattr(shared_state, 'allocator_bytes', lambda device: (200, 200))
         with broker.raw_state_cache(1000):
             assert broker.metrics['raw_state_cache_limit_bytes'] == 0
 
@@ -341,6 +344,7 @@ def test_smaller_process_cap_retains_reserve_for_raw_cache_and_new_genotypes(tmp
     monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (1800, 2000))
     monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 200)
     monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 200)
+    monkeypatch.setattr(shared_state, 'allocator_bytes', lambda device: (200, 200))
     with SharedStateBroker(MetadataReader(raw.shape[1], len(raw)), make_cache(tmp_path/'cache', raw),
             device='cuda:0', memory_limit_gib=1000/2**30, memory_reserve_bytes=100,
             device_cache_bytes=1000, device_cache_live_fraction=.25) as broker:
@@ -364,6 +368,7 @@ def test_retiring_raw_cache_does_not_credit_active_external_storage(tmp_path, mo
             monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda device: (100, 1000))
             monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 900)
             monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 900)
+            monkeypatch.setattr(shared_state, 'allocator_bytes', lambda device: (900, 900))
             try:
                 with pytest.raises(MemoryError, match='live CUDA budget'):
                     broker._guard(150)

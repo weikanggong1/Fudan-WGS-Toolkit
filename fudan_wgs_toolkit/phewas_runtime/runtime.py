@@ -4,6 +4,7 @@ Each analysis retains the single-trait pipeline, output groups and model state.
 Single scans are frame-major; gene jobs are family-major across all models.
 """
 from __future__ import annotations
+from .._cuda_memory import allocator_bytes
 from collections import Counter, OrderedDict
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
@@ -61,8 +62,7 @@ def _gpu_memory_diagnostics(device, repository=None, broker=None):
     result = dict(device_type=target.type,
                   scope='owned process allocator/cache endpoint; not a peak or NVML card total')
     if target.type == 'cuda':
-        allocated = int(torch.cuda.memory_allocated(target))
-        reserved = int(torch.cuda.memory_reserved(target))
+        allocated, reserved = allocator_bytes(target)
         result.update(allocated_bytes=allocated, reserved_bytes=reserved,
                       unused_reserved_bytes=max(0, reserved-allocated))
     if repository is not None:

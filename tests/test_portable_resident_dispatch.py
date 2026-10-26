@@ -8,6 +8,7 @@ import torch
 from fudan_wgs_toolkit.cache_runtime.portable import PortableGenotypeReader
 from fudan_wgs_toolkit.null_model import GaussianNullModel
 from fudan_wgs_toolkit.pipeline import AnalysisOptions, PheWASPipeline
+from fudan_wgs_toolkit import pipeline as pipeline_module
 from test_cache_portable import portable
 
 
@@ -25,8 +26,7 @@ def analysis_fixture(reader, monkeypatch, *, free_bytes=2**30,
     analysis.resident_genotypes = True
     analysis.union_rows = np.arange(100)
     analysis.local_mask_reuse_counters = {}
-    monkeypatch.setattr(torch.cuda,"memory_allocated",lambda *args:allocated_bytes)
-    monkeypatch.setattr(torch.cuda,"memory_reserved",lambda *args:reserved_bytes)
+    monkeypatch.setattr(pipeline_module,"allocator_bytes",lambda *args:(allocated_bytes,reserved_bytes))
     monkeypatch.setattr(torch.cuda,"mem_get_info",lambda *args:(free_bytes,2**30))
     return analysis
 

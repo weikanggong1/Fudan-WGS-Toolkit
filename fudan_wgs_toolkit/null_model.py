@@ -5,6 +5,7 @@ AI initialization, steps, boundary refits and stopping rule follow GMMAT
 R/glmmkin.R, https://github.com/hanchenphd/GMMAT.
 """
 from __future__ import annotations
+from ._cuda_memory import allocator_bytes
 
 from dataclasses import dataclass
 import numpy as np
@@ -34,8 +35,7 @@ def _guard_constant_precision_cache_allocation(sources, device):
     configuration = _tf32.execution_metadata()["tf32_memory_guard"]
     limit = configuration["process_allocated_limit_bytes"]
     reserve = configuration["live_cuda_reserve_bytes"]
-    allocated = torch.cuda.memory_allocated(device)
-    reserved = torch.cuda.memory_reserved(device)
+    allocated, reserved = allocator_bytes(device)
     backend = _tf32._allocator_backend()
     if backend == "native" and _tf32._owned_cache_sufficient(allocated, reserved, required,
             limit=limit, reserve=reserve):

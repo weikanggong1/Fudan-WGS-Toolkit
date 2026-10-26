@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import numpy as np
 import torch
 from fudan_wgs_toolkit._fit_structure_cache import FitStructureCache, available_cuda_bytes, guard_cuda_workspace
+from fudan_wgs_toolkit import _fit_structure_cache as structure_cache
 from fudan_wgs_toolkit.null_model import KinshipSpectrum, fit_gaussian_null
 from fudan_wgs_toolkit.phewas_models import SparseKinshipData, prepare_phewas_model
 from fudan_wgs_toolkit.phewas_run import _design
@@ -223,8 +224,7 @@ class TestFitStructureCache(unittest.TestCase):
         monkeypatch = _Monkeypatch(self)
         from fudan_wgs_toolkit import tf32
         monkeypatch.setattr(tf32, 'execution_metadata', lambda : dict(tf32_memory_guard=dict(process_allocated_limit_bytes=500, live_cuda_reserve_bytes=20)))
-        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 100)
-        monkeypatch.setattr(torch.cuda, 'memory_reserved', lambda device: 150)
+        monkeypatch.setattr(structure_cache, 'allocator_bytes', lambda device: (100, 150))
         monkeypatch.setattr(torch.cuda, 'mem_get_info', lambda : (200, 1000))
         monkeypatch.setattr(torch.cuda, 'device', lambda device: nullcontext())
         assert available_cuda_bytes('cpu') is None
@@ -232,10 +232,10 @@ class TestFitStructureCache(unittest.TestCase):
         guard_cuda_workspace(230, 'cuda:0')
         with self.assertRaisesRegex(MemoryError, 'available 230'):
             guard_cuda_workspace(231, 'cuda:0', context='test structure')
-        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 470)
+        monkeypatch.setattr(structure_cache, 'allocator_bytes', lambda device: (470, 150))
         assert available_cuda_bytes('cuda:0') == 10
         guard_cuda_workspace(10, 'cuda:0')
-        monkeypatch.setattr(torch.cuda, 'memory_allocated', lambda device: 490)
+        monkeypatch.setattr(structure_cache, 'allocator_bytes', lambda device: (490, 150))
         assert available_cuda_bytes('cuda:0') == 0
         with self.assertRaisesRegex(MemoryError, 'available 0'):
             guard_cuda_workspace(1, 'cuda:0', context='reserved process capacity')

@@ -86,8 +86,13 @@ class MemoryBudgetContracts(unittest.TestCase):
 
     def capacity(self,limit,allocated,free):
         t=SimpleNamespace(cuda=CapacityCUDA(allocated,free))
-        with mock.patch.object(weighted,'torch',t),mock.patch.object(tf32,'_memory_limit_bytes',limit):
-            return weighted._batch_capacity(Covariance(),1000)
+        with mock.patch.object(weighted,'torch',t),mock.patch.object(tf32,'_memory_limit_bytes',limit), \
+                mock.patch.object(weighted,'allocator_bytes',
+                    return_value=(allocated,t.cuda.reserved)) as allocator:
+            try:
+                return weighted._batch_capacity(Covariance(),1000)
+            finally:
+                allocator.assert_called_once_with(Covariance.device)
 
     def test_weighted_batches_use_40gib_process_budget_and_keep_512mib_batch_cap(self):
         count=self.capacity(40*GIB,22*GIB,60*GIB)
