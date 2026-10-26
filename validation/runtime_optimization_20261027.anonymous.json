@@ -1,0 +1,137 @@
+{
+  "schema": "anonymous_runtime_optimization_validation_v1",
+  "validation_date": "2026-10-27",
+  "status": "passed",
+  "baseline_source_commit": "f9d2fdcc3adf54c47c19ccd6892ec823ced39779",
+  "optimized_branch_commit": "4805a8793e113c9efad25fa012dd3732730762b0",
+  "workflow_scope": "fixed-model association with complete final CSV and independent readback",
+  "precision_policy": "existing TF32 association; original FP64 SPA",
+  "api_timing_scope": "synchronized association call including complete writer finish/readback and runtime cleanup",
+  "wrapper_timing_scope": "independently observed process launch through actual exit and owned session clear",
+  "preprocessing_and_null_fit": "not rerun; original authenticated inputs and fitted models reused",
+  "precision_threshold_abs_delta_neg_log10_p_strict": 0.001,
+  "same_device_serial_isolated_trial": false,
+  "timing_design": "cross_device_observation_with_overlapping_shared_host_load",
+  "code_causal_speedup_assessed": false,
+  "full_original_masks_preserved": true,
+  "families": [
+    {
+      "family": "continuous",
+      "traits": 16,
+      "main_association_api_seconds": 13089.069247335894,
+      "integrated_association_api_seconds": 12009.994424001081,
+      "main_worker_total_seconds": 13136.011963922996,
+      "integrated_worker_total_seconds": 12055.35015649884,
+      "main_controller_wrapper_seconds": 13140.966665373882,
+      "integrated_controller_wrapper_seconds": 12060.966539748944,
+      "independent_comparison_seconds": 289.618944484042,
+      "observed_api_time_ratio_main_over_integrated": 1.0898480703020446,
+      "main_component_timings": {
+        "api_excluding_writer_finish_and_final_audit_seconds": 13015.020630417857,
+        "full_input_sha_verification_seconds": 36.96686599613167,
+        "independent_persistent_output_validation_seconds": 1.3252212519291788,
+        "initialization_seconds": 45.37222069106065,
+        "postrun_binding_verification_seconds": 0.11761072208173573,
+        "pre_cleanup_worker_seconds": 13135.894527473953,
+        "source_verification_seconds": 0.05306392489001155,
+        "writer_finish_and_final_csv_audit_seconds": 74.04861691803671
+      },
+      "integrated_component_timings": {
+        "api_excluding_writer_finish_and_final_audit_seconds": 11935.129962611245,
+        "full_input_sha_verification_seconds": 36.844626947073266,
+        "independent_persistent_output_validation_seconds": 1.347845190903172,
+        "initialization_seconds": 43.759997135959566,
+        "postrun_binding_verification_seconds": 0.12126440578140318,
+        "pre_cleanup_worker_seconds": 12055.234180451138,
+        "source_verification_seconds": 0.056794445030391216,
+        "writer_finish_and_final_csv_audit_seconds": 74.86446138983592
+      },
+      "all_decompressed_csv_bytes_identical": true,
+      "precision_metrics": {
+        "max_abs_delta_log10_p": 0.0,
+        "violation_count": 0,
+        "zero_without_native_logp_unknown": 0,
+        "metadata_mismatch_count": 0,
+        "classification_mismatch_count": 0,
+        "invalid_numeric_cell_count": 0,
+        "structural_error_count": 0,
+        "model_failure_marker_count": 0
+      },
+      "scientific_gate": true
+    },
+    {
+      "family": "binary",
+      "traits": 16,
+      "main_association_api_seconds": 13746.053797484143,
+      "integrated_association_api_seconds": 9137.901917572832,
+      "main_worker_total_seconds": 13803.939794929931,
+      "integrated_worker_total_seconds": 9190.208660532022,
+      "main_controller_wrapper_seconds": 13804.979816582054,
+      "integrated_controller_wrapper_seconds": 9195.552417621948,
+      "independent_comparison_seconds": 471.74509629397653,
+      "observed_api_time_ratio_main_over_integrated": 1.5042899257924305,
+      "main_component_timings": {
+        "api_excluding_writer_finish_and_final_audit_seconds": 13648.561522713164,
+        "full_input_sha_verification_seconds": 37.08816669601947,
+        "independent_persistent_output_validation_seconds": 1.3698901131283492,
+        "initialization_seconds": 56.3128776201047,
+        "postrun_binding_verification_seconds": 0.1210054021794349,
+        "pre_cleanup_worker_seconds": 13803.866807260085,
+        "source_verification_seconds": 0.05416600499302149,
+        "writer_finish_and_final_csv_audit_seconds": 97.49227477097884
+      },
+      "integrated_component_timings": {
+        "api_excluding_writer_finish_and_final_audit_seconds": 9039.053968957625,
+        "full_input_sha_verification_seconds": 37.1870807451196,
+        "independent_persistent_output_validation_seconds": 1.386150497943163,
+        "initialization_seconds": 50.714858510997146,
+        "postrun_binding_verification_seconds": 0.11943259090185165,
+        "pre_cleanup_worker_seconds": 9190.133549055085,
+        "source_verification_seconds": 0.055779446847736835,
+        "writer_finish_and_final_csv_audit_seconds": 98.8479486152064
+      },
+      "all_decompressed_csv_bytes_identical": true,
+      "precision_metrics": {
+        "max_abs_delta_log10_p": 0.0,
+        "violation_count": 0,
+        "zero_without_native_logp_unknown": 0,
+        "metadata_mismatch_count": 0,
+        "classification_mismatch_count": 0,
+        "invalid_numeric_cell_count": 0,
+        "structural_error_count": 0,
+        "model_failure_marker_count": 0
+      },
+      "scientific_gate": true
+    }
+  ],
+  "regression": {
+    "main_cpu": {
+      "passed": 3692,
+      "skipped": 224
+    },
+    "integrated_cpu": {
+      "passed": 3696,
+      "skipped": 318
+    },
+    "cuda_and_import_compatibility": {
+      "passed": 157,
+      "skipped": 0
+    },
+    "additional_cuda_device": {
+      "passed": 151,
+      "skipped": 0
+    },
+    "without_torch_preprocessing_resources": {
+      "passed": 6
+    }
+  },
+  "verification": {
+    "all_prescribed_tasks_and_traits_verified": true,
+    "all_four_stage_actual_exits_zero": true,
+    "controller_actual_exit_zero": true,
+    "no_watchdog_or_unknown_or_owned_residual_processes": true,
+    "complete_result_audit_and_independent_comparison_passed": true,
+    "source_input_model_and_output_seal_chains_verified": true,
+    "release_production_source_matches_tested_candidate": true
+  }
+}
