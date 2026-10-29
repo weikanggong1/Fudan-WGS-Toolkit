@@ -156,7 +156,8 @@ GiB 为 `2**30` 字节；缓存参数以字节计。以下默认值对应当前�
 | `single_mac_cutoff` | `20` | Single 的最小 MAC 资格条件，每个表型独立计算。 |
 | `single_group_variants` | `5000` | Single 的逻辑有效变异分组大小，保留原分组和输出语义。 |
 | `single_region_size` | `10000000` | Single 逻辑区域长度，单位 bp。 |
-| `individual_effective_block_size` | `1024` | Single 每个物理请求内的有效变异缓冲上限；改变此值仍须保持逻辑序号和顺序。 |
+| `individual_effective_block_size` | `1024` | 仅在 `single_cross_frame_batches=True` 时控制合并请求的列数上限，取与内部原始请求上限 `individual_genotype_block_size` 的较小值；公开构建器的原始上限为 `1024`。`False` 时保留原物理请求和请求检查点键。 |
+| `single_cross_frame_batches` | `False` | 布尔值。`True` 按原变异顺序跨物理帧合并有界 Single 请求；`False` 沿用原物理帧批次。CLI 为 `--single-cross-frame-batches` / `--no-single-cross-frame-batches`，省略时关闭。 |
 | `device_cache_bytes` | `536870912`，512 MiB | 每 worker 有界设备数据缓存容量；不是全部模型与计算工作区预算。 |
 | `compact_cache_bytes` | `67108864`，64 MiB | 每 worker 有界 compact 数据缓存容量，计入整体资源准入。 |
 | `metadata_cache_bytes` | `268435456`，256 MiB | 每 worker 可选 metadata LRU 容量；不能当作进程总 RSS。 |
@@ -167,6 +168,8 @@ GiB 为 `2**30` 字节；缓存参数以字节计。以下默认值对应当前�
 | `grm_file` | `None` | 显式稀疏 GRM NPZ；None 使用清单 sidecar，sparse 模式缺少二者时报错。 |
 
 本入口不接受模型族覆盖、逐表型协变量选择或额外表型来源。当前公开关联入口分别为 `run_WGS_continuous` 和 `run_WGS_all_binanry`；连续调用使用本函数，二分类接口详见 [二分类 WGS](wgs_binary.md)。
+
+跨帧只改变 Single 请求组织，保持原样本、筛选、逻辑序号、输出结构及 FP32 Score / TF32 方差。修改开关或块大小应使用新输出目录，详见[批次与恢复规则](runtime_optimization.md#可选的-single-跨帧批次合并)；共享实现的[二分类 SPA 临界值复核](runtime_optimization.md#二分类-single-的-spa-临界值复核)不用于连续表型。
 
 ## 命令行调用
 

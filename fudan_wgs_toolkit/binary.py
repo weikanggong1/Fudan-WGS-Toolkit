@@ -946,6 +946,7 @@ def staar_binary_phewas(model, genotype, maf, annotations=None, names=None, *,
 
 
 def binary_single_phewas(model, genotype, *, spa_model=None, spa_acquire=None,
+                         spa_acquire_selected=None,
                          normal_score=None, normal_variance=None,
                          normal_pvalues=None, p_filter_cutoff=.05,
                          spa_variant_tile_size=512, tol=2**-13, max_iter=1000):
@@ -962,10 +963,22 @@ def binary_single_phewas(model, genotype, *, spa_model=None, spa_acquire=None,
     SPA P=0 has no separately saved log tail in the mature solver, so it is
     marked unverified rather than assigned a finite invented value. A verified
     repository may supply a lazy ``spa_acquire`` context factory instead of a
-    sidecar; all-unselected blocks never enter that factory.
+    sidecar; all-unselected blocks never enter that factory. Alternatively,
+    ``spa_acquire_selected(count)`` receives the number of selected columns for
+    resource admission. The count comes from the same strict selection below;
+    the solver's original variant tile and arithmetic are unchanged. Provide
+    only one of ``spa_model``, ``spa_acquire`` and ``spa_acquire_selected``.
     """
     if getattr(model, "family", None) != "binomial" or getattr(model, "n_pheno", 1) != 1:
         raise ValueError("binary Single requires an independent binomial null")
+    if spa_acquire_selected is not None:
+        if spa_model is not None or spa_acquire is not None or not callable(spa_acquire_selected):
+            raise ValueError("provide one SPA sidecar or one callable SPA context factory")
+        def acquire_selected():
+            # The existing SPA context calls only after strict selection exists
+            # and is nonempty. Read its actual width without changing solver tiles.
+            return spa_acquire_selected(int(selected.sum().item()))
+        spa_acquire = acquire_selected
     use_spa = _spa_requested(model, spa_model, spa_acquire)
     if (not 0 < p_filter_cutoff <= 1 or type(spa_variant_tile_size) is not int
             or not 1 <= spa_variant_tile_size <= 512):

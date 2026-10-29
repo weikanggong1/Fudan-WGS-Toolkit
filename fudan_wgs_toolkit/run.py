@@ -688,7 +688,8 @@ def _run_wgs_binary_unlocked(phenotype_csv, covariate_csv, prepared_directory, *
                 phenotype_covariates=None, impute_missing=True, gene_variant_type="SNV",
                 covariance_block_size=4096, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
-                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                individual_effective_block_size=1024, single_cross_frame_batches=False,
+                device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
                 trait_batch_size=32,
                 grm="sparse", grm_file=None):
@@ -718,6 +719,8 @@ def _run_wgs_binary_unlocked(phenotype_csv, covariate_csv, prepared_directory, *
     Genetic preparation is never invoked by this association entry point.
     """
     chromosomes = _normalise_chromosomes(chromosomes)
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError("single_cross_frame_batches must be a boolean")
     if type(impute_missing) is not bool:
         raise ValueError("impute_missing must be a boolean")
     if type(resume) is not bool:
@@ -762,6 +765,7 @@ def _run_wgs_binary_unlocked(phenotype_csv, covariate_csv, prepared_directory, *
         long_mask_method="full", long_mask_rank=512, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
+        single_cross_frame_batches=single_cross_frame_batches,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, resume=resume, grm=grm, grm_file=grm_file,
         trait_batch_size=trait_batch_size)
@@ -837,7 +841,8 @@ def _run_wgs_association_unlocked(phenotype_csv, covariate_csv, prepared_directo
                 transform="none", null_fit_mode="fp64", gene_variant_type="SNV",
                 covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
-                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                individual_effective_block_size=1024, single_cross_frame_batches=False,
+                device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
                 gpu_ids=None, trait_batch_size=16, continuous_transform=None,
                 grm="sparse", grm_file=None, input_contract="mixed",
@@ -869,6 +874,8 @@ def _run_wgs_association_unlocked(phenotype_csv, covariate_csv, prepared_directo
     approximations; long_mask_threshold is not the default spectrum switch.
     Genetic preparation is never invoked by this association entry point.
     """
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError("single_cross_frame_batches must be a boolean")
     if input_contract not in ("mixed", "continuous"):
         raise ValueError("unknown phenotype input contract")
     if association_partition_strategy not in ("cohort_tiles", "chromosomes"):
@@ -931,6 +938,7 @@ def _run_wgs_association_unlocked(phenotype_csv, covariate_csv, prepared_directo
         long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
+        single_cross_frame_batches=single_cross_frame_batches,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, resume=resume, grm=grm, grm_file=grm_file,
         trait_batch_size=trait_batch_size, input_contract=input_contract,
@@ -1013,7 +1021,8 @@ def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, out
                 phenotype_covariates=None, impute_missing=True, gene_variant_type="SNV",
                 covariance_block_size=4096, seed=1729,
                 single_mac_cutoff=20, single_group_variants=5000, single_region_size=10_000_000,
-                individual_effective_block_size=1024, device_cache_bytes=512*2**20,
+                individual_effective_block_size=1024, single_cross_frame_batches=False,
+                device_cache_bytes=512*2**20,
                 compact_cache_bytes=64*2**20, metadata_cache_bytes=256*2**20, resume=False,
                 trait_batch_size=32,
                 grm="sparse", grm_file=None):
@@ -1042,6 +1051,8 @@ def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, out
     association operators use native FP32/TF32 with stable tail branches.
     Genetic preparation is never invoked by this association entry point.
     """
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError("single_cross_frame_batches must be a boolean")
     from .phewas_trait_csv import association_output_lease
     with association_output_lease(output_directory):
         return _run_wgs_binary_unlocked(
@@ -1065,6 +1076,7 @@ def run_WGS_all_binanry(phenotype_csv, covariate_csv, prepared_directory, *, out
             single_group_variants=single_group_variants,
             single_region_size=single_region_size,
             individual_effective_block_size=individual_effective_block_size,
+            single_cross_frame_batches=single_cross_frame_batches,
             device_cache_bytes=device_cache_bytes,
             compact_cache_bytes=compact_cache_bytes,
             metadata_cache_bytes=metadata_cache_bytes,
@@ -1105,6 +1117,8 @@ def main(argv=None):
         parser.add_argument("--"+name,type=int,default=default)
     parser.add_argument("--impute-missing", action=argparse.BooleanOptionalAction, default=True,
         help="fill binary phenotype NaNs with zero; --no-impute-missing uses observed samples per trait")
+    parser.add_argument("--single-cross-frame-batches", action=argparse.BooleanOptionalAction, default=False,
+        help="merge bounded Single requests across frames; default keeps physical-frame batches")
     parser.add_argument("--resume",action="store_true")
     parser.add_argument("--grm",choices=("sparse","none"),default="sparse")
     parser.add_argument("--grm-file",help="ID-bound sparse GRM NPZ; otherwise use the prepared dataset sidecar")

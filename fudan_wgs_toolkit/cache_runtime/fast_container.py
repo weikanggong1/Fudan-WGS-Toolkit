@@ -74,6 +74,8 @@ class Container(store.Container):
         self._closed = False
         self._streams = {}
         self._prefetch_pool = None
+        self._decode_pool = None
+        self._decode_pool_final_metrics = None
         self._prefetch_configured = False
         self._prefetch_future = None
         self._prefetch_frame = None
@@ -116,6 +118,27 @@ class Container(store.Container):
             if max_bytes:
                 from concurrent.futures import ThreadPoolExecutor
                 self._prefetch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='genetic-frame-read')
+
+    def enable_process_prefetch(self, processes, memory_bytes, temporary_directory=None):
+        """Decode immutable integer frames in bounded independent CPU workers."""
+        with self._lock:
+            if self._closed or self._prefetch_configured:
+                raise ValueError('Prefetch can only be configured once on an open reader')
+            from .frame_decode_pool import FrameDecodeProcessPool
+            self._decode_pool = FrameDecodeProcessPool(self, processes, memory_bytes, temporary_directory)
+            self._prefetch_configured = True
+
+    @property
+    def process_prefetch_enabled(self):
+        return self._decode_pool is not None
+
+    def prefetch_frames(self, frame_ids):
+        """Queue the actual upcoming frame IDs, preserving requested order."""
+        with self._lock:
+            if self._closed:
+                raise ValueError('Container is closed')
+            if self._decode_pool is not None:
+                self._decode_pool.prefetch_frames(frame_ids)
 
     def _compressed_ranges(self, frame_id):
         row = self.index[frame_id]
@@ -165,6 +188,10 @@ class Container(store.Container):
 
     @property
     def prefetch_metrics(self):
+        if self._decode_pool is not None:
+            return self._decode_pool.metadata()
+        if self._decode_pool_final_metrics is not None:
+            return self._decode_pool_final_metrics
         return dict(self._prefetch_metrics, limit_bytes=self._prefetch_limit,
                     max_pending_frames=1, cpu_only=True)
 
@@ -174,6 +201,8 @@ class Container(store.Container):
         with self._lock:
             if self._closed:
                 raise ValueError('Container is closed')
+            if self._decode_pool is not None:
+                return self._decode_pool.read_frame(frame_id)
             path = self._frame_path
             if self._prefetch_future is not None and self._prefetch_frame == frame_id:
                 future = self._prefetch_future
@@ -200,6 +229,12 @@ class Container(store.Container):
                 return
             try:
                 try:
+                    if self._decode_pool is not None:
+                        try:
+                            self._decode_pool.close()
+                        finally:
+                            self._decode_pool_final_metrics = self._decode_pool.metadata()
+                            self._decode_pool = None
                     if self._prefetch_pool is not None:
                         self._prefetch_pool.shutdown(wait=True, cancel_futures=True)
                         if self._prefetch_future is not None and not self._prefetch_future.cancelled():
@@ -222,7 +257,7 @@ class Container(store.Container):
         # Preserve an existing validation failure while still closing every FD.
         try:
             self.close()
-        except (OSError, ValueError):
+        except BaseException:
             if exc_type is None:
                 raise
         return False

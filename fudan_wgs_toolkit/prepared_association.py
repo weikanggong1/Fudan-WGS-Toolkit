@@ -176,6 +176,8 @@ def prepared_reader(reference, spec=None):
 
 def _configuration(manifest, entries, population_ids, output, options, source):
     """One bound genetic schedule shared by all phenotype models."""
+    if type(options.get('single_cross_frame_batches', False)) is not bool:
+        raise ValueError('single_cross_frame_batches must be a boolean')
     settings = run._analysis_settings(manifest)
     schedules, ordinal = [], 0
     for entry in entries:
@@ -205,12 +207,14 @@ def _configuration(manifest, entries, population_ids, output, options, source):
         options['long_mask_threshold'], options['long_mask_rank'], options['seed'],
         long_mask_method=options.get('long_mask_method', 'full'))
     analysis_options.update(variant_type=options['gene_variant_type'])
-    return dict(chromosomes=schedules, **settings, matmul_mode='tf32', analysis_options=analysis_options,
+    from .phewas_run import _legacy_single_batch_configuration
+    return _legacy_single_batch_configuration(dict(chromosomes=schedules, **settings, matmul_mode='tf32', analysis_options=analysis_options,
         resident_genotypes=True, local_mask_reuse=True, statistics_tail_optimization=True,
         weight_batch_optimization=True, stage_profile=True,
         individual_genotype_block_size=1024,
         individual_effective_block_size=options['individual_effective_block_size'],
-        source_implementation_sha256=source)
+        single_cross_frame_batches=options.get('single_cross_frame_batches', False),
+        source_implementation_sha256=source))
 
 
 def _covariate_selection(value, traits, covariates):
@@ -688,6 +692,8 @@ def _dispatch(plan, entries, resources, gpu_ids):
 def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *, output_directory,
         gpu_ids, chromosomes=None, transform='none', null_fit_mode='fp64', **options):
     """Run every independent modern trait through the shared cache backend."""
+    if type(options.get('single_cross_frame_batches', False)) is not bool:
+        raise ValueError('single_cross_frame_batches must be a boolean')
     if null_fit_mode != 'fp64':
         raise ValueError('shared prepared PheWAS null fitting requires fp64')
     from .phewas_run import _validate_host_memory_limit
@@ -786,6 +792,19 @@ def run_prepared_association(phenotype_csv, covariate_csv, prepared_directory, *
         if not options['resume']:
             raise FileExistsError('full association requires a fresh output directory; choose resume=True')
         existing = json.loads((output/'plan.private.json').read_text())
+        from .phewas_run import _legacy_single_batch_configuration
+        if (_legacy_single_batch_configuration(existing.get('configuration')) ==
+                _legacy_single_batch_configuration(plan['configuration'])):
+            # Recompute the old proof from the CURRENT complete scientific
+            # inputs/options, changing only the equivalent raw False encoding.
+            # A changed source, input, phenotype/model option or other config
+            # still fails this hash or the full immutable-plan comparison below.
+            previous_scientific = dict(scientific, configuration=existing['configuration'])
+            previous_scientific_sha = _hash(previous_scientific)
+            if previous_scientific_sha != existing.get('scientific_binding_sha256'):
+                raise ValueError('resume prepared association source/input/schedule binding differs')
+            plan['configuration'] = existing['configuration']
+            plan['scientific_binding_sha256'] = previous_scientific_sha
         resource_fields = {'host_memory_limit_gib','association_model_cache_capacity_bytes'}
         if ({key:value for key,value in existing.items() if key not in resource_fields} !=
                 {key:value for key,value in plan.items() if key not in resource_fields}):

@@ -106,7 +106,8 @@ def validate_analyses(analyses):
                    for key in ('model', 'input', 'sample_indices_file') if key in p}
     shared_keys = ('qc_path', 'annotation_catalog', 'annotation_names', 'analysis_options',
         'statistics_tail_optimization', 'local_mask_reuse',
-        'weight_batch_optimization', 'weighted_eigensolver', 'maximum_mask_variants')
+        'weight_batch_optimization', 'weighted_eigensolver', 'maximum_mask_variants',
+        'single_cross_frame_batches')
     for trait, config in enumerate(configs):
         if len(config.get('phenotypes', [])) != 1:
             raise ValueError('every analysis must contain exactly one independent phenotype')
@@ -120,9 +121,11 @@ def validate_analyses(analyses):
         obsolete = {'tf32_binned_tile_shape', 'tf32_binned_fused_small'} & config.keys()
         if obsolete:raise ValueError('TF32 reconstruction parameters are obsolete')
         for flag in ('precision_control', 'local_mask_reuse', 'weight_batch_optimization',
-                     'statistics_tail_optimization', 'stage_profile', 'validation_reference', 'require_single_continuous'):
+                     'statistics_tail_optimization', 'stage_profile', 'validation_reference', 'require_single_continuous',
+                     'single_cross_frame_batches'):
             if flag in config and type(config[flag]) is not bool:
                 raise ValueError(flag + ' must be a JSON boolean')
+        config.setdefault('single_cross_frame_batches', False)
         cli._weighted_eigensolver_settings(config, 'tf32', 'cuda:0')
         options = config.setdefault('analysis_options', {})
         if options.get('wrapper_semantics', 'base') != 'base':
@@ -1171,6 +1174,9 @@ def _pending_gene_groups(groups, writer, report, chromosome, job_index, kind, tr
 def _batched_single(groups, repository, broker, metadata, options, configuration, arguments,
                     writer, report, verified, chromosome, job_index, trait_batch_size, structural):
     first = structural
+    cross_frame = configuration.get('single_cross_frame_batches', False)
+    if type(cross_frame) is not bool:
+        raise ValueError('single_cross_frame_batches must be a JSON boolean')
     mac, subset = arguments.get('mac_cutoff', 20), arguments.get('subset_variants_num', 5000)
     start, end = arguments.get('start'), arguments.get('end')
     variant_type = arguments.get('variant_type', 'variant')
@@ -1185,6 +1191,9 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
         else:
             from ..masks import variant_filter
             selected = selected[variant_filter(first.annotations(selected, include_weights=False, metadata='mask'), variant_type)]
+    prefetch = getattr(broker, 'prefetch_variant_frames', None)
+    if callable(prefetch):
+        prefetch(selected)
     ordinals = [0]*len(groups)
     started = time.perf_counter()
     last_progress = started
@@ -1194,9 +1203,53 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
     seconds_interval = configuration.get('single_progress_seconds', 60.)
     checkpoints = bool(getattr(writer, 'checkpoint_tiles', False))
     from ..cache_runtime.single_batches import _physical_requests
-    for block_index, request in enumerate(_physical_requests(
-            broker, selected, configuration.get('individual_genotype_block_size', 1024))):
-        block_identity = hashlib.sha256(np.asarray(request, dtype='<i8').tobytes()).hexdigest()
+    block_size = configuration.get('individual_genotype_block_size', 1024)
+    threshold_recheck = None
+    if cross_frame and any(descriptor['family'] == 'binomial'
+                           for group in groups for descriptor in group['descriptors']):
+        from .single_threshold import (LegacySingleThresholdRecheck,
+            BINARY_SINGLE_THRESHOLD_POLICY, BINARY_SINGLE_THRESHOLD_RELATIVE_GUARD)
+        threshold_metrics = {}
+        threshold_recheck = LegacySingleThresholdRecheck(broker, selected,
+            genotype_block_size=block_size, mac_cutoff=mac,
+            p_filter_cutoff=options.p_filter_cutoff, metrics=threshold_metrics)
+        threshold_binding = dict(policy=BINARY_SINGLE_THRESHOLD_POLICY,
+            relative_guard=BINARY_SINGLE_THRESHOLD_RELATIVE_GUARD,
+            p_filter_cutoff=options.p_filter_cutoff, legacy_genotype_block_size=block_size,
+            original_full_trait_tile=True)
+        report['single_binary_threshold_recheck'] = dict(threshold_binding, counters=threshold_metrics,
+            replaces_only_near_boundary_normal_cells=True, new_genotype_cache=False)
+    if cross_frame:
+        # Reuse the public effective-width control without exceeding the
+        # existing raw request bound. Legacy physical requests stay untouched.
+        block_size = min(block_size, configuration.get('individual_effective_block_size', 1024))
+        from ..cache_runtime.single_batches import (CROSS_FRAME_SINGLE_POLICY,
+                                                    iter_cross_frame_requests)
+        axis_hash = hashlib.sha256(memoryview(np.asarray(selected, dtype='<i8'))).hexdigest()
+        request_binding = dict(policy=CROSS_FRAME_SINGLE_POLICY,
+            selected_axis_sha256=axis_hash, maximum_request_columns=block_size,
+            minimum_mac_bound=float(mac))
+        if threshold_recheck is not None:
+            request_binding['binary_spa_cutoff_recheck'] = threshold_binding
+        request_binding_bytes = _canonical(request_binding).encode()
+        batch_metrics = {}
+        report['single_request_batching'] = dict(request_binding, counters=batch_metrics,
+            frame_checkpoint_policy='versioned merged request; legacy keys are never reused',
+            new_genotype_cache=False)
+        requests = iter_cross_frame_requests(broker, selected, block_size,
+            minimum_mac_bound=mac, metrics=batch_metrics)
+    else:
+        # Do not normalize, prefilter, pack or relabel legacy requests. Its
+        # exact original block keys and read/write/call order remain intact.
+        requests = _physical_requests(broker, selected, block_size)
+    for block_index, request in enumerate(requests):
+        if cross_frame:
+            digest = hashlib.sha256(request_binding_bytes)
+            digest.update(b'\0')
+            digest.update(memoryview(np.asarray(request, dtype='<i8')))
+            block_identity = CROSS_FRAME_SINGLE_POLICY+':'+digest.hexdigest()
+        else:
+            block_identity = hashlib.sha256(np.asarray(request, dtype='<i8').tobytes()).hexdigest()
         cached_groups = []
         all_complete = checkpoints
         for gi, group in enumerate(groups):
@@ -1243,8 +1296,13 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                     pipelines = []
                     try:
                         from ..phewas_resources import host_output_lease_scope
+                        replay_host_scratch = 0
+                        if threshold_recheck is not None:
+                            from .single_threshold import threshold_host_scratch_bytes
+                            replay_host_scratch = threshold_host_scratch_bytes(
+                                configuration.get('individual_genotype_block_size', 1024), len(tile))
                         with host_output_lease_scope(configuration.get('_single_host_lease_factory'),
-                                rows=len(request), traits=len(tile),
+                                rows=len(request), traits=len(tile), scratch_bytes=64*1024+replay_host_scratch,
                                 chromosome_index=configuration.get('_chromosome_index', 0), job_index=job_index,
                                 on_wait=configuration.get('_batched_emit')) as output_reservation:
                             with repository.acquire([d['trait_index'] for d in tile], str(broker.device)) as models:
@@ -1287,14 +1345,15 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
                                     def correction(index, model, genotype, score, variance):
                                         from ..binary import binary_single_phewas
                                         return binary_single_phewas(model, genotype,
-                                            spa_acquire=lambda: _binary_single_spa_acquire(
+                                            spa_acquire_selected=lambda selected_count: _binary_single_spa_acquire(
                                                 repository, broker, tile[index]['trait_index'],
-                                                n=model.n, m=genotype.shape[1], q=model.x.shape[1]),
+                                                n=model.n, m=selected_count, q=model.x.shape[1]),
                                             normal_score=score, normal_variance=variance,
                                             p_filter_cutoff=options.p_filter_cutoff,
                                             tol=options.spa_tol, max_iter=options.spa_max_iter)
                                     outputs, _ = process_single_shared_genotype(pipelines, None, ordinals[gi], chromosome,
-                                        mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction)
+                                        mac, subset, prepared_state=(prepared, ordinals[gi]), binary_correction=correction,
+                                        normal_recheck=threshold_recheck)
                                 output_reservation.materialized()
                                 if checkpoints:
                                     writer.write_tile('individual', chromosome,
@@ -1324,10 +1383,14 @@ def _batched_single(groups, repository, broker, metadata, options, configuration
         frame_count += 1
         now = time.perf_counter()
         if progress and (frame_count % frame_interval == 0 or now-last_progress >= seconds_interval):
-            progress(dict(event='single_progress', job_index=job_index, physical_requests=frame_count,
+            item = dict(event='single_progress', job_index=job_index,
+                physical_requests=(batch_metrics['physical_requests_examined'] if cross_frame else frame_count),
                 elapsed_seconds=now-started, completed_rows=report['association_rows']['individual'],
                 exact_ordered_cohorts=len(groups), reader_cumulative=broker.metrics,
-                reader_metrics_scope='reader lifetime; not this job delta'))
+                reader_metrics_scope='reader lifetime; not this job delta')
+            if cross_frame:
+                item.update(compute_batches=frame_count, single_request_policy=CROSS_FRAME_SINGLE_POLICY)
+            progress(item)
             last_progress = now
 
 
@@ -2189,6 +2252,8 @@ def run_batched_configuration(configuration, *, model_repository, reader_factory
         raw_options = dict(configuration.get('analysis_options', {}))
         if raw_options.get('wrapper_semantics', 'base') != 'base':
             raise ValueError('independent batched PheWAS requires base wrapper semantics')
+        if type(configuration.get('single_cross_frame_batches', False)) is not bool:
+            raise ValueError('single_cross_frame_batches must be a JSON boolean')
         for name in ('individual_genotype_block_size', 'individual_effective_block_size'):
             value = configuration.get(name, 1024)
             if type(value) is not int or value < 1:

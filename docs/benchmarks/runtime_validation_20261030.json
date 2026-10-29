@@ -1,0 +1,245 @@
+{
+  "acceptance": {
+    "all_applicable_failure_and_unknown_columns_verified": true,
+    "all_required_independent_comparisons_verified": true,
+    "controller_actual_exit_code": 0,
+    "controller_actual_wait_and_cleanup_verified": true,
+    "input_model_source_and_output_chain_verified": true,
+    "measurement_chain_complete_verified": true,
+    "sampler_and_process_monitors_actual_exit_and_cleanup_verified": true,
+    "scientific_complete_verified": true
+  },
+  "families": {
+    "binary": {
+      "actual_worker_exit_code": 0,
+      "actual_worker_wait_and_cleanup_verified": true,
+      "all_original_tasks_and_masks_verified": true,
+      "comparisons": {
+        "preserved_same_input_baseline": {
+          "actual_exit_code": 0,
+          "actual_wait_and_cleanup_verified": true,
+          "all_applicable_failure_columns_audited": true,
+          "all_original_columns_compared": true,
+          "complete_output_comparison_verified": true,
+          "identity_order_schema_and_other_metadata_exact": true,
+          "independent_comparison_wrapper_seconds": 2291.4554675810505,
+          "invalid_numeric_cells": 0,
+          "maximum_abs_Est_difference_divided_by_each_side_Est_se": 2.026885958604812e-05,
+          "maximum_abs_Score_difference_divided_by_each_side_Score_se": 8.263411445397862e-06,
+          "maximum_abs_delta_minus_log10_p": 3.366892984502101e-05,
+          "maximum_standard_error_relative_difference": 6.0743802581505525e-06,
+          "numeric_gate_violations": 0,
+          "strict_logp_gate_passed": true,
+          "true_failure_cells": 0,
+          "unknown_failure_cells": 0,
+          "unknown_native_tail_cells": 0
+        },
+        "public_baseline": {
+          "actual_exit_code": 0,
+          "actual_wait_and_cleanup_verified": true,
+          "all_applicable_failure_columns_audited": true,
+          "all_original_columns_compared": true,
+          "complete_output_comparison_verified": true,
+          "identity_order_schema_and_other_metadata_exact": true,
+          "independent_comparison_wrapper_seconds": 2275.768730287906,
+          "invalid_numeric_cells": 0,
+          "maximum_abs_Est_difference_divided_by_each_side_Est_se": 2.026885958604812e-05,
+          "maximum_abs_Score_difference_divided_by_each_side_Score_se": 8.263411445397862e-06,
+          "maximum_abs_delta_minus_log10_p": 3.366892984502101e-05,
+          "maximum_standard_error_relative_difference": 6.0743802581505525e-06,
+          "numeric_gate_violations": 0,
+          "strict_logp_gate_passed": true,
+          "true_failure_cells": 0,
+          "unknown_failure_cells": 0,
+          "unknown_native_tail_cells": 0
+        }
+      },
+      "complete_output_SHA_CRC_rows_chain_verified": true,
+      "resources": {
+        "CPU_owned_tree_time_weighted": {
+          "coverage_fraction": 0.9925588761337983,
+          "mean_cores": 1.0951153415030261,
+          "missing_seconds": 41.60842134198174,
+          "observed_valid_seconds": 5550.076664155815
+        },
+        "GPU_owned_allocated_peak_GiB": 8.9870023727417,
+        "GPU_owned_process_SM_time_weighted": {
+          "coverage_fraction": 0.9654196869252017,
+          "mean_percent": 28.290424718156544,
+          "missing_seconds": 193.36222087219357,
+          "observed_valid_seconds": 5398.322864625603
+        },
+        "GPU_owned_reserved_peak_GiB": 19.365234375,
+        "GPU_whole_device_time_weighted": {
+          "coverage_fraction": 1.0,
+          "mean_percent": 29.75275364922173,
+          "missing_seconds": 0.0,
+          "observed_valid_seconds": 5591.6850854977965
+        },
+        "owned_peak_memory_scope": "worker lifetime, distinct from the API-window time-weighted utilization",
+        "owned_tree_sampled_PSS_peak_GiB": 5.226752281188965,
+        "sharing_observed_during_valid_intervals": true
+      },
+      "timing_seconds": {
+        "actual_worker_wrapper": 5644.693283407949,
+        "association_API": 5591.685081879841,
+        "complete_input_verification": 38.218659380916506,
+        "independent_comparisons_total_wrapper": 4567.224197868956,
+        "initialization_including_input_model_verification": 51.267411618027836,
+        "null_fit": null,
+        "resource_admission_wait": 0.03205520915798843,
+        "writer_finish_and_final_output_audit": 93.27397578209639
+      }
+    },
+    "continuous": {
+      "actual_worker_exit_code": 0,
+      "actual_worker_wait_and_cleanup_verified": true,
+      "all_original_tasks_and_masks_verified": true,
+      "comparisons": {
+        "preserved_same_input_baseline": {
+          "actual_exit_code": 0,
+          "actual_wait_and_cleanup_verified": true,
+          "all_applicable_failure_columns_audited": true,
+          "all_original_columns_compared": true,
+          "complete_output_comparison_verified": true,
+          "identity_order_schema_and_other_metadata_exact": true,
+          "independent_comparison_wrapper_seconds": 2009.6926490270998,
+          "invalid_numeric_cells": 0,
+          "maximum_abs_Est_difference_divided_by_each_side_Est_se": 0.0,
+          "maximum_abs_Score_difference_divided_by_each_side_Score_se": 0.0,
+          "maximum_abs_delta_minus_log10_p": 0.0,
+          "maximum_standard_error_relative_difference": 0.0,
+          "numeric_gate_violations": 0,
+          "strict_logp_gate_passed": true,
+          "true_failure_cells": 0,
+          "unknown_failure_cells": 0,
+          "unknown_native_tail_cells": 0
+        },
+        "public_baseline": {
+          "actual_exit_code": 0,
+          "actual_wait_and_cleanup_verified": true,
+          "all_applicable_failure_columns_audited": true,
+          "all_original_columns_compared": true,
+          "complete_output_comparison_verified": true,
+          "identity_order_schema_and_other_metadata_exact": true,
+          "independent_comparison_wrapper_seconds": 2014.9121903569903,
+          "invalid_numeric_cells": 0,
+          "maximum_abs_Est_difference_divided_by_each_side_Est_se": 0.0,
+          "maximum_abs_Score_difference_divided_by_each_side_Score_se": 0.0,
+          "maximum_abs_delta_minus_log10_p": 1.3504687830345752e-05,
+          "maximum_standard_error_relative_difference": 0.0,
+          "numeric_gate_violations": 0,
+          "strict_logp_gate_passed": true,
+          "true_failure_cells": 0,
+          "unknown_failure_cells": 0,
+          "unknown_native_tail_cells": 0
+        }
+      },
+      "complete_output_SHA_CRC_rows_chain_verified": true,
+      "resources": {
+        "CPU_owned_tree_time_weighted": {
+          "coverage_fraction": 0.9970620539503133,
+          "mean_cores": 1.1048751669783359,
+          "missing_seconds": 36.05052532325499,
+          "observed_valid_seconds": 12234.605475013843
+        },
+        "GPU_owned_allocated_peak_GiB": 14.940492153167725,
+        "GPU_owned_process_SM_time_weighted": {
+          "coverage_fraction": 0.9537759769868179,
+          "mean_percent": 53.39791299318362,
+          "missing_seconds": 567.1990853464231,
+          "observed_valid_seconds": 11703.456914990675
+        },
+        "GPU_owned_reserved_peak_GiB": 67.88671875,
+        "GPU_whole_device_time_weighted": {
+          "coverage_fraction": 0.9996236972700749,
+          "mean_percent": 55.60767694797522,
+          "missing_seconds": 4.617481350898743,
+          "observed_valid_seconds": 12266.038518986199
+        },
+        "owned_peak_memory_scope": "worker lifetime, distinct from the API-window time-weighted utilization",
+        "owned_tree_sampled_PSS_peak_GiB": 20.422356605529785,
+        "sharing_observed_during_valid_intervals": true
+      },
+      "timing_seconds": {
+        "actual_worker_wrapper": 12320.480958263157,
+        "association_API": 12270.655996660935,
+        "complete_input_verification": 38.2244422279764,
+        "independent_comparisons_total_wrapper": 4024.60483938409,
+        "initialization_including_input_model_verification": 46.564243893139064,
+        "null_fit": null,
+        "resource_admission_wait": 0.031987013993784785,
+        "writer_finish_and_final_output_audit": 74.33923437981866
+      }
+    }
+  },
+  "historical_attempts": {
+    "failures_and_partial_evidence_retained": true,
+    "past_actual_failures_rewritten": false
+  },
+  "implementation": {
+    "SPA": "original FP64",
+    "SPA_selection": "original strict nominal p < cutoff",
+    "boundary_replay": "original arithmetic order on selection-boundary values",
+    "normal_score": "native FP32",
+    "scientific_runtime_files_preserved_during_integration": true,
+    "variance_projection": "native TF32",
+    "workspace_forecast": "actual selected columns; no statistical decision change"
+  },
+  "measurement_method": {
+    "CPU_scope": "identity-bound scientific process tree including CPU preparation descendants",
+    "GPU_board_scope": "entire selected device including other processes",
+    "GPU_process_scope": "identity-bound timestamped process SM samples",
+    "allocator_peaks": "owned allocator counters, separate from device memory use",
+    "interval_handling": "original sample times, bounded hold, next sample and API boundary; overlapping segments counted once",
+    "mean_denominator": "observed valid seconds within each family association API window",
+    "missing_intervals": "unknown; never zero-filled or reconstructed",
+    "time_weighted_original_intervals_only": true
+  },
+  "performance_interpretation": {
+    "causal_speedup_claim_made": false,
+    "exclusive_resource_speedup_assessed": false,
+    "full_device_saturation_achieved": false,
+    "observed_shared_device_condition": true,
+    "performance_target_assessed": true
+  },
+  "precision_policy": {
+    "absolute_Est_difference_over_each_side_Est_se_strict": 0.0001,
+    "absolute_Score_difference_over_each_side_Score_se_strict": 0.0001,
+    "all_other_metadata_and_gene_columns_exact": true,
+    "failed_or_unknown_cells_omitted": false,
+    "mandatory_binary_SPA_selection_and_diagnostics_exact": true,
+    "standard_error_relative_to_each_side_strict": 1e-05,
+    "strict_maximum_abs_delta_minus_log10_p": 0.001,
+    "tail_or_denominator_floor_permitted": false
+  },
+  "privacy": {
+    "participant_or_sample_counts_included": false,
+    "private_paths_run_IDs_or_binding_hashes_included": false,
+    "private_phenotype_identifiers_included": false,
+    "server_resource_configuration_or_addresses_included": false,
+    "variant_or_gene_detail_tables_included": false
+  },
+  "schema": "anonymous_complete_runtime_validation_v1",
+  "scope": {
+    "API_scope": "synchronized association call including streaming, output finalization/readback and runtime cleanup; excludes resource admission and initial full-input/model checks",
+    "all_original_tasks_masks_and_columns_verified": true,
+    "analyses": [
+      "individual",
+      "coding",
+      "noncoding",
+      "ncrna"
+    ],
+    "data": "real single-autosome benchmark",
+    "null_models": "reused unchanged; no new fit",
+    "phenotype_families": [
+      "continuous",
+      "binary"
+    ],
+    "preprocessing": "not rerun",
+    "same_inputs_models_sample_order_and_precision_bound": true,
+    "timing_nesting": "input verification is included in initialization; writer finish is included in association API; nested times are not additive"
+  },
+  "status": "scientific_and_measurement_acceptance_passed",
+  "validation_record_date": "2026-10-30"
+}

@@ -189,12 +189,22 @@ def test_oversized_preparation_is_alone_and_dead_child_does_not_retry(portable, 
         # An unexpected CPU child exit breaks its executor visibly, including
         # future dispatch; it must never fall back and conceal the failure.
         pid, child = next(iter(pool._executor._processes.items()))
+        manager = pool._executor._executor_manager_thread
+        identities = list(pool.metadata()["workers"])
         import signal
+        from multiprocessing.connection import wait
         os.kill(pid, signal.SIGKILL)
-        # Establish the child exit before testing reuse, rather than racing
-        # the OS and the executor's asynchronous management thread.
-        child.join(timeout=5)
+        # The sentinel establishes OS exit without reaping a Process owned by
+        # the executor. Concurrent join()/poll() can observe ECHILD before the
+        # manager has assigned returncode, transiently making is_alive() true.
+        assert wait([child.sentinel], timeout=5) == [child.sentinel]
+        # Let the broken executor own all child joins, with a separate bounded
+        # cleanup check before observing its Process objects or testing reuse.
+        manager.join(timeout=5)
+        assert not manager.is_alive(), "broken executor did not finish child cleanup"
+        assert child.exitcode == -signal.SIGKILL
         assert not child.is_alive()
+        assert not any(_same_live_identity(value) for value in identities)
         from concurrent.futures.process import BrokenProcessPool
         for request in (requests()[0], np.array([0])):
             with pytest.raises(BrokenProcessPool):

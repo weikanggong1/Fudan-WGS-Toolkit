@@ -59,6 +59,95 @@ def _physical_requests(adapter, variants, block_size):
             yield variants[begin:begin + block_size]
 
 
+
+CROSS_FRAME_SINGLE_POLICY = 'source-upper-MAC-bounded-requests-v1'
+
+
+def iter_cross_frame_requests(adapter, variant_indices, block_size=1024, *,
+                              minimum_mac_bound=None, metrics=None):
+    """Pack ordered source-safe columns across physical frames, at most B each.
+
+    Only the exact integer upper bound already used by ``read_states`` is
+    applied: ``min(full_REF, full_called - full_REF + 1) >= minimum_mac``.
+    Every accepted request still goes through ``read_states`` and independent
+    cohort MAC/orientation/imputation. No cohort summaries or model products
+    are shared. Full-cache upper MAC may admit extra columns; it cannot remove
+    a column that the existing reader would have returned for any cohort.
+
+    Pending ownership is at most B int64 indices plus one physical request's
+    small index/summary vectors. It retains no frame exception payload, raw
+    genotype, dosage, model, output row or device tensor. A selected axis whose
+    source bound rejects every column yields one empty request so a writer can
+    persist legal zero-row coverage. A genuinely empty selected axis yields
+    nothing. Request/ordinal/checkpoint semantics are deliberately versioned
+    separately from the legacy per-frame policy by the caller.
+    """
+    from ..genotype import _indices
+    if type(block_size) is not int or block_size < 1:
+        raise ValueError('cross-frame Single block_size must be a positive integer')
+    if (minimum_mac_bound is not None and
+            (not np.isscalar(minimum_mac_bound) or not np.isfinite(minimum_mac_bound)
+             or minimum_mac_bound < 0)):
+        raise ValueError('minimum MAC must be finite and nonnegative')
+    if not callable(getattr(adapter, '_source', None)):
+        raise TypeError('cross-frame Single requires verified broker frame summaries')
+    variants = _indices(variant_indices, adapter._reader.n_variants, 'variant_indices')
+    counters = {} if metrics is None else metrics
+    for name in ('physical_requests_examined', 'planning_source_lookups',
+                 'source_bound_kept_variants', 'source_bound_rejected_variants',
+                 'emitted_batches', 'emitted_empty_batches', 'maximum_request_columns'):
+        counters.setdefault(name, 0)
+    counters.setdefault('source_planning_host_seconds', 0.)
+    pending, source = [], None
+
+    def emit(values):
+        # A bytes owner makes the published request genuinely immutable, even
+        # if the consumer retains it while the generator fills its next batch.
+        request = np.frombuffer(np.asarray(values, dtype=np.int64).tobytes(), dtype=np.int64)
+        counters['emitted_batches'] += 1
+        counters['emitted_empty_batches'] += int(not len(request))
+        counters['maximum_request_columns'] = max(counters['maximum_request_columns'], len(request))
+        return request
+
+    try:
+        for physical in _physical_requests(adapter, variants, block_size):
+            counters['physical_requests_examined'] += 1
+            began = time.perf_counter()
+            if minimum_mac_bound is None:
+                kept = physical
+            else:
+                frames = np.searchsorted(adapter._starts, physical, side='right') - 1
+                keep = np.zeros(len(physical), dtype=bool)
+                for frame in np.unique(frames):
+                    source = adapter._source(int(frame))
+                    counters['planning_source_lookups'] += 1
+                    positions = np.flatnonzero(frames == frame)
+                    columns = physical[positions] - adapter._starts[frame]
+                    upper = np.minimum(source.ref_ac[columns],
+                                       source.called[columns] - source.ref_ac[columns] + 1)
+                    keep[positions] = upper >= minimum_mac_bound
+                    source = None
+                kept = physical[keep]
+            counters['source_planning_host_seconds'] += time.perf_counter()-began
+            counters['source_bound_kept_variants'] += len(kept)
+            counters['source_bound_rejected_variants'] += len(physical)-len(kept)
+            for variant in kept:
+                pending.append(int(variant))
+                if len(pending) == block_size:
+                    request = emit(pending)
+                    pending.clear()
+                    yield request
+                    del request
+        if pending:
+            request = emit(pending)
+            pending.clear()
+            yield request
+        elif len(variants) and not counters['emitted_batches']:
+            yield emit(())
+    finally:
+        pending.clear()
+        source = None
+
 def iter_effective_minor_blocks(adapter, variant_indices, union_sample_indices,
                                 block_size=1024, *, effective_block_size=1024,
                                 device=None, minimum_mac=None, resident=True):

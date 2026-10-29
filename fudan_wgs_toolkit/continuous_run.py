@@ -120,6 +120,7 @@ def run_WGS_continuous(phenotype_csv, covariate_csv, prepared_directory, *, outp
                       long_mask_threshold=5000, long_mask_method="full", long_mask_rank=512,
                       seed=1729, single_mac_cutoff=20, single_group_variants=5000,
                       single_region_size=10_000_000, individual_effective_block_size=1024,
+                      single_cross_frame_batches=False,
                       device_cache_bytes=512*2**20, compact_cache_bytes=64*2**20,
                       metadata_cache_bytes=256*2**20, resume=False, gpu_ids=None,
                       trait_batch_size=32, grm="sparse", grm_file=None):
@@ -143,6 +144,8 @@ def run_WGS_continuous(phenotype_csv, covariate_csv, prepared_directory, *, outp
     ``long_mask_method='full'`` uses complete native FP32 spectra at every
     mask size. Genetic data preparation is never invoked here.
     """
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError("single_cross_frame_batches must be a boolean")
     from .run import _run_wgs_association
     return _run_wgs_association(
         phenotype_csv, covariate_csv, prepared_directory,
@@ -156,6 +159,7 @@ def run_WGS_continuous(phenotype_csv, covariate_csv, prepared_directory, *, outp
         single_mac_cutoff=single_mac_cutoff, single_group_variants=single_group_variants,
         single_region_size=single_region_size,
         individual_effective_block_size=individual_effective_block_size,
+        single_cross_frame_batches=single_cross_frame_batches,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, resume=resume, gpu_ids=gpu_ids,
         trait_batch_size=trait_batch_size, continuous_transform=continuous_transform,
@@ -193,6 +197,8 @@ def main(argv=None):
     parser.add_argument("--null-fit-mode", choices=("fp64", "tf32"), default="fp64")
     parser.add_argument("--gene-variant-type", choices=("SNV", "Indel", "variant"), default="SNV")
     parser.add_argument("--long-mask-method", choices=("full", "fastskat", "liu"), default="full")
+    parser.add_argument("--single-cross-frame-batches", action=argparse.BooleanOptionalAction, default=False,
+                        help="merge bounded Single requests across frames; default keeps physical-frame batches")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--grm", choices=("sparse", "none"), default="sparse")
     parser.add_argument("--grm-file")

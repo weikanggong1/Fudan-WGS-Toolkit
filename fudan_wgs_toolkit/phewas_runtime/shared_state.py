@@ -527,6 +527,17 @@ class SharedStateBroker:
         if value is not None and (not np.isscalar(value) or not np.isfinite(value) or value < 0):
             raise ValueError('minimum MAC must be finite and nonnegative')
 
+    def prefetch_variant_frames(self, variant_indices):
+        """Schedule only raw frames required by an already-selected request axis."""
+        if not getattr(self._container, 'process_prefetch_enabled', False):
+            return
+        prefetch_frames = getattr(self._container, 'prefetch_frames', None)
+        if callable(prefetch_frames):
+            variants = _indices(variant_indices, self._reader.n_variants, 'variant_indices')
+            frames = np.unique(np.searchsorted(self._starts, variants, side='right') - 1)
+            prefetch_frames([int(frame) for frame in frames
+                if int(frame) not in self._sources and int(frame) not in self._device_sources])
+
     def read_states(self, variant_indices, minimum_mac_bound=None):
         """Read bounded physical state slabs, sharing verified CSR transport.
 
@@ -549,8 +560,13 @@ class SharedStateBroker:
             self._metrics['returned_raw_variants'] += len(raw.variant_indices)
             return raw
         frames = np.searchsorted(self._starts, variants, side='right') - 1
+        needed_frames = np.unique(frames)
+        prefetch_frames = getattr(self._container, 'prefetch_frames', None)
+        if callable(prefetch_frames):
+            prefetch_frames([int(frame) for frame in needed_frames
+                if int(frame) not in self._sources and int(frame) not in self._device_sources])
         parts, positions = [], []
-        for frame in np.unique(frames):
+        for frame in needed_frames:
             source = self._source(int(frame))
             request_positions = np.flatnonzero(frames == frame)
             columns = variants[request_positions] - self._starts[frame]

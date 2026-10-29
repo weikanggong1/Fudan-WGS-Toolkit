@@ -84,6 +84,8 @@ def _process_rss(pid):
 
 _SMAPS_HEADER = re.compile(r"^([0-9a-fA-F]+)-([0-9a-fA-F]+) [r-][w-][x-][ps] "
     r"[0-9a-fA-F]+ [0-9a-fA-F]+:[0-9a-fA-F]+ [0-9]+(?:\s+.*)?$")
+_SMAPS_FIELD_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+_MEMORY_KIB = re.compile(r"\s*[0-9]+\s+kB\s*")
 _PSS_COUNTERS = frozenset(("Rss", "Pss", "SwapPss"))
 _PSS_REQUIRED = frozenset(("Rss", "Pss"))
 _SMAPS_CAPTURE_LIMIT_BYTES = 32 * 1024**2
@@ -125,7 +127,7 @@ def _capture_smaps(path):
             raise ValueError("smaps capture byte limit exceeded")
         capacity = min(capacity * 2, limit)
 def _memory_kib(tail):
-    if re.fullmatch(r"\s*[0-9]+\s+kB\s*", tail) is None:
+    if _MEMORY_KIB.fullmatch(tail) is None:
         raise ValueError("memory counter must be nonnegative integer kB")
     return int(tail.split()[0])*1024
 
@@ -138,7 +140,7 @@ def _read_rollup_pss(path):
             if _SMAPS_HEADER.fullmatch(line.rstrip("\n")) is not None:
                 continue
             key, separator, tail = line.partition(":")
-            if not separator or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*",key) is None:
+            if not separator or _SMAPS_FIELD_KEY.fullmatch(key) is None:
                 raise ValueError("invalid rollup field format")
             if separator and key in fields:
                 if key in values:
@@ -149,7 +151,7 @@ def _read_rollup_pss(path):
     return values
 
 
-def _read_smaps_pss(path):
+def _parse_smaps_lines(text):
     """Parse one bounded capture; any invalid block invalidates every total.
 
     Older kernels expose PSS only here. Each complete mapping contributes
@@ -159,9 +161,20 @@ def _read_smaps_pss(path):
     totals = dict.fromkeys(_PSS_COUNTERS,0)
     swap_complete = True
     current, previous_end, count = None,0,0
-    captured = _capture_smaps(path)
-    with io.StringIO(captured.decode("utf-8", errors="replace")) as stream:
+    with io.StringIO(text) as stream:
         for line in stream:
+            key, separator, tail = line.partition(":")
+            # The first colon of a VMA header follows its address range,
+            # permissions and offset, so its key cannot be a valid field name.
+            # Most lines are fields; avoid testing their full text as a VMA.
+            if separator and _SMAPS_FIELD_KEY.fullmatch(key) is not None:
+                if current is None:
+                    raise ValueError("invalid smaps VMA or field format")
+                if key in _PSS_COUNTERS:
+                    if key in current:
+                        raise ValueError("duplicate smaps VMA memory counter")
+                    current[key] = _memory_kib(tail)
+                continue
             header = _SMAPS_HEADER.fullmatch(line.rstrip("\n"))
             if header is not None:
                 if current is not None:
@@ -178,14 +191,7 @@ def _read_smaps_pss(path):
                 current,previous_end = {},end
                 count += 1
                 continue
-            key, separator, tail = line.partition(":")
-            if (current is None or not separator
-                    or re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*",key) is None):
-                raise ValueError("invalid smaps VMA or field format")
-            if key in _PSS_COUNTERS:
-                if key in current:
-                    raise ValueError("duplicate smaps VMA memory counter")
-                current[key] = _memory_kib(tail)
+            raise ValueError("invalid smaps VMA or field format")
     if current is None or not _PSS_REQUIRED <= current.keys():
         raise ValueError("empty or incomplete smaps memory counters")
     for key in totals:
@@ -196,6 +202,62 @@ def _read_smaps_pss(path):
     if not swap_complete:
         totals["SwapPss"] = None
     return totals,count
+
+
+# This is the original header language on one LF-delimited line. In the
+# original ``(?:\s+.*)?`` suffix, a nonempty whitespace prefix followed by
+# arbitrary non-LF text is exactly one non-LF whitespace then arbitrary text.
+# That form avoids overlapping quantified whitespace without changing its
+# language. Other header tokens are identical and delimiter-separated.
+_SMAPS_BULK_HEADER = (_SMAPS_HEADER.pattern[1:-1]
+    .replace(r"(?:\s+.*)?", r"(?:[^\S\n][^\n]*)?"))
+_SMAPS_BULK_BLOCK = re.compile(_SMAPS_BULK_HEADER + r"(?:\n|\Z)"
+    r"(?P<fields>(?:[A-Za-z][A-Za-z0-9_]*:[^\n]*(?:\n|\Z)){0,64})")
+_SMAPS_BULK_COUNTER = re.compile(r"^(Rss|Pss|SwapPss):([^\n]*)", re.MULTILINE)
+
+
+def _parse_smaps_bulk(text):
+    """Return complete totals, or None for the exact frozen-line fallback.
+
+    Blocks are matched only at the current position. Every field name and
+    every character is covered; field tails end at LF and are otherwise
+    unrestricted, as before. Delimiters make each repetition unambiguous.
+    An invalid long field/header can be scanned a constant number of times,
+    never by an unanchored retry at every offset. At most64 fields enter one
+    regex match; longer legal blocks use the same-capture line fallback, so
+    adversarial short fields cannot amplify regex repetition-state memory.
+    """
+    totals=dict.fromkeys(_PSS_COUNTERS,0)
+    position=previous_end=count=0;swap_complete=True
+    while position<len(text):
+        block=_SMAPS_BULK_BLOCK.match(text,position)
+        if block is None or block.end()<=position:return None
+        current={}
+        begin,end=block.span('fields')
+        for counter in _SMAPS_BULK_COUNTER.finditer(text,begin,end):
+            key,tail=counter.groups()
+            if key in current:return None
+            try:current[key]=_memory_kib(tail)
+            except (ValueError,OverflowError):return None
+        if not _PSS_REQUIRED<=current.keys():return None
+        try:start,finish=(int(value,16) for value in block.group(1,2))
+        except (ValueError,OverflowError):return None
+        if start<previous_end or start>=finish:return None
+        for key in totals:
+            if key in current:totals[key]+=current[key]
+            else:swap_complete=False
+        previous_end=finish;count+=1;position=block.end()
+    if count==0:return None
+    if not swap_complete:totals['SwapPss']=None
+    return totals,count
+
+
+def _read_smaps_pss(path):
+    """Fresh bounded capture, complete bulk grammar or same-capture fallback."""
+    captured=_capture_smaps(path)
+    text=captured.decode('utf-8',errors='replace')
+    result=_parse_smaps_bulk(text)
+    return _parse_smaps_lines(text) if result is None else result
 
 
 def _pss_read_error(source, error):

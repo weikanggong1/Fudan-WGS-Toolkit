@@ -760,14 +760,35 @@ def _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_b
         raise ValueError('trait_batch_size must be a positive integer')
 
 
+
+def _legacy_single_batch_configuration(configuration):
+    """Canonicalize only the known absent/False legacy Single policy.
+
+    Fresh legacy plans omit the new key, preserving their historical JSON
+    shape. Resume callers compare this view but retain the previous original
+    configuration and its checkpoint hash; no receipt is migrated. Every
+    other key/value, and the explicit True policy, remains significant.
+    """
+    if not isinstance(configuration, dict):
+        raise ValueError('association configuration must be a dictionary')
+    value = configuration.get('single_cross_frame_batches', False)
+    if type(value) is not bool:
+        raise ValueError('single_cross_frame_batches must be a boolean')
+    result = dict(configuration)
+    if not value:
+        result.pop('single_cross_frame_batches', None)
+    return result
+
 def build_configuration(cache_directory, *, chromosomes=None, maximum_single_variants=None,
                         analyses=('individual', 'coding', 'noncoding', 'ncrna'),
                         gene_variant_type='SNV', memory_limit_gib=None,
                         covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                         long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                         single_group_variants=5000, single_region_size=10_000_000,
-                        individual_effective_block_size=1024):
+                        individual_effective_block_size=1024, single_cross_frame_batches=False):
     """Build one chromosome/genetic schedule, independent of phenotype count."""
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError('single_cross_frame_batches must be a boolean')
     analyses = _selected_analyses(analyses)
     if long_mask_method not in ('full', 'fastskat', 'liu'):
         raise ValueError('long_mask_method must be full, fastskat or liu')
@@ -834,13 +855,14 @@ def build_configuration(cache_directory, *, chromosomes=None, maximum_single_var
     options = _analysis_defaults(memory_limit_gib, covariance_block_size, long_mask_threshold, long_mask_rank, seed,
                                 long_mask_method=long_mask_method)
     options.update(memory_limit_gib=memory_limit_gib, variant_type=gene_variant_type)
-    return dict(chromosomes=schedules, qc_path=manifest.get('qc_path', 'annotation/info/QC_label'),
+    return _legacy_single_batch_configuration(dict(chromosomes=schedules, qc_path=manifest.get('qc_path', 'annotation/info/QC_label'),
         annotation_catalog=catalog,
         annotation_names=manifest.get('annotation_names'),
         matmul_mode='tf32', analysis_options=options, resident_genotypes=True,
         local_mask_reuse=True, statistics_tail_optimization=True, weight_batch_optimization=True,
         individual_effective_block_size=individual_effective_block_size, individual_genotype_block_size=1024,
-        stage_profile=True, source_implementation_sha256=_implementation_sha256())
+        single_cross_frame_batches=single_cross_frame_batches,
+        stage_profile=True, source_implementation_sha256=_implementation_sha256()))
 
 
 @contextmanager
@@ -860,7 +882,15 @@ def portable_reader(reference, spec=None):
     try:
         container = Container(directory)
         settings = reference if isinstance(reference, dict) else (spec or {})
-        container.enable_prefetch(settings.get('frame_prefetch_bytes', 64*2**20))
+        processes = settings.get('frame_prefetch_processes', 0)
+        if type(processes) is not int or not 0 <= processes <= 32:
+            raise ValueError('frame_prefetch_processes must be in 0..32')
+        if processes:
+            container.enable_process_prefetch(processes,
+                settings.get('frame_prefetch_memory_bytes', 2*2**30),
+                settings.get('frame_prefetch_directory'))
+        else:
+            container.enable_prefetch(settings.get('frame_prefetch_bytes', 64*2**20))
         if not np.array_equal(container.samples, metadata._array(metadata.manifest['source_sample_rows'])):
             raise ValueError('cache source sample rows differ from portable metadata')
         yield dict(metadata=metadata, container=container, portable_axis=True)
@@ -1596,7 +1626,7 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
                        covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                        long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                        single_group_variants=5000, single_region_size=10_000_000,
-                       individual_effective_block_size=1024,
+                       individual_effective_block_size=1024, single_cross_frame_batches=False,
                        device_cache_bytes=512*2**20, compact_cache_bytes=64*2**20,
                        metadata_cache_bytes=256*2**20, input_contract='mixed',
                        association_partition_strategy='auto'):
@@ -1617,6 +1647,8 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
     before skipping their association and recovers only uncommitted tails.
     """
     from .phewas_cache import _cache_path
+    if type(single_cross_frame_batches) is not bool:
+        raise ValueError('single_cross_frame_batches must be a boolean')
     _resource_options(memory_limit_gib, memory_reserve_gib, cpu_threads, trait_batch_size, host_memory_limit_gib)
     for name, value in dict(device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
                             metadata_cache_bytes=metadata_cache_bytes).items():
@@ -1660,7 +1692,8 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
         covariance_block_size=covariance_block_size, long_mask_threshold=long_mask_threshold,
         long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed, single_mac_cutoff=single_mac_cutoff,
         single_group_variants=single_group_variants, single_region_size=single_region_size,
-        individual_effective_block_size=individual_effective_block_size)
+        individual_effective_block_size=individual_effective_block_size,
+        single_cross_frame_batches=single_cross_frame_batches)
     if input_contract == 'continuous':
         from .continuous_run import _continuous_performance_configuration
         config = _continuous_performance_configuration(config)
@@ -1738,7 +1771,15 @@ def prepare_phewas_run(phenotype_csv, covariate_csv, cache_directory, *, output_
             default = {'rm_nan':False, 'input_contract':'mixed',
                        'binary_only':False,
                        'association_partition_strategy':'cohort_tiles'}.get(key)
-            if previous.get(key,default) != plan.get(key):
+            if key == 'configuration':
+                if (_legacy_single_batch_configuration(previous.get(key)) !=
+                        _legacy_single_batch_configuration(plan.get(key))):
+                    raise ValueError('resume plan scientific/source bindings differ; use a new output directory')
+                # A legacy missing key and explicit False execute identically,
+                # but old writers hashed their original raw JSON. Keep that
+                # exact representation rather than rewriting checkpoint proof.
+                plan[key] = previous[key]
+            elif previous.get(key,default) != plan.get(key):
                 raise ValueError('resume plan scientific/source bindings differ; use a new output directory')
         # Retain the original plan as audit evidence across resource/device changes.
         atomic_json(output/f'plan.previous.{plan["attempt_id"]}.private.json', previous)
@@ -1757,7 +1798,7 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
                covariance_block_size=4096, long_mask_threshold=5000, long_mask_method="full",
                long_mask_rank=512, seed=1729, single_mac_cutoff=20,
                single_group_variants=5000, single_region_size=10_000_000,
-               individual_effective_block_size=1024,
+               individual_effective_block_size=1024, single_cross_frame_batches=False,
                device_cache_bytes=512*2**20, compact_cache_bytes=64*2**20,
                metadata_cache_bytes=256*2**20, input_contract='mixed',
                association_partition_strategy='auto'):
@@ -1786,6 +1827,7 @@ def run_phewas(phenotype_csv, covariate_csv, cache_directory, *, output_director
         long_mask_threshold=long_mask_threshold, long_mask_method=long_mask_method, long_mask_rank=long_mask_rank, seed=seed,
         single_mac_cutoff=single_mac_cutoff, single_group_variants=single_group_variants,
         single_region_size=single_region_size, individual_effective_block_size=individual_effective_block_size,
+        single_cross_frame_batches=single_cross_frame_batches,
         device_cache_bytes=device_cache_bytes, compact_cache_bytes=compact_cache_bytes,
         metadata_cache_bytes=metadata_cache_bytes, input_contract=input_contract,
         association_partition_strategy=association_partition_strategy)
@@ -1948,6 +1990,8 @@ def main(argv=None):
                         help='fill phenotypes by default; --no-rm-nan selects available cases')
     parser.add_argument('--long-mask-method', choices=['full','fastskat','liu'], default=None,
                         help='full native FP32 spectra by default; existing plans keep their bound policy')
+    parser.add_argument('--single-cross-frame-batches', action=argparse.BooleanOptionalAction, default=None,
+                        help='merge bounded Single requests across frames; an existing plan keeps its bound policy')
     parser.add_argument('--continuous-transform', choices=['paper','none','rint'], default='paper')
     args = parser.parse_args(argv)
     if args.plan is None:
@@ -1960,11 +2004,15 @@ def main(argv=None):
                           continuous_transform=args.continuous_transform,
                           long_mask_method='full' if args.long_mask_method is None else args.long_mask_method,
                           rm_nan=True if args.rm_nan is None else args.rm_nan,
-                          host_memory_limit_gib=args.host_memory_limit_gib)
+                          host_memory_limit_gib=args.host_memory_limit_gib,
+                          single_cross_frame_batches=False if args.single_cross_frame_batches is None else args.single_cross_frame_batches)
     plan = json.loads(Path(args.plan).read_text())
     if (args.long_mask_method is not None and args.long_mask_method !=
             plan['configuration']['analysis_options'].get('long_mask_method', 'full')):
         parser.error('long_mask_method cannot change an existing prepared plan; use a new output directory')
+    if (args.single_cross_frame_batches is not None and args.single_cross_frame_batches !=
+            plan['configuration'].get('single_cross_frame_batches', False)):
+        parser.error('single_cross_frame_batches cannot change an existing prepared plan; use a new output directory')
     if args.rm_nan is not None and args.rm_nan != plan.get('rm_nan', False):
         parser.error('rm_nan cannot change an existing prepared plan; use a new output directory')
     if args.host_memory_limit_gib is not None:

@@ -248,7 +248,8 @@ if __name__ == "__main__":
 | `single_mac_cutoff` | `20` | Single 每表型的 MAC 资格阈值 |
 | `single_group_variants` | `5000` | Single 的提取 / 分组大小；不限制全部可分析变异数 |
 | `single_region_size` | `10_000_000` | Single 位置读取分区宽度，单位 bp |
-| `individual_effective_block_size` | `1024` | Single 有效变异的计算块大小 |
+| `individual_effective_block_size` | `1024` | 仅在 `single_cross_frame_batches=True` 时控制合并请求的列数上限，取与内部原始请求上限 `individual_genotype_block_size` 的较小值；公开构建器的原始上限为 `1024`。`False` 时保留原物理请求和请求检查点键。 |
+| `single_cross_frame_batches` | `False` | 布尔值。`True` 按原变异顺序跨物理帧合并有界 Single 请求；`False` 沿用原物理帧批次。CLI 为 `--single-cross-frame-batches` / `--no-single-cross-frame-batches`，省略时关闭。 |
 | `device_cache_bytes` | `536870912`（512 MiB） | 设备 reader 缓存预算，单位 bytes |
 | `compact_cache_bytes` | `67108864`（64 MiB） | compact reader 缓存预算，单位 bytes |
 | `metadata_cache_bytes` | `268435456`（256 MiB） | metadata 缓存预算，单位 bytes |
@@ -258,6 +259,8 @@ if __name__ == "__main__":
 | `grm_file` | `None` | 显式身份绑定 GRM NPZ；默认使用遗传清单声明的路径 |
 
 本入口固定为二分类，不接受表型家族映射、连续转换或谱近似方法参数。`impute_missing` 是该入口的缺失策略参数。
+
+跨帧策略与实际请求上限参与恢复绑定；修改开关或块大小应使用新输出目录，详见[Single 跨帧批次](runtime_optimization.md#可选的-single-跨帧批次合并)。[SPA 临界值复核](runtime_optimization.md#二分类-single-的-spa-临界值复核)只触发原几何重算；默认仍严格按 `nominal_p < 0.05` 选择 SPA，保持 FP32 Score、TF32 方差与 FP64 SPA。 [选定列 SPA 工作区](runtime_optimization.md#二分类-single-的选定列-spa-工作区)按已计算的实际选中列数准入临时空间，拟合状态单独预算；原工作区下限、显存上限、安全余量与 pin 保护保持不变。
 
 ## 命令行调用
 
